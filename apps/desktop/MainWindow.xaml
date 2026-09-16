@@ -1,0 +1,68 @@
+<Window
+    x:Class="AnswerSheet.Desktop.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AnswerSheet.Desktop"
+    Title="答题纸本地服务 - M0">
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <Grid x:Name="RootLayout" Padding="24" RowSpacing="16" RowDefinitions="Auto,Auto,*,Auto" SizeChanged="RootLayout_SizeChanged">
+        <StackPanel Spacing="4">
+            <TextBlock Text="答题纸本地服务" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+            <TextBlock Text="M0 技术验证：可枚举设备，并只扫描用户明确放置的单张测试纸。" TextWrapping="Wrap" />
+        </StackPanel>
+
+        <Border Grid.Row="1" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <Grid ColumnSpacing="16" ColumnDefinitions="Auto,*">
+                <SymbolIcon Symbol="Link" VerticalAlignment="Center" />
+                <StackPanel Grid.Column="1" Spacing="2">
+                    <TextBlock Text="本地连接状态" FontWeight="SemiBold" />
+                    <TextBlock x:Name="ConnectionStatusText" Text="正在启动本地连接服务。" TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="2" RowSpacing="12" RowDefinitions="Auto,*">
+            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="12" RowSpacing="8">
+                <StackPanel x:Name="DeviceHeading" Grid.ColumnSpan="2" Spacing="2">
+                    <TextBlock Text="已发现的扫描设备" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="DeviceStatusText" Text="分别尝试 WIA 与 TWAIN；同一设备可能以两种驱动出现。" TextWrapping="Wrap" />
+                </StackPanel>
+                <StackPanel x:Name="DeviceActions" Grid.Row="1" Grid.ColumnSpan="2" Orientation="Vertical" Spacing="8">
+                    <Button x:Name="RefreshButton" HorizontalAlignment="Stretch" Click="RefreshButton_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <SymbolIcon Symbol="Refresh" />
+                            <TextBlock Text="刷新设备" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="ScanButton" HorizontalAlignment="Stretch" IsEnabled="False" Click="ScanButton_Click">
+                        <TextBlock Text="扫描测试纸" TextWrapping="Wrap" />
+                    </Button>
+                    <Button x:Name="CancelScanButton" HorizontalAlignment="Stretch" IsEnabled="False" Click="CancelScanButton_Click">
+                        <TextBlock Text="取消扫描" TextWrapping="Wrap" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid Grid.Row="1">
+                <ListView x:Name="DeviceList" SelectionMode="Single" SelectionChanged="DeviceList_SelectionChanged">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:ScannerDeviceItem">
+                            <Grid Padding="8" ColumnSpacing="12" ColumnDefinitions="Auto,*,Auto">
+                                <TextBlock Text="{x:Bind Driver}" FontWeight="SemiBold" />
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Text="{x:Bind Name}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="2" Text="已发现" VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <ProgressRing x:Name="LoadingRing" IsActive="False" Visibility="Collapsed" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+        </Grid>
+
+        <InfoBar Grid.Row="3" IsOpen="True" IsClosable="False" Severity="Informational" Title="测试范围" Message="测试扫描只读取选中设备平板上的首张测试纸，不提供设备网页接口、批量扫描或自动进纸。" />
+        </Grid>
+    </ScrollViewer>
+</Window>

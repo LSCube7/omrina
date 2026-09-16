@@ -1,0 +1,9 @@
+.tools/
+**/bin/
+**/obj/
+node_modules/
+artifacts/
+.vs/
+*.user
+.env
+.env.*
