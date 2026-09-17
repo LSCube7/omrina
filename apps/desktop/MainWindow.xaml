@@ -10,6 +10,9 @@
         <StackPanel Spacing="4">
             <TextBlock Text="答题纸本地服务" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
             <TextBlock Text="M0 技术验证：可枚举设备，并只扫描用户明确放置的单张测试纸。" TextWrapping="Wrap" />
+            <Button HorizontalAlignment="Left" Click="TemplateButton_Click">
+                <TextBlock Text="新建答题纸模板" />
+            </Button>
         </StackPanel>
 
         <Border Grid.Row="1" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">

@@ -27,6 +27,14 @@ dotnet build .\apps\desktop\AnswerSheet.Desktop.csproj --no-restore
 
 当前项目设置为 `WindowsPackageType=None`，便于 M0 先验证 WinUI 与设备驱动。它运行时需要 Windows App Runtime；正式安装包方式将在后续阶段单独确定。
 
+## M1 模板预览与 SVG 导出
+
+主窗口的“新建答题纸模板”入口会打开模板窗口。窗口支持标题、题数和每题选项数输入，使用 `AnswerSheet.Core` 的同一份毫米几何生成 A4 预览；标题最多 24 个 Unicode 字符，题数为 1–44，每题选项数为 2–6。参数修改后当前预览会失效，重新生成后才可保存。
+
+“保存 SVG”使用 `FileSavePicker` 选择目标文件，并通过 `FileIO.WriteTextAsync` 写入 Core 导出的 SVG。预览缩放只影响屏幕显示，导出的纸张尺寸仍为 210mm × 297mm，不依赖显示器 DPI。
+
+当前验证已确认默认 20 题、每题 4 个选项的预览、参数变化后的保存按钮状态、重新生成后的更新状态和文件保存对话框可以打开；Core 与 Desktop x64 `--no-restore` 构建均为 0 警告、0 错误。真实写入和取消保存尚未完成，打印、图像导入和采集闭环也尚未实现。
+
 ## 本地健康检查
 
 启动应用后，本地服务只在 `127.0.0.1:17843` 监听，且只提供 `GET /health`：

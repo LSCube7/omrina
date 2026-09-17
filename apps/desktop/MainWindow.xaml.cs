@@ -12,6 +12,7 @@ public sealed partial class MainWindow : Window
     private readonly ScanningContext _scanningContext;
     private readonly ScanController _scanController;
     private readonly ObservableCollection<ScannerDeviceItem> _devices = [];
+    private TemplateWindow? _templateWindow;
     private bool _enumerationInProgress;
     private bool _scanInProgress;
     private bool _isClosed;
@@ -43,6 +44,19 @@ public sealed partial class MainWindow : Window
         DeviceActions.HorizontalAlignment = useWideLayout
             ? HorizontalAlignment.Right
             : HorizontalAlignment.Stretch;
+    }
+
+    private void TemplateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_templateWindow is not null)
+        {
+            _templateWindow.Activate();
+            return;
+        }
+
+        _templateWindow = new TemplateWindow();
+        _templateWindow.Closed += (_, _) => _templateWindow = null;
+        _templateWindow.Activate();
     }
 
     public async Task StartHealthServerAsync()

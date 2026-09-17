@@ -42,6 +42,13 @@
 - 只读检查已确认 runtimeconfig 要求 `Microsoft.NETCore.App` 与 `Microsoft.AspNetCore.App` 10.0.0，系统已安装相应的 10.0.12 运行时；应用宿主、主 DLL、Windows App Runtime Bootstrap 与 NAPS2 Worker 均存在于 x64 输出目录。此前沙箱内 GUI 进程启动失败不能作为运行时缺失的证据。
 - 2026-09-16 再次启动桌面应用并运行健康检查集成测试，固定响应、外部 Origin 拒绝、`Origin: null` 返回 403、未知路径 404 与 `POST /health` 返回 405 均通过。
 
+## 2026-09-17 M1 模板 UI 最新验证
+
+- `AnswerSheet.Desktop.csproj` 已引用无第三方包依赖的 `AnswerSheet.Core`。使用本地恢复结果执行 `dotnet build apps/desktop/AnswerSheet.Desktop.csproj --no-restore -p:Platform=x64`，Core 与 Desktop x64 Debug 均构建成功，0 个警告、0 个错误。
+- 主代理前一轮在实际 WinUI 窗口确认：默认 20 题、每题 4 个选项的模板预览可生成；标题改为“M1 验证答题纸”后保存按钮禁用；重新生成后标题更新且保存按钮恢复可用；`FileSavePicker` 能实际打开。
+- 保存实现已改为 `FileIO.WriteTextAsync`，并通过上述桌面编译；本轮真实写入和取消保存尚未完成。启动最新可执行文件后，Computer Use 在点击“新建答题纸模板”时返回 `coordinate input geometry is unavailable`，随后重新激活又检测到用户输入，因而没有继续点击、没有强杀进程，也没有宣称生成 UI 保存文件。
+- M0 的 HTTPS / WebSocket 浏览器连接仍未完成；M1 的实体打印、比例测量和图像导入/采集闭环仍未实现。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
