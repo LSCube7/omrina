@@ -25,6 +25,12 @@
                 <Button x:Name="SaveSvgButton" Click="SaveSvgButton_Click">
                     <TextBlock Text="保存 SVG" />
                 </Button>
+                <Button x:Name="PrintButton" Click="PrintButton_Click">
+                    <TextBlock Text="系统打印" />
+                </Button>
+                <Button x:Name="ImportButton" Click="ImportButton_Click">
+                    <TextBlock Text="导入图像" />
+                </Button>
             </StackPanel>
 
             <TextBlock x:Name="TemplateStatusText" Text="填写参数后生成预览。" TextWrapping="Wrap" />

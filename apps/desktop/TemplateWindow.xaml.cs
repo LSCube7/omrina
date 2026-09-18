@@ -1,11 +1,6 @@
 using AnswerSheet.Core;
-using Microsoft.UI;
-using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Shapes;
-using System.Globalization;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 
@@ -14,15 +9,29 @@ namespace AnswerSheet.Desktop;
 public sealed partial class TemplateWindow : Window
 {
     private const double PreviewScale = 2;
-    private static readonly SolidColorBrush BlackBrush = new(Colors.Black);
-    private static readonly SolidColorBrush WhiteBrush = new(Colors.White);
     private AnswerSheetLayout? _layout;
+    private TemplatePrintController? _printController;
+    private CaptureWindow? _captureWindow;
     private bool _previewMatchesInputs;
+    private bool _printUiLocked;
 
     public TemplateWindow()
     {
         InitializeComponent();
         SaveSvgButton.IsEnabled = false;
+        PrintButton.IsEnabled = false;
+        ImportButton.IsEnabled = false;
+        try
+        {
+            _printController = new TemplatePrintController(this, SetStatus);
+        }
+        catch (Exception exception)
+        {
+            var rootCause = exception.GetBaseException();
+            SetStatus($"系统打印不可用：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。");
+        }
+
+        Closed += TemplateWindow_Closed;
         GenerateLayout();
     }
 
@@ -56,16 +65,20 @@ public sealed partial class TemplateWindow : Window
             _layout = layout;
             _previewMatchesInputs = true;
             SaveSvgButton.IsEnabled = true;
-            TemplateStatusText.Text = $"已生成 {layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项的 A4 模板。";
+            PrintButton.IsEnabled = _printController is not null && !_printController.IsBusy;
+            ImportButton.IsEnabled = true;
+            SetStatus($"已生成 {layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项的 A4 模板。编号：{layout.TemplateNumber}。");
         }
         catch (Exception exception)
         {
             _layout = null;
             _previewMatchesInputs = false;
             SaveSvgButton.IsEnabled = false;
+            PrintButton.IsEnabled = false;
+            ImportButton.IsEnabled = false;
             PreviewCanvas.Children.Clear();
             var rootCause = exception.GetBaseException();
-            TemplateStatusText.Text = $"模板生成失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请检查标题、题数和选项数。";
+            SetStatus($"模板生成失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请检查标题、题数和选项数。");
         }
         finally
         {
@@ -119,102 +132,61 @@ public sealed partial class TemplateWindow : Window
         }
     }
 
-    private void RenderLayout(AnswerSheetLayout layout)
+    private async void PrintButton_Click(object sender, RoutedEventArgs e)
     {
-        PreviewCanvas.Children.Clear();
-        PreviewCanvas.Width = AnswerSheetLayout.PageWidthMm * PreviewScale;
-        PreviewCanvas.Height = AnswerSheetLayout.PageHeightMm * PreviewScale;
-
-        AddShape(new Rectangle
+        if (_layout is null || !_previewMatchesInputs || _printController is null)
         {
-            Width = PreviewCanvas.Width,
-            Height = PreviewCanvas.Height,
-            Fill = WhiteBrush,
-            Stroke = BlackBrush,
-            StrokeThickness = 1
-        }, 0, 0);
-
-        foreach (var mark in layout.RegistrationMarks)
-        {
-            AddShape(new Rectangle
-            {
-                Width = mark.SizeMm * PreviewScale,
-                Height = mark.SizeMm * PreviewScale,
-                Fill = BlackBrush
-            }, mark.TopLeft.X * PreviewScale, mark.TopLeft.Y * PreviewScale);
+            SetStatus("参数已变更或系统打印不可用，请先生成预览后再试。");
+            return;
         }
 
-        AddText(layout.Title, 0, 20, AnswerSheetLayout.PageWidthMm, 8, TextAlignment.Center, bold: true);
-        AddText("每题请选择一个选项", 0, 33, AnswerSheetLayout.PageWidthMm, 3.5, TextAlignment.Center);
-
-        foreach (var header in layout.OptionHeaders)
+        var layout = _layout;
+        _printUiLocked = true;
+        SetControlsEnabled(false);
+        try
         {
-            AddText(
-                header.OptionLabel,
-                header.Position.X - 5,
-                header.Position.Y - 3,
-                10,
-                3.5,
-                TextAlignment.Center);
+            await _printController.RequestPrintAsync(layout);
         }
-
-        foreach (var question in layout.Questions)
+        catch (Exception exception)
         {
-            AddText(
-                question.Number.ToString(CultureInfo.InvariantCulture),
-                question.NumberPosition.X,
-                question.NumberPosition.Y - 4.5,
-                20,
-                4.5,
-                TextAlignment.Left);
-
-            foreach (var bubble in question.Bubbles)
+            var rootCause = exception.GetBaseException();
+            SetStatus($"无法打开系统打印：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请检查打印机后重试。");
+        }
+        finally
+        {
+            if (ReferenceEquals(_layout, layout)
+                && _previewMatchesInputs
+                && (_printController is null || !_printController.IsBusy))
             {
-                var diameter = bubble.RadiusMm * 2 * PreviewScale;
-                AddShape(new Ellipse
-                {
-                    Width = diameter,
-                    Height = diameter,
-                    Fill = WhiteBrush,
-                    Stroke = BlackBrush,
-                    StrokeThickness = 1
-                },
-                (bubble.Center.X - bubble.RadiusMm) * PreviewScale,
-                (bubble.Center.Y - bubble.RadiusMm) * PreviewScale);
+                _printUiLocked = false;
+                SetControlsEnabled(true);
             }
         }
     }
 
-    private void AddText(
-        string text,
-        double leftMm,
-        double topMm,
-        double widthMm,
-        double fontSizeMm,
-        TextAlignment alignment,
-        bool bold = false)
+    private void ImportButton_Click(object sender, RoutedEventArgs e)
     {
-        var textBlock = new TextBlock
+        if (_layout is null || !_previewMatchesInputs)
         {
-            Text = text,
-            Width = widthMm * PreviewScale,
-            FontSize = fontSizeMm * PreviewScale,
-            FontFamily = new FontFamily("Arial"),
-            FontWeight = bold ? FontWeights.Bold : FontWeights.Normal,
-            Foreground = BlackBrush,
-            TextAlignment = alignment,
-            TextWrapping = TextWrapping.NoWrap
-        };
-        PreviewCanvas.Children.Add(textBlock);
-        Canvas.SetLeft(textBlock, leftMm * PreviewScale);
-        Canvas.SetTop(textBlock, topMm * PreviewScale);
+            SetStatus("参数已变更，请先重新生成预览后再导入图像。");
+            return;
+        }
+
+        if (_captureWindow is not null)
+        {
+            _captureWindow.Activate();
+            return;
+        }
+
+        var captureWindow = new CaptureWindow(_layout);
+        _captureWindow = captureWindow;
+        captureWindow.Closed += CaptureWindow_Closed;
+        captureWindow.Activate();
     }
 
-    private void AddShape(Shape shape, double left, double top)
+    private void RenderLayout(AnswerSheetLayout layout)
     {
-        PreviewCanvas.Children.Add(shape);
-        Canvas.SetLeft(shape, left);
-        Canvas.SetTop(shape, top);
+        TemplateRenderer.Render(layout, PreviewCanvas, PreviewScale, showPageOutline: true);
     }
 
     private static int ReadInteger(NumberBox numberBox, string name)
@@ -238,6 +210,49 @@ public sealed partial class TemplateWindow : Window
 
         _previewMatchesInputs = false;
         SaveSvgButton.IsEnabled = false;
-        TemplateStatusText.Text = "参数已变更，请重新生成预览。";
+        PrintButton.IsEnabled = false;
+        ImportButton.IsEnabled = false;
+        SetStatus("参数已变更，请重新生成预览。");
+    }
+
+    private void TemplateWindow_Closed(object sender, WindowEventArgs args)
+    {
+        _printController?.Dispose();
+        _printController = null;
+        _captureWindow?.Close();
+        _captureWindow = null;
+    }
+
+    private void SetControlsEnabled(bool enabled)
+    {
+        TitleBox.IsEnabled = enabled;
+        QuestionCountBox.IsEnabled = enabled;
+        OptionsPerQuestionBox.IsEnabled = enabled;
+        GenerateButton.IsEnabled = enabled;
+        SaveSvgButton.IsEnabled = enabled && _layout is not null && _previewMatchesInputs;
+        PrintButton.IsEnabled = enabled
+            && _layout is not null
+            && _previewMatchesInputs
+            && _printController is not null
+            && !_printController.IsBusy;
+        ImportButton.IsEnabled = enabled && _layout is not null && _previewMatchesInputs;
+    }
+
+    private void SetStatus(string message)
+    {
+        TemplateStatusText.Text = message;
+        if (_printUiLocked && (_printController is null || !_printController.IsBusy))
+        {
+            _printUiLocked = false;
+            SetControlsEnabled(true);
+        }
+    }
+
+    private void CaptureWindow_Closed(object sender, WindowEventArgs args)
+    {
+        if (ReferenceEquals(_captureWindow, sender))
+        {
+            _captureWindow = null;
+        }
     }
 }
