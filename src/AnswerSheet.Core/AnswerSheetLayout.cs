@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
 
@@ -10,6 +11,9 @@ public readonly record struct PointMm(double X, double Y);
 
 /// <summary>A square registration mark measured in millimetres.</summary>
 public sealed record RegistrationMark(string Id, PointMm TopLeft, double SizeMm);
+
+/// <summary>A rectangular asymmetric marker placed near the top edge to identify page orientation.</summary>
+public sealed record OrientationMarker(string Id, PointMm TopLeft, double WidthMm, double HeightMm);
 
 /// <summary>The printed option label position for one page column.</summary>
 public sealed record OptionHeader(
@@ -78,21 +82,33 @@ public sealed class AnswerSheetLayout
     public const double BubbleRadiusMm = 3;
     public const double BubblePitchMm = 11;
     public const double QuestionRowHeightMm = 10;
+    public const int TemplateSchemaVersion = 1;
 
     private const double RegistrationMarkInsetMm = 10;
+    private const double OrientationMarkerTopMm = 10;
+    private const double OrientationMarkerWidthMm = 4;
+    private const double OrientationMarkerHeightMm = 4;
     private const double QuestionAreaTopMm = 52;
     private const double QuestionAreaBottomMm = 275;
     private const double QuestionColumnLeftMm = 14;
     private const double QuestionColumnPitchMm = 92;
     private const double BubbleStartOffsetMm = 32;
     private const double OptionHeaderYMm = 48;
+    private const double TemplateNumberYMm = 21;
+    internal const double TemplateNumberFontSizeMm = 3.5;
+    internal const double TitleYMm = 29;
+    internal const double TitleFontSizeMm = 8;
 
     private AnswerSheetLayout(
         string title,
         int questionCount,
         int optionsPerQuestion,
+        string templateId,
+        string templateNumber,
+        PointMm templateNumberPosition,
         int rowsPerColumn,
         IReadOnlyList<RegistrationMark> registrationMarks,
+        OrientationMarker orientationMarker,
         IReadOnlyList<OptionHeader> optionHeaders,
         IReadOnlyList<QuestionGeometry> questions,
         IReadOnlyList<AnswerBubble> bubbles)
@@ -100,8 +116,12 @@ public sealed class AnswerSheetLayout
         Title = title;
         QuestionCount = questionCount;
         OptionsPerQuestion = optionsPerQuestion;
+        TemplateId = templateId;
+        TemplateNumber = templateNumber;
+        TemplateNumberPosition = templateNumberPosition;
         RowsPerColumn = rowsPerColumn;
         RegistrationMarks = registrationMarks;
+        OrientationMarker = orientationMarker;
         OptionHeaders = optionHeaders;
         Questions = questions;
         Bubbles = bubbles;
@@ -113,10 +133,28 @@ public sealed class AnswerSheetLayout
 
     public int OptionsPerQuestion { get; }
 
+    /// <summary>
+    /// Stable SHA-256 identity of the schema version and normalized template parameters.
+    /// The complete lowercase hexadecimal value is intended for manifest association.
+    /// </summary>
+    public string TemplateId { get; }
+
+    /// <summary>A short human-readable number printed in the page header.</summary>
+    public string TemplateNumber { get; }
+
+    /// <summary>The centered baseline position of <see cref="TemplateNumber" />.</summary>
+    public PointMm TemplateNumberPosition { get; }
+
     /// <summary>The number of questions that fit in each page column.</summary>
     public int RowsPerColumn { get; }
 
     public IReadOnlyList<RegistrationMark> RegistrationMarks { get; }
+
+    /// <summary>
+    /// The asymmetric top marker used to distinguish the page's upright orientation.
+    /// Its rectangle is separate from the four registration marks and answer bubbles.
+    /// </summary>
+    public OrientationMarker OrientationMarker { get; }
 
     /// <summary>Printed A-F labels shown once above each active question column.</summary>
     public IReadOnlyList<OptionHeader> OptionHeaders { get; }
@@ -136,7 +174,7 @@ public sealed class AnswerSheetLayout
     /// <summary>Builds deterministic A4 geometry for a multiple-choice answer sheet.</summary>
     public static AnswerSheetLayout Create(string title, int questionCount, int optionsPerQuestion)
     {
-        ValidateTitle(title);
+        var normalizedTitle = NormalizeAndValidateTitle(title);
 
         if (questionCount <= 0)
         {
@@ -159,6 +197,9 @@ public sealed class AnswerSheetLayout
         }
 
         var registrationMarks = CreateRegistrationMarks();
+        var orientationMarker = CreateOrientationMarker();
+        var templateNumberPosition = new PointMm(PageWidthMm / 2, TemplateNumberYMm);
+        EnsurePointInsidePage(templateNumberPosition, "Template number");
         var activeColumnCount = (questionCount + rowsPerColumn - 1) / rowsPerColumn;
         var optionHeaders = CreateOptionHeaders(activeColumnCount, optionsPerQuestion);
         var questions = new List<QuestionGeometry>(questionCount);
@@ -200,13 +241,26 @@ public sealed class AnswerSheetLayout
         }
 
         ValidateBubbleSpacing(bubbles);
+        ValidateOrientationMarker(
+            orientationMarker,
+            registrationMarks,
+            templateNumberPosition,
+            optionHeaders,
+            bubbles);
+
+        var templateId = CreateTemplateId(normalizedTitle, questionCount, optionsPerQuestion);
+        var templateNumber = CreateTemplateNumber(templateId, questionCount, optionsPerQuestion);
 
         return new AnswerSheetLayout(
-            title,
+            normalizedTitle,
             questionCount,
             optionsPerQuestion,
+            templateId,
+            templateNumber,
+            templateNumberPosition,
             rowsPerColumn,
             ReadOnly(registrationMarks),
+            orientationMarker,
             ReadOnly(optionHeaders),
             ReadOnly(questions),
             ReadOnly(bubbles));
@@ -246,6 +300,17 @@ public sealed class AnswerSheetLayout
         return marks;
     }
 
+    private static OrientationMarker CreateOrientationMarker()
+    {
+        var marker = new OrientationMarker(
+            "orientation-top",
+            new PointMm((PageWidthMm - OrientationMarkerWidthMm) / 2, OrientationMarkerTopMm),
+            OrientationMarkerWidthMm,
+            OrientationMarkerHeightMm);
+        EnsureRectangleInsidePage(marker.TopLeft, marker.WidthMm, marker.HeightMm, marker.Id);
+        return marker;
+    }
+
     private static List<OptionHeader> CreateOptionHeaders(int activeColumnCount, int optionsPerQuestion)
     {
         var headers = new List<OptionHeader>(activeColumnCount * optionsPerQuestion);
@@ -265,7 +330,7 @@ public sealed class AnswerSheetLayout
         return headers;
     }
 
-    private static void ValidateTitle(string title)
+    private static string NormalizeAndValidateTitle(string title)
     {
         ArgumentNullException.ThrowIfNull(title);
         if (string.IsNullOrWhiteSpace(title))
@@ -287,7 +352,17 @@ public sealed class AnswerSheetLayout
             throw new ArgumentException("Title contains characters that are not valid in XML.", nameof(title), exception);
         }
 
-        var titleCharacterCount = title.EnumerateRunes().Count();
+        var normalizedTitle = title.Normalize(NormalizationForm.FormC);
+        try
+        {
+            XmlConvert.VerifyXmlChars(normalizedTitle);
+        }
+        catch (XmlException exception)
+        {
+            throw new ArgumentException("Title contains characters that are not valid in XML.", nameof(title), exception);
+        }
+
+        var titleCharacterCount = normalizedTitle.EnumerateRunes().Count();
         if (titleCharacterCount > MaxTitleCharacters)
         {
             throw new ArgumentOutOfRangeException(
@@ -295,6 +370,8 @@ public sealed class AnswerSheetLayout
                 title,
                 $"Title must contain at most {MaxTitleCharacters} Unicode characters.");
         }
+
+        return normalizedTitle;
     }
 
     private static void ValidateOptionsPerQuestion(int optionsPerQuestion)
@@ -327,6 +404,116 @@ public sealed class AnswerSheetLayout
         {
             throw new InvalidOperationException($"{description} is outside the A4 page.");
         }
+    }
+
+    private static void EnsureRectangleInsidePage(PointMm topLeft, double width, double height, string description)
+    {
+        if (width <= 0
+            || height <= 0
+            || topLeft.X < 0
+            || topLeft.Y < 0
+            || topLeft.X + width > PageWidthMm
+            || topLeft.Y + height > PageHeightMm)
+        {
+            throw new InvalidOperationException($"{description} is outside the A4 page.");
+        }
+    }
+
+    private static void ValidateOrientationMarker(
+        OrientationMarker marker,
+        IReadOnlyList<RegistrationMark> registrationMarks,
+        PointMm templateNumberPosition,
+        IReadOnlyList<OptionHeader> optionHeaders,
+        IReadOnlyList<AnswerBubble> bubbles)
+    {
+        EnsureRectangleInsidePage(marker.TopLeft, marker.WidthMm, marker.HeightMm, $"Orientation marker '{marker.Id}'");
+
+        foreach (var registrationMark in registrationMarks)
+        {
+            if (RectanglesOverlap(
+                marker.TopLeft,
+                marker.WidthMm,
+                marker.HeightMm,
+                registrationMark.TopLeft,
+                registrationMark.SizeMm,
+                registrationMark.SizeMm))
+            {
+                throw new InvalidOperationException(
+                    $"Orientation marker '{marker.Id}' overlaps registration mark '{registrationMark.Id}'.");
+            }
+        }
+
+        foreach (var bubble in bubbles)
+        {
+            if (CircleIntersectsRectangle(bubble.Center, bubble.RadiusMm, marker.TopLeft, marker.WidthMm, marker.HeightMm))
+            {
+                throw new InvalidOperationException(
+                    $"Orientation marker '{marker.Id}' overlaps bubble {bubble.QuestionNumber}/{bubble.OptionLabel}.");
+            }
+        }
+
+        if (marker.TopLeft.Y + marker.HeightMm >= templateNumberPosition.Y - TemplateNumberFontSizeMm)
+        {
+            throw new InvalidOperationException($"Orientation marker '{marker.Id}' overlaps the template number.");
+        }
+
+        if (marker.TopLeft.Y + marker.HeightMm >= TitleYMm - TitleFontSizeMm)
+        {
+            throw new InvalidOperationException($"Orientation marker '{marker.Id}' overlaps the title.");
+        }
+
+        foreach (var header in optionHeaders)
+        {
+            if (marker.TopLeft.Y + marker.HeightMm >= header.Position.Y - TemplateNumberFontSizeMm)
+            {
+                throw new InvalidOperationException(
+                    $"Orientation marker '{marker.Id}' overlaps option header {header.Column}/{header.OptionIndex}.");
+            }
+        }
+    }
+
+    private static bool RectanglesOverlap(
+        PointMm firstTopLeft,
+        double firstWidth,
+        double firstHeight,
+        PointMm secondTopLeft,
+        double secondWidth,
+        double secondHeight)
+    {
+        return firstTopLeft.X < secondTopLeft.X + secondWidth
+            && firstTopLeft.X + firstWidth > secondTopLeft.X
+            && firstTopLeft.Y < secondTopLeft.Y + secondHeight
+            && firstTopLeft.Y + firstHeight > secondTopLeft.Y;
+    }
+
+    private static bool CircleIntersectsRectangle(
+        PointMm center,
+        double radius,
+        PointMm rectangleTopLeft,
+        double rectangleWidth,
+        double rectangleHeight)
+    {
+        var nearestX = Math.Clamp(center.X, rectangleTopLeft.X, rectangleTopLeft.X + rectangleWidth);
+        var nearestY = Math.Clamp(center.Y, rectangleTopLeft.Y, rectangleTopLeft.Y + rectangleHeight);
+        var deltaX = center.X - nearestX;
+        var deltaY = center.Y - nearestY;
+        return deltaX * deltaX + deltaY * deltaY <= radius * radius;
+    }
+
+    private static string CreateTemplateId(string normalizedTitle, int questionCount, int optionsPerQuestion)
+    {
+        var canonical = string.Create(
+            CultureInfo.InvariantCulture,
+            $"answersheet-template|schema:{TemplateSchemaVersion}|title:{normalizedTitle.EnumerateRunes().Count()}:{normalizedTitle}|questions:{questionCount}|options:{optionsPerQuestion}");
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string CreateTemplateNumber(string templateId, int questionCount, int optionsPerQuestion)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"AS{TemplateSchemaVersion}-{questionCount:D2}x{optionsPerQuestion}-{templateId[..8].ToUpperInvariant()}");
     }
 
     private static void ValidateBubbleSpacing(IReadOnlyList<AnswerBubble> bubbles)
@@ -373,6 +560,19 @@ public static class SvgTemplateExporter
         svg.AppendLine(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"210mm\" height=\"297mm\" "
             + "viewBox=\"0 0 210 297\" role=\"document\" shape-rendering=\"geometricPrecision\">");
+        svg.AppendLine("  <metadata>");
+        svg.Append("    <answer-sheet-template schema-version=\"")
+            .Append(AnswerSheetLayout.TemplateSchemaVersion.ToString(CultureInfo.InvariantCulture))
+            .Append("\" template-id=\"")
+            .Append(EscapeXml(layout.TemplateId))
+            .Append("\" template-number=\"")
+            .Append(EscapeXml(layout.TemplateNumber))
+            .Append("\" question-count=\"")
+            .Append(layout.QuestionCount.ToString(CultureInfo.InvariantCulture))
+            .Append("\" options-per-question=\"")
+            .Append(layout.OptionsPerQuestion.ToString(CultureInfo.InvariantCulture))
+            .AppendLine("\" />");
+        svg.AppendLine("  </metadata>");
         svg.Append("  <title>").Append(EscapeXml(layout.Title)).AppendLine("</title>");
         svg.AppendLine("  <g id=\"registration-marks\" data-role=\"registration-marks\" fill=\"#000000\">");
         foreach (var mark in layout.RegistrationMarks)
@@ -390,6 +590,19 @@ public static class SvgTemplateExporter
                 .AppendLine("\" />");
         }
 
+        svg.AppendLine("  </g>");
+        svg.AppendLine("  <g id=\"orientation-marker\" data-role=\"orientation-marker\" fill=\"#000000\">");
+        svg.Append("    <rect id=\"")
+            .Append(EscapeXml(layout.OrientationMarker.Id))
+            .Append("\" x=\"")
+            .Append(Format(layout.OrientationMarker.TopLeft.X))
+            .Append("\" y=\"")
+            .Append(Format(layout.OrientationMarker.TopLeft.Y))
+            .Append("\" width=\"")
+            .Append(Format(layout.OrientationMarker.WidthMm))
+            .Append("\" height=\"")
+            .Append(Format(layout.OrientationMarker.HeightMm))
+            .AppendLine("\" />");
         svg.AppendLine("  </g>");
         svg.AppendLine("  <g id=\"option-headers\" data-role=\"option-headers\" font-family=\"Arial, sans-serif\">");
         foreach (var header in layout.OptionHeaders)
@@ -409,7 +622,22 @@ public static class SvgTemplateExporter
 
         svg.AppendLine("  </g>");
         svg.AppendLine("  <g id=\"sheet-header\" data-role=\"header\" font-family=\"Arial, sans-serif\">");
-        svg.AppendLine("    <text x=\"105\" y=\"29\" text-anchor=\"middle\" font-size=\"8\" font-weight=\"bold\">");
+        svg.Append("    <text class=\"template-number\" data-role=\"template-number\" x=\"")
+            .Append(Format(layout.TemplateNumberPosition.X))
+            .Append("\" y=\"")
+            .Append(Format(layout.TemplateNumberPosition.Y))
+            .Append("\" text-anchor=\"middle\" font-size=\"")
+            .Append(Format(AnswerSheetLayout.TemplateNumberFontSizeMm))
+            .Append("\">")
+            .Append(EscapeXml(layout.TemplateNumber))
+            .AppendLine("</text>");
+        svg.Append("    <text x=\"")
+            .Append(Format(AnswerSheetLayout.PageWidthMm / 2))
+            .Append("\" y=\"")
+            .Append(Format(AnswerSheetLayout.TitleYMm))
+            .Append("\" text-anchor=\"middle\" font-size=\"")
+            .Append(Format(AnswerSheetLayout.TitleFontSizeMm))
+            .AppendLine("\" font-weight=\"bold\">");
         svg.Append("      ").Append(EscapeXml(layout.Title)).AppendLine("</text>");
         svg.AppendLine("    <text x=\"105\" y=\"38\" text-anchor=\"middle\" font-size=\"3.5\">每题请选择一个选项</text>");
         svg.AppendLine("  </g>");

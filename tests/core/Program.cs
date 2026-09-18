@@ -5,12 +5,14 @@ using AnswerSheet.Core;
 var failures = new List<string>();
 
 Run("valid maximum capacity", failures, VerifyMaximumCapacity);
+Run("option count capacities", failures, VerifyOptionCountCapacities);
 Run("overflow is rejected", failures, VerifyOverflow);
 Run("bubbles do not overlap", failures, VerifyBubbleSpacing);
 Run("geometry stays inside the page", failures, VerifyGeometryBounds);
 Run("illegal inputs are rejected", failures, VerifyIllegalInputs);
 Run("title is XML escaped", failures, VerifyTitleEscaping);
 Run("layout is deterministic", failures, VerifyDeterminism);
+Run("template identity is stable", failures, VerifyTemplateIdentity);
 
 if (args.Contains("--write-example", StringComparer.Ordinal))
 {
@@ -28,7 +30,7 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: 7 AnswerSheet.Core regression tests.");
+Console.WriteLine("PASS: 9 AnswerSheet.Core regression tests.");
 return 0;
 
 static void Run(string name, List<string> failures, Action test)
@@ -59,6 +61,22 @@ static void VerifyMaximumCapacity()
     AssertEqual(2, layout.Questions[22].Column, "question 23 should start the second column");
     AssertEqual(22, layout.Questions[21].Row, "question 22 should be the last row in column one");
     AssertEqual(new PointMm(14, 58.5), layout.Questions[0].NumberPosition, "question number position should be explicit");
+}
+
+static void VerifyOptionCountCapacities()
+{
+    for (var options = AnswerSheetLayout.MinOptionsPerQuestion;
+         options <= AnswerSheetLayout.MaxOptionsPerQuestion;
+         options++)
+    {
+        var maximum = AnswerSheetLayout.MaxQuestionCount(options);
+        var layout = AnswerSheetLayout.Create($"{options} 个选项", maximum, options);
+
+        AssertEqual(44, maximum, $"A4 capacity should be 44 questions for {options} options");
+        AssertEqual(maximum, layout.Questions.Count, $"all questions should fit for {options} options");
+        AssertEqual(maximum * options, layout.Bubbles.Count, $"bubble count should match for {options} options");
+        AssertEqual(AnswerSheetLayout.ColumnCount * options, layout.OptionHeaders.Count, $"header count should match for {options} options");
+    }
 }
 
 static void VerifyOverflow()
@@ -92,11 +110,23 @@ static void VerifyGeometryBounds()
 {
     var layout = AnswerSheetLayout.Create("边界测试", AnswerSheetLayout.MaxQuestionCount(6), 6);
 
+    var orientationMarker = layout.OrientationMarker;
+    AssertTrue(orientationMarker.TopLeft.X >= 0 && orientationMarker.TopLeft.Y >= 0, "orientation marker should start inside the page");
+    AssertTrue(orientationMarker.WidthMm > 0 && orientationMarker.HeightMm > 0, "orientation marker should have positive dimensions");
+    AssertTrue(orientationMarker.TopLeft.X + orientationMarker.WidthMm <= AnswerSheetLayout.PageWidthMm, "orientation marker should fit horizontally");
+    AssertTrue(orientationMarker.TopLeft.Y + orientationMarker.HeightMm <= AnswerSheetLayout.PageHeightMm, "orientation marker should fit vertically");
+    AssertTrue(
+        orientationMarker.TopLeft.Y + orientationMarker.HeightMm < layout.TemplateNumberPosition.Y - 3.5,
+        "orientation marker should be separated from the template number");
+
     foreach (var mark in layout.RegistrationMarks)
     {
         AssertTrue(mark.TopLeft.X >= 0 && mark.TopLeft.Y >= 0, $"registration mark {mark.Id} starts inside the page");
         AssertTrue(mark.TopLeft.X + mark.SizeMm <= AnswerSheetLayout.PageWidthMm, $"registration mark {mark.Id} fits horizontally");
         AssertTrue(mark.TopLeft.Y + mark.SizeMm <= AnswerSheetLayout.PageHeightMm, $"registration mark {mark.Id} fits vertically");
+        AssertTrue(
+            !RectanglesOverlap(orientationMarker.TopLeft, orientationMarker.WidthMm, orientationMarker.HeightMm, mark.TopLeft, mark.SizeMm, mark.SizeMm),
+            $"orientation marker should not intersect {mark.Id}");
     }
 
     foreach (var header in layout.OptionHeaders)
@@ -128,6 +158,15 @@ static void VerifyGeometryBounds()
                 deltaX * deltaX + deltaY * deltaY > bubble.RadiusMm * bubble.RadiusMm,
                 $"bubble {bubble.QuestionNumber}/{bubble.OptionLabel} should not intersect {mark.Id}");
         }
+
+        AssertTrue(
+            !CircleIntersectsRectangle(
+                bubble.Center,
+                bubble.RadiusMm,
+                orientationMarker.TopLeft,
+                orientationMarker.WidthMm,
+                orientationMarker.HeightMm),
+            $"bubble {bubble.QuestionNumber}/{bubble.OptionLabel} should not intersect the orientation marker");
     }
 }
 
@@ -177,6 +216,37 @@ static void VerifyDeterminism()
     var first = AnswerSheetLayout.Create("确定性", 44, 2).ToSvg();
     var second = AnswerSheetLayout.Create("确定性", 44, 2).ToSvg();
     AssertEqual(first, second, "same input should produce byte-identical SVG");
+}
+
+static void VerifyTemplateIdentity()
+{
+    var first = AnswerSheetLayout.Create("稳定模板", 20, 4);
+    var second = AnswerSheetLayout.Create("稳定模板", 20, 4);
+    var decomposed = AnswerSheetLayout.Create("Cafe\u0301", 20, 4);
+    var composed = AnswerSheetLayout.Create("Café", 20, 4);
+    var differentQuestionCount = AnswerSheetLayout.Create("稳定模板", 21, 4);
+    var differentOptionCount = AnswerSheetLayout.Create("稳定模板", 20, 5);
+    var differentTitle = AnswerSheetLayout.Create("另一模板", 20, 4);
+
+    AssertEqual(first.TemplateId, second.TemplateId, "same parameters should produce the same template ID");
+    AssertEqual(first.TemplateNumber, second.TemplateNumber, "same parameters should produce the same template number");
+    AssertEqual(first.TemplateId.Length, 64, "template ID should contain the complete SHA-256 hex digest");
+    AssertEqual(first.TemplateId.ToLowerInvariant(), first.TemplateId, "template ID should use lowercase hexadecimal");
+    AssertTrue(first.TemplateId != differentQuestionCount.TemplateId, "question count should affect template ID");
+    AssertTrue(first.TemplateId != differentOptionCount.TemplateId, "option count should affect template ID");
+    AssertTrue(first.TemplateId != differentTitle.TemplateId, "title should affect template ID");
+    AssertEqual(composed.Title, decomposed.Title, "title should be normalized to NFC");
+    AssertEqual(composed.TemplateId, decomposed.TemplateId, "equivalent NFC titles should share the template ID");
+    AssertEqual(composed.ToSvg(), decomposed.ToSvg(), "equivalent NFC titles should share deterministic SVG");
+
+    var svg = first.ToSvg();
+    var document = XDocument.Parse(svg, LoadOptions.PreserveWhitespace);
+    var svgNamespace = XNamespace.Get("http://www.w3.org/2000/svg");
+    var metadata = document.Root?.Element(svgNamespace + "metadata")?.Element(svgNamespace + "answer-sheet-template");
+    AssertEqual(first.TemplateId, metadata?.Attribute("template-id")?.Value, "SVG metadata should carry the template ID");
+    AssertEqual(first.TemplateNumber, metadata?.Attribute("template-number")?.Value, "SVG metadata should carry the template number");
+    AssertTrue(svg.Contains($"data-role=\"orientation-marker\"", StringComparison.Ordinal), "SVG should carry the orientation marker geometry");
+    AssertTrue(svg.Contains(first.TemplateNumber, StringComparison.Ordinal), "SVG should visibly print the template number");
 }
 
 static void WriteExampleSvg()
@@ -243,4 +313,32 @@ static string FormatValue<T>(T? value)
     return value is IFormattable formattable
         ? formattable.ToString(null, CultureInfo.InvariantCulture) ?? "<null>"
         : value?.ToString() ?? "<null>";
+}
+
+static bool RectanglesOverlap(
+    PointMm firstTopLeft,
+    double firstWidth,
+    double firstHeight,
+    PointMm secondTopLeft,
+    double secondWidth,
+    double secondHeight)
+{
+    return firstTopLeft.X < secondTopLeft.X + secondWidth
+        && firstTopLeft.X + firstWidth > secondTopLeft.X
+        && firstTopLeft.Y < secondTopLeft.Y + secondHeight
+        && firstTopLeft.Y + firstHeight > secondTopLeft.Y;
+}
+
+static bool CircleIntersectsRectangle(
+    PointMm center,
+    double radius,
+    PointMm rectangleTopLeft,
+    double rectangleWidth,
+    double rectangleHeight)
+{
+    var nearestX = Math.Clamp(center.X, rectangleTopLeft.X, rectangleTopLeft.X + rectangleWidth);
+    var nearestY = Math.Clamp(center.Y, rectangleTopLeft.Y, rectangleTopLeft.Y + rectangleHeight);
+    var deltaX = center.X - nearestX;
+    var deltaY = center.Y - nearestY;
+    return deltaX * deltaX + deltaY * deltaY <= radius * radius;
 }
