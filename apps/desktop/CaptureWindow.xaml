@@ -1,0 +1,111 @@
+<Window
+    x:Class="AnswerSheet.Desktop.CaptureWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:automation="using:Microsoft.UI.Xaml.Automation"
+    xmlns:local="using:AnswerSheet.Desktop"
+    Title="答题纸图像采集 - M1">
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16">
+            <StackPanel Spacing="4">
+                <TextBlock Text="答题纸图像采集" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+                <TextBlock Text="选择模板参数后导入一张 PNG 或 JPEG 图像。图像会保存在应用本地数据中，并记录模板关联。" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="模板参数" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBox
+                        x:Name="TitleBox"
+                        Header="标题"
+                        Text="答题纸"
+                        PlaceholderText="最多 24 个字符，不能换行"
+                        TextChanged="TitleBox_TextChanged"
+                        automation:AutomationProperties.Name="模板标题" />
+                    <NumberBox
+                        x:Name="QuestionCountBox"
+                        Header="题数"
+                        Value="20"
+                        Minimum="1"
+                        Maximum="44"
+                        SpinButtonPlacementMode="Inline"
+                        ValueChanged="NumberBox_ValueChanged"
+                        automation:AutomationProperties.Name="题数" />
+                    <NumberBox
+                        x:Name="OptionsPerQuestionBox"
+                        Header="每题选项数"
+                        Value="4"
+                        Minimum="2"
+                        Maximum="6"
+                        SpinButtonPlacementMode="Inline"
+                        ValueChanged="NumberBox_ValueChanged"
+                        automation:AutomationProperties.Name="每题选项数" />
+                    <Button x:Name="GenerateTemplateButton" Click="GenerateTemplateButton_Click" HorizontalAlignment="Left">
+                        <TextBlock Text="确认模板参数" />
+                    </Button>
+                    <TextBlock x:Name="TemplateIdText" Text="尚未确认模板参数。" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="ImportButton" IsEnabled="False" Click="ImportButton_Click">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <SymbolIcon Symbol="OpenFile" />
+                        <TextBlock Text="导入 PNG/JPEG" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="CancelImportButton" IsEnabled="False" Click="CancelImportButton_Click">
+                    <TextBlock Text="取消导入" TextWrapping="Wrap" />
+                </Button>
+            </StackPanel>
+
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="扫描采集" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="来源：平板。当前版本不启用自动进纸（ADF），避免误报驱动能力。" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="RefreshScannerButton" Click="RefreshScannerButton_Click">
+                            <TextBlock Text="刷新扫描设备" TextWrapping="Wrap" />
+                        </Button>
+                        <ComboBox x:Name="ResolutionComboBox" Header="分辨率" SelectedIndex="1" Width="160" automation:AutomationProperties.Name="扫描分辨率">
+                            <ComboBoxItem Content="150 DPI" Tag="150" />
+                            <ComboBoxItem Content="300 DPI" Tag="300" />
+                            <ComboBoxItem Content="600 DPI" Tag="600" />
+                        </ComboBox>
+                    </StackPanel>
+                    <ListView
+                        x:Name="ScannerList"
+                        Height="120"
+                        SelectionMode="Single"
+                        SelectionChanged="ScannerList_SelectionChanged">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="local:CaptureScannerDeviceItem">
+                                <Grid Padding="8" ColumnSpacing="12" ColumnDefinitions="Auto,*">
+                                    <TextBlock Text="{x:Bind Driver}" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Name}" TextWrapping="Wrap" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="ScanCaptureButton" IsEnabled="False" Click="ScanCaptureButton_Click">
+                            <TextBlock Text="扫描并保存首张" TextWrapping="Wrap" />
+                        </Button>
+                        <Button x:Name="CancelScanCaptureButton" IsEnabled="False" Click="CancelScanCaptureButton_Click">
+                            <TextBlock Text="取消扫描" TextWrapping="Wrap" />
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <TextBlock x:Name="CaptureStatusText" Text="请先确认模板参数。" TextWrapping="Wrap" />
+            <InfoBar
+                IsOpen="True"
+                IsClosable="False"
+                Severity="Informational"
+                Title="图像来源"
+                Message="只能读取你在文件选择器中明确选择的 PNG 或 JPEG 文件；取消选择不会保存记录。" />
+        </StackPanel>
+    </ScrollViewer>
+</Window>
