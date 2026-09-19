@@ -17,7 +17,7 @@ async function main() {
 async function verifySdkHealth() {
   const health = await checkHealth({ timeoutMs: TIMEOUT_MS });
   assert.deepEqual(health, {
-    service: "answersheet-local",
+    service: "omrina-local",
     protocolVersion: 1,
     status: "ready",
   });

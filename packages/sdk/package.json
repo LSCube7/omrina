@@ -1,7 +1,7 @@
 {
-  "name": "@answersheet/local-sdk",
+  "name": "@omrina/local-sdk",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "AnswerSheet 本地服务 M0 健康检查客户端"
+  "description": "OMRINA 本地服务 M0 健康检查客户端"
 }

@@ -1,11 +1,11 @@
-using AnswerSheet.Core;
+using Omrina.Core;
 using System.Text;
 using System.Text.Json;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
 using Windows.Storage.FileProperties;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 /// <summary>Describes where a captured answer-sheet image came from.</summary>
 public enum CaptureSourceType

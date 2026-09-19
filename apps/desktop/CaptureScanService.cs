@@ -1,7 +1,7 @@
 using NAPS2.Images;
 using NAPS2.Scan;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 /// <summary>A single scan-page file waiting to be copied into CaptureStore.</summary>
 internal static class CaptureScanService

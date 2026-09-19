@@ -5,7 +5,9 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Logging;
 using System.Net;
 
-namespace AnswerSheet.Desktop;
+using Omrina.Protocol;
+
+namespace Omrina.Server;
 
 public sealed class LoopbackHealthServer : IAsyncDisposable
 {
@@ -108,15 +110,13 @@ public sealed class LoopbackHealthServer : IAsyncDisposable
             await next();
         });
 
-        application.MapGet("/health", () => Results.Json(new HealthResponse(
-            Service: "answersheet-local",
-            ProtocolVersion: 1,
+        application.MapGet(HealthProtocol.HealthPath, () => Results.Json(new HealthResponse(
+            Service: HealthProtocol.ServiceName,
+            ProtocolVersion: HealthProtocol.ProtocolVersion,
             Status: "ready")));
 
         return application;
     }
-
-    private sealed record HealthResponse(string Service, int ProtocolVersion, string Status);
 
     private sealed class AllowedOrigins
     {
@@ -129,7 +129,8 @@ public sealed class LoopbackHealthServer : IAsyncDisposable
 
         public static AllowedOrigins FromEnvironment()
         {
-            var configuredOrigins = Environment.GetEnvironmentVariable("ANSWERSHEET_ALLOWED_ORIGINS");
+            var configuredOrigins = Environment.GetEnvironmentVariable("OMRINA_ALLOWED_ORIGINS")
+                ?? Environment.GetEnvironmentVariable("ANSWERSHEET_ALLOWED_ORIGINS");
             var origins = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var value in (configuredOrigins ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))

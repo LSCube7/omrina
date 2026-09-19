@@ -1,6 +1,6 @@
 using Microsoft.UI.Xaml;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 public partial class App : Application
 {

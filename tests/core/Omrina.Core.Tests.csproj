@@ -4,10 +4,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>AnswerSheet.Core.Tests</RootNamespace>
+    <AssemblyName>Omrina.Core.Tests</AssemblyName>
+    <RootNamespace>Omrina.Core.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/AnswerSheet.Core/AnswerSheet.Core.csproj" />
+    <ProjectReference Include="../../src/Omrina.Core/Omrina.Core.csproj" />
   </ItemGroup>
 </Project>

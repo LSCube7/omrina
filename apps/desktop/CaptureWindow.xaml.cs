@@ -1,14 +1,13 @@
-using AnswerSheet.Core;
+using Omrina.Core;
+using Omrina.Scanning;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using NAPS2.Images.Gdi;
-using NAPS2.Scan;
 using System.Globalization;
 using System.Collections.ObjectModel;
 using Windows.Storage.Pickers;
 using Windows.Storage;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 /// <summary>
 /// Local M1 capture window. A caller may provide a generated layout so the image
@@ -17,8 +16,7 @@ namespace AnswerSheet.Desktop;
 public sealed partial class CaptureWindow : Window
 {
     private readonly CaptureStore _captureStore;
-    private readonly ScanningContext _scanningContext;
-    private readonly ScanController _scanController;
+    private readonly Naps2ScannerService _scannerService;
     private readonly ObservableCollection<CaptureScannerDeviceItem> _scannerDevices = [];
     private AnswerSheetLayout? _layout;
     private bool _templateMatchesInputs;
@@ -26,7 +24,7 @@ public sealed partial class CaptureWindow : Window
     private CancellationTokenSource? _scanCancellation;
     private bool _enumerationInProgress;
     private bool _scanInProgress;
-    private bool _scanningContextDisposed;
+    private bool _scannerServiceDisposed;
     private bool _isClosed;
 
     public CaptureWindow()
@@ -43,9 +41,7 @@ public sealed partial class CaptureWindow : Window
     {
         InitializeComponent();
         _captureStore = captureStore ?? new CaptureStore();
-        _scanningContext = new ScanningContext(new GdiImageContext());
-        _scanningContext.SetUpWin32Worker();
-        _scanController = new ScanController(_scanningContext);
+        _scannerService = new Naps2ScannerService(_captureStore.RootDirectory);
         ScannerList.ItemsSource = _scannerDevices;
         Closed += CaptureWindow_Closed;
 
@@ -170,7 +166,7 @@ public sealed partial class CaptureWindow : Window
             SetBusy(false);
             if (_isClosed && !_enumerationInProgress && !_scanInProgress)
             {
-                DisposeScanningContext();
+                DisposeScannerService();
             }
         }
     }
@@ -199,21 +195,20 @@ public sealed partial class CaptureWindow : Window
         RefreshScannerButton.IsEnabled = false;
         ScanCaptureButton.IsEnabled = false;
         CaptureStatusText.Text = "正在刷新 WIA 与 TWAIN 扫描设备。";
-        var failures = new List<string>();
-
         try
         {
-            await EnumerateDriverAsync(Driver.Wia, failures);
-            await EnumerateDriverAsync(Driver.Twain, failures);
+            var devices = await _scannerService.GetDevicesAsync();
+            foreach (var device in devices)
+            {
+                _scannerDevices.Add(new CaptureScannerDeviceItem(device));
+            }
 
             if (!_isClosed)
             {
                 var result = _scannerDevices.Count == 0
                     ? "未发现 WIA 或 TWAIN 扫描设备，请连接设备并重试。"
                     : $"已发现 {_scannerDevices.Count} 个扫描设备入口。";
-                CaptureStatusText.Text = failures.Count == 0
-                    ? result
-                    : $"{result} 枚举异常：{string.Join("；", failures)}。请检查相应驱动后重试。";
+                CaptureStatusText.Text = result;
             }
         }
         finally
@@ -223,7 +218,7 @@ public sealed partial class CaptureWindow : Window
             {
                 if (!_scanInProgress)
                 {
-                    DisposeScanningContext();
+                    DisposeScannerService();
                 }
             }
             else
@@ -231,30 +226,6 @@ public sealed partial class CaptureWindow : Window
                 RefreshScannerButton.IsEnabled = true;
                 UpdateScanCaptureButtonState();
             }
-        }
-    }
-
-    private async Task EnumerateDriverAsync(Driver driver, ICollection<string> failures)
-    {
-        if (_isClosed)
-        {
-            return;
-        }
-
-        try
-        {
-            var devices = await _scanController.GetDeviceList(driver);
-            if (!_isClosed)
-            {
-                foreach (var device in devices)
-                {
-                    _scannerDevices.Add(new CaptureScannerDeviceItem(device));
-                }
-            }
-        }
-        catch (Exception exception)
-        {
-            failures.Add($"{driver}：{exception.GetType().Name}（0x{exception.HResult:X8}）");
         }
     }
 
@@ -301,12 +272,11 @@ public sealed partial class CaptureWindow : Window
         string? temporaryPath = null;
         try
         {
-            temporaryPath = await CaptureScanService.ScanFirstPageAsync(
-                _scanController,
+            var scan = await _scannerService.ScanAsync(
                 selectedDevice.Device,
-                dpi,
-                _captureStore.RootDirectory,
+                new ScanOptions(dpi),
                 _scanCancellation.Token);
+            temporaryPath = scan.ImagePath;
 
             var scanFile = await StorageFile.GetFileFromPathAsync(temporaryPath);
             var capture = await _captureStore.ImportAsync(
@@ -351,7 +321,7 @@ public sealed partial class CaptureWindow : Window
             {
                 if (!_enumerationInProgress)
                 {
-                    DisposeScanningContext();
+                    DisposeScannerService();
                 }
             }
             else
@@ -380,7 +350,7 @@ public sealed partial class CaptureWindow : Window
         _scanCancellation?.Cancel();
         if (!_enumerationInProgress && !_scanInProgress)
         {
-            DisposeScanningContext();
+            DisposeScannerService();
         }
     }
 
@@ -474,15 +444,15 @@ public sealed partial class CaptureWindow : Window
             && ScannerList.SelectedItem is CaptureScannerDeviceItem;
     }
 
-    private void DisposeScanningContext()
+    private void DisposeScannerService()
     {
-        if (_scanningContextDisposed)
+        if (_scannerServiceDisposed)
         {
             return;
         }
 
-        _scanningContext.Dispose();
-        _scanningContextDisposed = true;
+        _scannerService.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _scannerServiceDisposed = true;
     }
 
     private static string FormatFailure(string operation, Exception exception, string nextStep)
@@ -492,7 +462,7 @@ public sealed partial class CaptureWindow : Window
     }
 }
 
-public sealed record CaptureScannerDeviceItem(ScanDevice Device)
+public sealed record CaptureScannerDeviceItem(ScannerDevice Device)
 {
     public string Driver => Device.Driver.ToString().ToUpperInvariant();
 

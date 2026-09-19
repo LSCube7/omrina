@@ -1,10 +1,11 @@
-/** M0 本地服务默认地址。 */
+/** OMRINA M0 本地服务默认地址。 */
 export const DEFAULT_ENDPOINT = "http://127.0.0.1:17843";
 export const DEFAULT_TIMEOUT_MS = 5_000;
+export const SERVICE_NAME = "omrina-local";
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export type HealthStatus = {
-  service: "answersheet-local";
+  service: typeof SERVICE_NAME;
   protocolVersion: 1;
   status: "ready";
 };
@@ -18,13 +19,13 @@ export type HealthErrorCode =
   | "HTTP_ERROR"
   | "INVALID_RESPONSE";
 
-export class AnswerSheetSdkError extends Error {
+export class OmrinaSdkError extends Error {
   readonly code: HealthErrorCode;
   readonly status?: number;
 
   constructor(code: HealthErrorCode, message: string, options: { cause?: unknown; status?: number } = {}) {
     super(message, { cause: options.cause });
-    this.name = "AnswerSheetSdkError";
+    this.name = "OmrinaSdkError";
     this.code = code;
     this.status = options.status;
   }
@@ -53,7 +54,7 @@ export type CheckHealthOptions = {
 };
 
 /**
- * 请求本地 AnswerSheet 服务的固定 M0 健康检查接口。
+ * 请求本地 OMRINA 服务的固定 M0 健康检查接口。
  *
  * 此客户端只接受 HTTP 回环地址，且始终访问 `/health`，避免 SDK 被用作通用网络请求器。
  */
@@ -88,7 +89,7 @@ export async function checkHealth(options: CheckHealthOptions = {}): Promise<Hea
     throwIfAborted(timedOut, options.signal);
 
     if (!response.ok) {
-      throw new AnswerSheetSdkError(
+      throw new OmrinaSdkError(
         "HTTP_ERROR",
         `Health check returned HTTP ${response.status}.`,
         { status: response.status },
@@ -103,13 +104,13 @@ export async function checkHealth(options: CheckHealthOptions = {}): Promise<Hea
       if (abortError) {
         throw abortError;
       }
-      throw new AnswerSheetSdkError("INVALID_RESPONSE", "Health check did not return JSON.", { cause });
+      throw new OmrinaSdkError("INVALID_RESPONSE", "Health check did not return JSON.", { cause });
     }
 
     throwIfAborted(timedOut, options.signal);
     return parseHealthStatus(payload);
   } catch (cause) {
-    if (cause instanceof AnswerSheetSdkError) {
+    if (cause instanceof OmrinaSdkError) {
       throw cause;
     }
 
@@ -118,7 +119,7 @@ export async function checkHealth(options: CheckHealthOptions = {}): Promise<Hea
       throw abortError;
     }
 
-    throw new AnswerSheetSdkError("NETWORK_ERROR", "Health check request failed.", { cause });
+    throw new OmrinaSdkError("NETWORK_ERROR", "Health check request failed.", { cause });
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener("abort", abortForCaller);
@@ -127,7 +128,7 @@ export async function checkHealth(options: CheckHealthOptions = {}): Promise<Hea
 
 function getGlobalFetch(): HealthFetch {
   if (typeof globalThis.fetch !== "function") {
-    throw new AnswerSheetSdkError("NETWORK_ERROR", "No fetch implementation is available.");
+    throw new OmrinaSdkError("NETWORK_ERROR", "No fetch implementation is available.");
   }
 
   return globalThis.fetch.bind(globalThis) as HealthFetch;
@@ -138,11 +139,11 @@ function createHealthUrl(endpoint: string | URL): string {
   try {
     url = new URL(endpoint);
   } catch (cause) {
-    throw new AnswerSheetSdkError("INVALID_ENDPOINT", "Endpoint must be an absolute HTTP URL.", { cause });
+    throw new OmrinaSdkError("INVALID_ENDPOINT", "Endpoint must be an absolute HTTP URL.", { cause });
   }
 
   if (url.protocol !== "http:" || !isLoopbackHost(url.hostname) || url.username || url.password) {
-    throw new AnswerSheetSdkError(
+    throw new OmrinaSdkError(
       "INVALID_ENDPOINT",
       "Endpoint must be an unauthenticated HTTP URL on a loopback host.",
     );
@@ -168,7 +169,7 @@ function isLoopbackHost(hostname: string): boolean {
 
 function validateTimeout(timeoutMs: number): number {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
-    throw new AnswerSheetSdkError(
+    throw new OmrinaSdkError(
       "INVALID_TIMEOUT",
       `timeoutMs must be between 1 and ${MAX_TIMEOUT_MS} milliseconds.`,
     );
@@ -188,13 +189,13 @@ function getAbortError(
   timedOut: boolean,
   callerSignal: AbortSignal | undefined,
   cause?: unknown,
-): AnswerSheetSdkError | undefined {
+): OmrinaSdkError | undefined {
   if (timedOut) {
-    return new AnswerSheetSdkError("TIMEOUT", "Health check timed out.", { cause });
+    return new OmrinaSdkError("TIMEOUT", "Health check timed out.", { cause });
   }
 
   if (callerSignal?.aborted) {
-    return new AnswerSheetSdkError("ABORTED", "Health check was cancelled.", { cause });
+    return new OmrinaSdkError("ABORTED", "Health check was cancelled.", { cause });
   }
 
   return undefined;
@@ -202,17 +203,17 @@ function getAbortError(
 
 function parseHealthStatus(payload: unknown): HealthStatus {
   if (!isRecord(payload)
-    || payload.service !== "answersheet-local"
+    || payload.service !== SERVICE_NAME
     || payload.protocolVersion !== 1
     || payload.status !== "ready") {
-    throw new AnswerSheetSdkError(
+    throw new OmrinaSdkError(
       "INVALID_RESPONSE",
       "Health check returned an unsupported service, protocol version, or status.",
     );
   }
 
   return {
-    service: "answersheet-local",
+    service: SERVICE_NAME,
     protocolVersion: 1,
     status: "ready",
   };

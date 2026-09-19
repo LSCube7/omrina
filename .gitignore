@@ -3,6 +3,7 @@
 **/obj/
 node_modules/
 artifacts/
+**/tmp/
 .vs/
 *.user
 .env

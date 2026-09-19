@@ -1,4 +1,4 @@
-using AnswerSheet.Core;
+using Omrina.Core;
 using Microsoft.UI;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
@@ -9,7 +9,7 @@ using System.Globalization;
 using System.Text;
 using Windows.Foundation;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 internal static class TemplateRenderer
 {

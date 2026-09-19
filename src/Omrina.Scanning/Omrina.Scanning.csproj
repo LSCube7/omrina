@@ -3,6 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>AnswerSheet.Core</RootNamespace>
+    <AssemblyName>Omrina.Scanning</AssemblyName>
+    <RootNamespace>Omrina.Scanning</RootNamespace>
   </PropertyGroup>
 </Project>

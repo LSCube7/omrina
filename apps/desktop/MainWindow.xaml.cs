@@ -1,9 +1,11 @@
 using Microsoft.UI.Xaml;
+using Omrina.Scanning;
+using Omrina.Server;
 using NAPS2.Images.Gdi;
 using NAPS2.Scan;
 using System.Collections.ObjectModel;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 public sealed partial class MainWindow : Window
 {

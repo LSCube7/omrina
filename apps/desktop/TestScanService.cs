@@ -1,7 +1,7 @@
 using NAPS2.Images;
 using NAPS2.Scan;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 public static class TestScanService
 {

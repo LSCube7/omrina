@@ -1,14 +1,14 @@
 <Window
-    x:Class="AnswerSheet.Desktop.TemplateWindow"
+    x:Class="Omrina.Desktop.TemplateWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:automation="using:Microsoft.UI.Xaml.Automation"
-    Title="答题纸模板 - M1">
+    Title="OMRINA 模板 - M1">
 
     <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
         <StackPanel Padding="24" Spacing="16">
             <StackPanel Spacing="4">
-                <TextBlock Text="答题纸模板" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+                <TextBlock Text="OMRINA 模板" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
                 <TextBlock Text="设置题数和选项，预览并保存可打印的 A4 答题纸。" TextWrapping="Wrap" />
             </StackPanel>
 

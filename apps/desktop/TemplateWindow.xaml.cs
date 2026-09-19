@@ -1,10 +1,10 @@
-using AnswerSheet.Core;
+using Omrina.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 public sealed partial class TemplateWindow : Window
 {
@@ -102,7 +102,7 @@ public sealed partial class TemplateWindow : Window
             TemplateStatusText.Text = "正在选择 SVG 保存位置。";
             var picker = new FileSavePicker
             {
-                SuggestedFileName = "answersheet-template"
+                SuggestedFileName = "omrina-template"
             };
             picker.FileTypeChoices.Add("SVG 图像", [".svg"]);
             WinRT.Interop.InitializeWithWindow.Initialize(

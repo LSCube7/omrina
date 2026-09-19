@@ -1,4 +1,4 @@
-using AnswerSheet.Core;
+using Omrina.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -6,7 +6,7 @@ using Microsoft.UI.Xaml.Printing;
 using Windows.Foundation;
 using Windows.Graphics.Printing;
 
-namespace AnswerSheet.Desktop;
+namespace Omrina.Desktop;
 
 internal sealed class TemplatePrintController : IDisposable
 {
@@ -99,7 +99,7 @@ internal sealed class TemplatePrintController : IDisposable
 
         try
         {
-            var printTask = args.Request.CreatePrintTask("答题纸模板", sourceArgs =>
+            var printTask = args.Request.CreatePrintTask("OMRINA 模板", sourceArgs =>
             {
                 sourceArgs.SetSource(_documentSource);
             });

@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
 
-namespace AnswerSheet.Core;
+namespace Omrina.Core;
 
 /// <summary>A point measured in millimetres from the top-left corner of an A4 page.</summary>
 public readonly record struct PointMm(double X, double Y);

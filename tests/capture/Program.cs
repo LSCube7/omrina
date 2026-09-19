@@ -1,5 +1,5 @@
-using AnswerSheet.Core;
-using AnswerSheet.Desktop;
+using Omrina.Core;
+using Omrina.Desktop;
 using System.Text.Json;
 using Windows.Storage;
 

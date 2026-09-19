@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  AnswerSheetSdkError,
+  OmrinaSdkError,
   checkHealth,
   DEFAULT_ENDPOINT,
 } from "../../packages/sdk/src/index.ts";
@@ -11,7 +11,7 @@ const readyResponse = () => ({
   ok: true,
   status: 200,
   json: async () => ({
-    service: "answersheet-local",
+    service: "omrina-local",
     protocolVersion: 1,
     status: "ready",
   }),
@@ -27,7 +27,7 @@ test("默认向回环地址的 /health 发起 GET 请求", async () => {
   });
 
   assert.deepEqual(health, {
-    service: "answersheet-local",
+    service: "omrina-local",
     protocolVersion: 1,
     status: "ready",
   });
@@ -48,7 +48,7 @@ test("只允许 HTTP 回环端点，并固定访问 /health", async () => {
   ]) {
     await assert.rejects(
       checkHealth({ endpoint, fetch: async () => readyResponse() }),
-      (error) => error instanceof AnswerSheetSdkError && error.code === "INVALID_ENDPOINT",
+      (error) => error instanceof OmrinaSdkError && error.code === "INVALID_ENDPOINT",
     );
   }
 
@@ -71,7 +71,7 @@ test("超时会中止请求并返回 TIMEOUT", async () => {
         init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
       }),
     }),
-    (error) => error instanceof AnswerSheetSdkError && error.code === "TIMEOUT",
+    (error) => error instanceof OmrinaSdkError && error.code === "TIMEOUT",
   );
 });
 
@@ -87,7 +87,7 @@ test("读取响应体时超时仍返回 TIMEOUT", async () => {
         }),
       }),
     }),
-    (error) => error instanceof AnswerSheetSdkError && error.code === "TIMEOUT",
+    (error) => error instanceof OmrinaSdkError && error.code === "TIMEOUT",
   );
 });
 
@@ -103,14 +103,14 @@ test("调用方取消会中止请求并返回 ABORTED", async () => {
   controller.abort(new Error("caller stopped"));
   await assert.rejects(
     promise,
-    (error) => error instanceof AnswerSheetSdkError && error.code === "ABORTED",
+    (error) => error instanceof OmrinaSdkError && error.code === "ABORTED",
   );
 });
 
 test("拒绝 HTTP 错误和不符合 M0 协议的响应", async () => {
   await assert.rejects(
     checkHealth({ fetch: async () => ({ ok: false, status: 503, json: async () => ({}) }) }),
-    (error) => error instanceof AnswerSheetSdkError && error.code === "HTTP_ERROR" && error.status === 503,
+    (error) => error instanceof OmrinaSdkError && error.code === "HTTP_ERROR" && error.status === 503,
   );
 
   await assert.rejects(
@@ -118,16 +118,16 @@ test("拒绝 HTTP 错误和不符合 M0 协议的响应", async () => {
       fetch: async () => ({
         ok: true,
         status: 200,
-        json: async () => ({ service: "answersheet-local", protocolVersion: 2, status: "ready" }),
+        json: async () => ({ service: "omrina-local", protocolVersion: 2, status: "ready" }),
       }),
     }),
-    (error) => error instanceof AnswerSheetSdkError && error.code === "INVALID_RESPONSE",
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_RESPONSE",
   );
 });
 
 test("拒绝会溢出 JavaScript 定时器的超时值", async () => {
   await assert.rejects(
     checkHealth({ timeoutMs: 2_147_483_648, fetch: async () => readyResponse() }),
-    (error) => error instanceof AnswerSheetSdkError && error.code === "INVALID_TIMEOUT",
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_TIMEOUT",
   );
 });

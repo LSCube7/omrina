@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Xml.Linq;
-using AnswerSheet.Core;
+using Omrina.Core;
 
 var failures = new List<string>();
 
@@ -30,7 +30,7 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: 9 AnswerSheet.Core regression tests.");
+Console.WriteLine("PASS: 9 Omrina.Core regression tests.");
 return 0;
 
 static void Run(string name, List<string> failures, Action test)

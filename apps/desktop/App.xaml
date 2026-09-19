@@ -1,8 +1,19 @@
 <Application
-    x:Class="AnswerSheet.Desktop.App"
+    x:Class="Omrina.Desktop.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Application.Resources>
-        <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+            <!--
+                Reserved replacement point for the OMRINA mark. The desktop shell
+                keeps the slot collapsed until a platform asset is supplied.
+            -->
+            <DataTemplate x:Key="OmrinaBrandMarkTemplate">
+                <Grid />
+            </DataTemplate>
+        </ResourceDictionary>
     </Application.Resources>
 </Application>
