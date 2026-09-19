@@ -1,6 +1,6 @@
-# M0 / M1 验证记录
+# OMRINA M0 / M1 验证记录
 
-初始记录日期：2026-09-16；M1 软件验证更新：2026-09-18。
+初始记录日期：2026-09-16；M1 软件与实物验证更新：2026-09-18；Windows 启动与健康复核更新：2026-09-19。
 
 ## 环境
 
@@ -34,8 +34,8 @@
 - 启动真实进程并运行 `node tests/integration/health.mjs`：SDK 健康响应、外部 Origin 返回 403、未知路径返回 404、POST 返回 405，四项均通过。
 - `Get-NetTCPConnection` 在沙箱中访问被拒绝，使用 `netstat -ano` 确认服务仅监听 `127.0.0.1:17843`；关闭应用后进程与监听端口均消失。
 - 单页扫描代码加入后，x64 Debug 构建成功，0 警告、0 错误。在 WinUI 3 界面选择 EPSON L4260 TWAIN 入口并启动扫描，A4 / 300 DPI / 平板采集成功。
-- 输出 PNG 为 2481 × 3506 像素，849,055 字节。已打开图像确认文字与页面可读。副本保存于 `artifacts/scans/test-scan-20260915-155124174.png`，被 Git 忽略。该样本是普通测试纸，不是 OMR 准确率样本。
-- 使用 EPSON L4260 WIA 入口完成相同的平板 A4 / 300 DPI 单页采集，输出 PNG 为 2464 × 3504 像素，2,162,280 字节，副本保存于 `artifacts/scans/test-scan-20260915-155645953.png`。图像方向上下颠倒，已记录为后续采集方向处理问题；该样本同样不是 OMR 准确率样本。
+- 首次设备冒烟采集得到一张 2481 × 3506 像素的 PNG，已确认文字与页面可读；该普通测试纸样本不用于 OMR 准确率结论。
+- 另一次 WIA 平板采集发现图像方向上下颠倒，已记录为后续采集方向处理问题；该普通测试纸样本同样不用于 OMR 准确率结论。
 - 应用清单已设置 `PerMonitorV2`。随后执行 x64 Debug `--no-restore` 构建，0 警告、0 错误。
 - 使用实际 WinUI 窗口截图与可访问性树验证布局：约 1268 × 739 的窗口中操作按钮横排；约 594 × 739 的窄窗口中按钮纵向全宽且状态文字换行；约 594 × 390 的矮窗口出现垂直滚动，滚动后底部 InfoBar 完整可见。
 - 上述尺寸来自当前工具窗口，不代表不同系统缩放比例、不同显示器或跨显示器切换的实测；验证期间没有更改系统缩放设置。
@@ -44,55 +44,82 @@
 
 ## 2026-09-17 M1 模板 UI 最新验证
 
-- `AnswerSheet.Desktop.csproj` 已引用无第三方包依赖的 `AnswerSheet.Core`。使用本地恢复结果执行 `dotnet build apps/desktop/AnswerSheet.Desktop.csproj --no-restore -p:Platform=x64`，Core 与 Desktop x64 Debug 均构建成功，0 个警告、0 个错误。
+- 桌面项目已引用无第三方包依赖的 Core 模板库。使用本地恢复结果执行 x64 Debug 构建，Core 与 Desktop 均构建成功，0 个警告、0 个错误。
 - 主代理前一轮在实际 WinUI 窗口确认：默认 20 题、每题 4 个选项的模板预览可生成；标题改为“M1 验证答题纸”后保存按钮禁用；重新生成后标题更新且保存按钮恢复可用；`FileSavePicker` 能实际打开。
 - 保存实现已改为 `FileIO.WriteTextAsync`，并通过上述桌面编译；本轮真实写入和取消保存尚未完成。启动最新可执行文件后，Computer Use 在点击“新建答题纸模板”时返回 `coordinate input geometry is unavailable`，随后重新激活又检测到用户输入，因而没有继续点击、没有强杀进程，也没有宣称生成 UI 保存文件。
-- M0 的 HTTPS / WebSocket 浏览器连接仍未完成；M1 的实体打印、比例测量和填涂后再扫描闭环仍未完成。M1 的打印控制器、图像导入和采集保存代码已加入，但其最新运行验证见下节，不能把代码实现写成完整验收。
+- 当时 M0 的 HTTPS / WebSocket 浏览器连接和 M1 的实体流程仍未完成；后续实物验证见本文新增章节。代码实现与运行验收继续分开记录。
 
 ## 2026-09-18 M1 代码实现同步与待确认验证
 
 以下内容依据当前代码记录，和运行验证分开：
 
-- `AnswerSheet.Core` 的模板 schema 为 1。标题先规范化为 NFC，再由规范化标题、题数和选项数生成 64 位小写 SHA-256 `TemplateId`；页面打印短编号，并加入独立的顶部方向标记。Core 回归程序当前为 9 项检查，先前运行结果为 9 项通过。
+- `Omrina.Core` 的模板 schema 为 1。标题先规范化为 NFC，再由规范化标题、题数和选项数生成 64 位小写 SHA-256 `TemplateId`；页面打印短编号，并加入独立的顶部方向标记。Core 回归程序当前为 9 项检查，先前运行结果为 9 项通过。
 - `TemplatePrintController` 已接入 Windows 系统打印流程，按 A4 纵向实际尺寸生成打印页，并在分页阶段检查纸张尺寸和可打印区域；不自动缩放到其他纸张或超出打印机边距。
 - `CaptureStore` 支持 PNG/JPEG 导入和扫描结果保存，保留原始图像并写入模板关联 manifest。原图和 manifest 先写入暂存目录，完成后移动到最终采集目录；取消、校验失败或写入失败会清理暂存记录。
 - `CaptureWindow` 的扫描入口支持 WIA/TWAIN 平板、A4、150/300/600 DPI，并只接收首张图像，再交给 `CaptureStore` 保存。
 
 CaptureStore 回归检查已确认如下：
 
-- 最终测试项目只链接生产代码 `apps/desktop/CaptureStore.cs` 和 `AnswerSheet.Core`，并使用已缓存的 `Microsoft.Windows.SDK.NET.Ref` FrameworkReference；不再引用整个 WinUI Desktop 项目，避免测试进程触发 WinUI 初始化挂起。
+- 最终测试项目只链接生产代码中的 `CaptureStore` 和 `Omrina.Core`，并使用已缓存的 `Microsoft.Windows.SDK.NET.Ref` FrameworkReference；不再引用整个桌面 UI 项目，避免测试进程触发 UI 初始化挂起。
 - 在无新包下载的离线恢复后，构建结果为 0 个警告、0 个错误。可复现命令为：
 
   ```powershell
-  dotnet restore .\tests\capture\AnswerSheet.Capture.Tests.csproj --ignore-failed-sources
-  dotnet build .\tests\capture\AnswerSheet.Capture.Tests.csproj --no-restore -p:Platform=x64
-  dotnet run --project .\tests\capture\AnswerSheet.Capture.Tests.csproj --no-build --no-restore -p:Platform=x64
+  dotnet restore <capture-test-project> --ignore-failed-sources
+  dotnet build <capture-test-project> --no-restore -p:Platform=x64
+  dotnet run --project <capture-test-project> --no-build --no-restore -p:Platform=x64
   ```
 
 - 运行结果为 `PASS: 5 capture regression tests.`。5 项覆盖模板 ID/schema 关联、PNG 原始字节与 manifest、`scan` 来源类型复用同一存储 API、非法图像/扩展名校验，以及取消后的 staging 清理。
 - 这组回归检查证明 CaptureStore 的本地保存和校验行为，不等同于 WIA/TWAIN 实际设备扫描、采集窗口 UI 或打印流程验收。
 
-## 2026-09-18 M1 WinUI、SVG、PNG 导入与 Print to PDF 软件验证
+## 2026-09-18 OMRINA 命名迁移与构建验证
 
-- 真实 WinUI 窗口使用默认 20 题、每题 4 个选项的模板，预览显示编号 `AS1-20x4-B7A4AFC5` 和顶部方向标记。
-- 取消保存时界面显示“已取消保存 SVG”，保存按钮恢复可用。实际保存的 `artifacts/templates/m1-ui-save-20260917.svg` 大小为 28,762 字节；XML 检查确认 `width="210mm"`、`height="297mm"`、`viewBox="0 0 210 297"`、80 个填涂圆圈、1 个方向标记，以及完整模板 ID `b7a4afc51ac55b215158c8b31e1f49dc993786cafaad67e88fa66ce7d0394cf9`。
-- PNG 导入使用已有授权测试纸，界面显示 2481 × 3506，并成功关联上述完整模板 ID。本次未执行物理扫描。
-- 打印流程实际选定 Microsoft Print to PDF，预览为 1 页；打印后生成 `artifacts/templates/m1-print-20260918.pdf`，大小为 170,787 字节。界面状态为“系统已接收打印任务。打印是否完成请以系统状态为准。”，打印完成后生成、保存、打印和导入按钮均恢复可用。
-- `pdfinfo` 确认该 PDF 的 Producer 为 Microsoft Print To PDF、1 页、595.276 × 841.89 pt（A4）、rotation 0、未加密。使用 `pdftoppm` 渲染的 `artifacts/templates/m1-print-20260918-page1.png` 已目视确认定位块、方向标记、编号、标题、列标和气泡清晰，无裁切、空白或重叠。
+- Core、Protocol、Scanning、Server 和 Desktop 项目已迁移到 `Omrina.*` 项目命名；旧 `AnswerSheet` 目录和模板 canonical 名称按兼容性要求保留。
+- `Naps2ScannerService` 已接入 CaptureWindow 的扫描路径，Windows 实机目标继续使用 NAPS2/WIA/TWAIN；这证明代码接线，不等同于本轮 UI 或跨平台验收。
+- Core 回归测试 9 项、CaptureStore 回归测试 5 项、SDK 自动测试 7 项均通过。各项目的 Windows x64 与 win-x64 构建均为 0 个警告、0 个错误。
+- 本轮 UI 工具无法找到所需的 kernel assets 路径，因此没有新增 UI 视觉或交互验收结论；此前已有的 Windows UI 记录继续按对应章节单独解释。
+- Uno 尚未引入，`Omrina.Platform` 尚未完成；macOS / Linux 实机与三平台测试仍暂缓。
 
-上述结果构成当前 M1 模板 UI、SVG 输出、PNG 导入关联和 Print to PDF 的软件级验收证据；不等同于实体打印比例、纸面填涂或再扫描识别闭环。
+## 2026-09-18 M1 桌面、SVG、PNG 导入与 Print to PDF 软件验证
+
+- 真实桌面窗口使用默认 20 题、每题 4 个选项的模板，预览显示编号 `AS1-20x4-B7A4AFC5` 和顶部方向标记。
+- 取消保存时界面显示“已取消保存 SVG”，保存按钮恢复可用；XML 检查确认 A4 `210mm × 297mm`、80 个填涂圆圈和 1 个方向标记。
+- PNG 导入界面显示 2481 × 3506，并成功关联模板身份。
+- 打印流程实际选定 Microsoft Print to PDF，预览为 1 页；界面状态为“系统已接收打印任务。打印是否完成请以系统状态为准。”，打印完成后生成、保存、打印和导入按钮均恢复可用。
+- PDF 元数据确认 1 页 A4、未加密；渲染页面已目视确认定位块、方向标记、编号、标题、列标和气泡清晰，无裁切、空白或重叠。
+
+上述结果构成当前 M1 模板 UI、SVG 输出、PNG 导入关联和 Print to PDF 的软件级验收证据；不等同于纸面实际尺寸测量或 M2 识别结果。
+
+## 2026-09-18 M1 实物打印、填涂与本地扫描验证
+
+- 使用 OMRINA 生成的 20 题、每题 4 个选项模板完成打印、填涂，并通过本地应用完成扫描采集。
+- 采集图为 2481 × 3506 像素；目视确认页面四角定位与方向标记完整，人工复核确认填涂内容可读。
+- 该验证证明生成模板可以进入“打印 → 填涂 → 本地采集”的实物流程，但没有测量纸面实际尺寸，也没有执行自动模板识别、评分或人工复核工作流。
+- 纸面尺寸测量、重复样本和不同设备兼容性仍待后续安排；M2 识别能力尚未实现。
 
 以下结果仍待确认，暂不记为通过：
 
-- WIA/TWAIN 设备在新 M1 采集窗口中的实际扫描保存尚未执行；此前 M0 的旧版设备枚举和 300 DPI 单页扫描记录不等同于新 Capture 流程验收。
-- M1 的实际打印、纸面距离测量、填涂后再扫描和模板识别闭环尚未执行。
+- 纸面实际尺寸与打印比例测量。
+- 不同 WIA/TWAIN 设备和分辨率下的重复采集。
+- 自动模板识别、评分和后续复核流程（M2 尚未实现）。
+
+## 2026-09-19 Windows 标准入口启动与健康集成复核
+
+- 使用正常标准入口启动 `Omrina.Desktop` 成功；窗口标题为 `OMRINA 本地服务 - M0`。
+- 应用在 `127.0.0.1:17843` 提供健康检查，响应为 HTTP 200，服务名为 `omrina-local`，协议版本为 1，状态为 `ready`。
+- 运行 `node tests/integration/health.mjs` 通过 SDK ready 响应、外部 Origin HTTP 403、未知路径 HTTP 404 和 `POST /health` HTTP 405 四项检查。
+- 执行 `dotnet build apps/desktop/Omrina.Desktop.csproj -p:Platform=x64 --no-restore`，0 个警告、0 个错误；使用已有缓存，未下载新依赖。
+- `WindowsAppSDKSelfContained=true` 使 Windows App SDK runtime payload 随部署输出提供，用于修复启动时的 COM `0x80040154`；该设置不是整个 .NET 应用的 self-contained 发布，目标环境仍需要兼容的 .NET runtime。
+- 临时的 `Program` / `App` 日志钩子已移除，测试进程已停止。本轮没有执行实体扫描或打印。
+- 本轮 UI 工具仍不可用，没有新增视觉或交互验收结论；窗口标题和 health 响应只证明标准入口启动及本地诊断路径，不等同于 UI 验收。
 
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
 - HTTPS 浏览器到真实本地服务的 HTTP / WebSocket 连接。
-- WIA/TWAIN 新采集窗口的实际设备运行，以及生成模板的实体打印、比例测量、填涂、再扫描闭环。
+- 纸面打印比例、不同设备兼容性和重复采集。
 - 配对授权与业务接口（尚未实现）。
+- macOS / Linux 实机 UI 与扫描验收；三平台 CI 当前暂缓。
 
 SDK 单元测试使用模拟响应，只证明客户端行为，不证明上述集成路径。
 
