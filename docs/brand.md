@@ -2,11 +2,11 @@
 
 ## 项目定位
 
-OMRINA 的正式展开是 **Optical Mark Recognition Integration Agent**。它计划成为运行在本机的 Integration Agent，连接浏览器或 Web 应用与本地扫描设备。当前交付是 Windows WinUI 3 原型、平台无关的模板与扫描契约，以及只读的本地健康检查；浏览器连接、任务、本地授权、状态事件和 WebSocket 能力仍在规划中。
+OMRINA 的正式展开是 **Optical Mark Recognition Integration Agent**。它计划成为运行在本机的 Integration Agent，连接浏览器或 Web 应用与本地扫描设备。当前交付包括 Windows WinUI 3 / Windows App SDK target、Uno Skia Desktop target、平台无关的模板与扫描契约，以及只读的本地健康检查；浏览器连接、任务、本地授权、状态事件和 WebSocket 能力仍在规划中。
 
 OMRINA 不是面向终端用户的完整答题应用。模板、识别、评分和复核是由本地引擎逐步提供的能力，桌面 UI 主要用于配置、状态查看和需要用户确认的操作。
 
-当前桌面范围为 Windows、macOS 和 Linux；不把 Android 或 iOS 纳入本项目目标。Windows 仍是主要开发和实机测试平台。跨平台 UI 最终选择 Uno Platform：Windows target 继续使用 Windows App SDK / WinUI 3，macOS 与 Linux 采用 Uno 的 Skia Desktop target。迁移尚未完成，文档不能把 Uno 目标写成已交付能力。
+当前桌面范围为 Windows、macOS 和 Linux；不把 Android 或 iOS 纳入本项目目标。Windows 仍是主要开发和实机测试平台。项目已引入 Uno.Sdk 6.7.30，并为 `Omrina.Desktop` 提供 Windows 与 `net10.0-desktop` 双 target：Windows target 使用 Windows App SDK / WinUI 3，macOS 与 Linux 采用 Uno 的 Skia Desktop target。macOS/Linux 系统打印尚未适配，macOS/Linux 实机尚未测试，三平台测试与 CI 暂缓。
 
 ## 名称与大小写
 
@@ -29,8 +29,8 @@ OMRINA 不是面向终端用户的完整答题应用。模板、识别、评分�
 | `Omrina.Protocol` | 当前只定义 M0 健康检查的协议常量和响应模型；完整的 HTTP、WebSocket、授权、设备和任务协议仍属规划范围 | 保持跨平台 |
 | `Omrina.Scanning` | `IScannerService` 等扫描抽象与结果模型 | 不直接暴露 WIA、TWAIN、SANE 或 ImageCaptureCore |
 | `Omrina.Server` | 当前提供仅监听回环地址的健康检查 HTTP 服务和来源校验；事件与任务调度仍属规划范围 | 保持跨平台；不读取任意文件路径或执行任意命令 |
-| `Omrina.Platform` | 规划中的文件选择、启动、托盘、系统权限等平台适配 | 当前尚未完成；通过接口隔离具体系统 API |
-| `Omrina.Desktop` | 当前 Windows WinUI 3 窗口和桌面入口；未来承载 Uno UI | Uno 迁移尚未完成，其他 target 尚未验收 |
+| `Omrina.Platform` | 已引入图像输入与解码等平台边界接口；具体文件选择、扫描和打印能力由桌面 target 隔离实现 | 通过接口隔离具体系统 API；macOS/Linux 系统打印尚未适配 |
+| `Omrina.Desktop` | Uno 单窗口桌面入口，包含 Windows 与 `net10.0-desktop` 双 target | Windows 使用 WinUI 3；macOS/Linux 实机与设备能力尚未验收 |
 
 平台判断应集中在 Platform 层或明确的实现边界内。业务层不应到处散落 `OperatingSystem.IsWindows()`，也不应让 `Windows.*` 或 Win32 类型穿过 Core、Protocol、Scanning 抽象和 Server 边界。
 
@@ -38,7 +38,7 @@ OMRINA 不是面向终端用户的完整答题应用。模板、识别、评分�
 
 OMRINA 的标志采用扁平、克制的日系科技方向：破损的识别环、中央识别标记和像素块，表达光学识别、填涂标记以及数字化传输。主色方向为深石板色 `#2B3A4A` 与青绿色 `#4DD0C5`，允许使用柔和的青绿色渐变。
 
-品牌色只用于品牌图形和品牌资源。当前 WinUI 桌面 UI，以及未来的 Uno UI，都使用系统主题和系统色，不为品牌宣传而重设按钮、输入框、InfoBar 等系统控件的颜色。
+品牌色只用于品牌图形和品牌资源。当前 Uno 桌面 UI 使用系统主题和系统色，不为品牌宣传而重设按钮、输入框、InfoBar 等系统控件的颜色。
 
 UI 文案保持简洁、冷静、系统化，描述状态和下一步操作，例如：
 
@@ -78,6 +78,6 @@ Scan completed
 
 ## 当前交付边界
 
-Uno 是最终 UI 方向，但当前尚未引入 Uno 包或完成迁移。Windows 实机扫描和本地流程优先；macOS / Linux 的实际设备与 UI 验收仍待安排。三平台 CI 当前暂缓，后续恢复时应至少覆盖 restore、build、unit tests、publish 和基础 smoke tests，再单独安排真实 macOS / Linux 设备验收。
+Uno.Sdk 6.7.30 已引入，Windows 与 `net10.0-desktop` 双 target 以及 `Omrina.Platform` 平台边界接口已落地。Windows 实机扫描和本地流程优先；macOS/Linux 系统打印尚未适配，macOS/Linux 实际设备与 UI 尚未测试。三平台 CI 当前暂缓，后续恢复时应至少覆盖 restore、build、unit tests、publish 和基础 smoke tests，再单独安排真实 macOS/Linux 设备验收。
 
 M1 已完成生成模板的打印、填涂并通过本地应用扫描的实物流程，目视确认页面四角定位与方向标记完整；纸面尺寸测量仍未完成。M2 的自动识别、评分和人工复核功能尚未实现，不能把本次扫描记录写成识别准确率或 M2 验收结果。

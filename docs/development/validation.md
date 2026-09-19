@@ -56,7 +56,7 @@
 - `Omrina.Core` 的模板 schema 为 1。标题先规范化为 NFC，再由规范化标题、题数和选项数生成 64 位小写 SHA-256 `TemplateId`；页面打印短编号，并加入独立的顶部方向标记。Core 回归程序当前为 9 项检查，先前运行结果为 9 项通过。
 - `TemplatePrintController` 已接入 Windows 系统打印流程，按 A4 纵向实际尺寸生成打印页，并在分页阶段检查纸张尺寸和可打印区域；不自动缩放到其他纸张或超出打印机边距。
 - `CaptureStore` 支持 PNG/JPEG 导入和扫描结果保存，保留原始图像并写入模板关联 manifest。原图和 manifest 先写入暂存目录，完成后移动到最终采集目录；取消、校验失败或写入失败会清理暂存记录。
-- `CaptureWindow` 的扫描入口支持 WIA/TWAIN 平板、A4、150/300/600 DPI，并只接收首张图像，再交给 `CaptureStore` 保存。
+- 采集页的扫描入口支持 WIA/TWAIN 平板、A4、150/300/600 DPI，并只接收首张图像，再交给 `CaptureStore` 保存。
 
 CaptureStore 回归检查已确认如下：
 
@@ -75,10 +75,10 @@ CaptureStore 回归检查已确认如下：
 ## 2026-09-18 OMRINA 命名迁移与构建验证
 
 - Core、Protocol、Scanning、Server 和 Desktop 项目已迁移到 `Omrina.*` 项目命名；旧 `AnswerSheet` 目录和模板 canonical 名称按兼容性要求保留。
-- `Naps2ScannerService` 已接入 CaptureWindow 的扫描路径，Windows 实机目标继续使用 NAPS2/WIA/TWAIN；这证明代码接线，不等同于本轮 UI 或跨平台验收。
-- Core 回归测试 9 项、CaptureStore 回归测试 5 项、SDK 自动测试 7 项均通过。各项目的 Windows x64 与 win-x64 构建均为 0 个警告、0 个错误。
+- `Naps2ScannerService` 已接入采集页的扫描路径，Windows 实机目标继续使用 NAPS2/WIA/TWAIN；这证明代码接线，不等同于本轮 UI 或跨平台验收。
+- 迁移前记录中的 Core 回归测试 9 项、CaptureStore 回归测试 5 项、SDK 自动测试 7 项均通过，且当时各项目的 Windows x64 与 win-x64 构建为 0 个警告、0 个错误；这些结果不能替代当前迁移后的最终结果。
 - 本轮 UI 工具无法找到所需的 kernel assets 路径，因此没有新增 UI 视觉或交互验收结论；此前已有的 Windows UI 记录继续按对应章节单独解释。
-- Uno 尚未引入，`Omrina.Platform` 尚未完成；macOS / Linux 实机与三平台测试仍暂缓。
+- Uno 迁移正在进行，`Omrina.Platform` 与单窗口导航壳仍待最终构建和测试确认；macOS / Linux 实机与三平台测试仍暂缓。
 
 ## 2026-09-18 M1 桌面、SVG、PNG 导入与 Print to PDF 软件验证
 
@@ -113,11 +113,48 @@ CaptureStore 回归检查已确认如下：
 - 临时的 `Program` / `App` 日志钩子已移除，测试进程已停止。本轮没有执行实体扫描或打印。
 - 本轮 UI 工具仍不可用，没有新增视觉或交互验收结论；窗口标题和 health 响应只证明标准入口启动及本地诊断路径，不等同于 UI 验收。
 
+## 2026-09-19 单窗口导航与 Uno 迁移草稿（历史记录）
+
+- 当前 Windows 导航壳使用单窗口 NavigationView、自定义 TitleBar，以及“状态”“模板”“采集”“设置”“关于”页面；模板页与采集页在主窗口内缓存。
+- 旧版 MainWindow“扫描测试纸”入口已退役。图像导入和扫描统一由采集页调用 `CaptureStore`，不再维护独立的旧测试入口。
+- 本节只记录当时的代码结构，不记录通过结论；迁移后的最终代码级构建和 CaptureStore 结果见下节。平台能力实际以最终代码为准。
+- 本节不记录 UI 视觉/交互或设备运行验收结论。
+- 三平台测试继续暂缓。本轮没有加载 `design.png`，也不以它作为 UI 验收证据。
+
+## 2026-09-19 Uno 桌面迁移代码级验证
+
+本节只记录本轮迁移后的代码级检查；此前 Windows 实机扫描、打印和 UI 记录仍按各自章节解释，不能当作本轮 macOS/Linux 验收。
+
+- 根目录 `global.json` 固定 .NET SDK 10.0.401 与 Uno.Sdk 6.7.30。使用工作区 `.tools/NuGet.Config` 和 `.tools/nuget-packages` 从官方 NuGet 源恢复 Uno、NAPS2 1.3.0、Skia 和必要传递依赖成功。
+- `dotnet build apps/desktop/Omrina.Desktop.csproj -f net10.0-desktop --no-restore` 通过，0 个错误；输出有 2 个 NU1900（NuGet 漏洞审计无法访问 nuget.org），不影响已缓存依赖解析。Windows `net10.0-windows10.0.26100.0` 代码与 XAML 使用隔离输出目录构建通过，0 个错误，同样只有 2 个 NU1900；普通输出目录当时被 UI 验收进程锁定，因此没有结束该进程。
+- `tests/capture/Omrina.Capture.Tests.csproj` 构建通过，0 个错误（2 个 NU1900 仅为漏洞审计网络失败）；运行结果为 6 组通过。覆盖 Core 模板 ID/schema、3×2 PNG 的完整解码和原始字节复制、3×2 JPEG 完整解码、scan 来源、非法/不支持扩展、截断 PNG/JPEG、16001×1 超限返回 `IMAGE_DIMENSIONS_TOO_LARGE`、取消后的 staging 清理。
+- `CaptureStore` 仍使用 `%LocalAppData%/AnswerSheet` 下的 `captures` 记录、atomic staging、复制后二次验证和取消清理；图像限制仍为 100 MB、宽高各 16000、总像素 100M。Skia JPEG 走原始尺寸 scanline；当前 PNG native codec 不支持 scanline 时走受这些上限约束的 exact-size decode。
+- Windows 文件 picker 使用 HWND 初始化；`net10.0-desktop` 使用 Uno `FileOpenPicker` / `FileSavePicker`，不调用 Windows HWND。Windows 打印控制器保留系统打印流程；macOS/Linux 控制器明确返回“未提供系统打印适配器”，不会伪报成功，模板仍可保存 SVG。
+- NAPS2 默认驱动在 Windows 为 WIA、macOS 为 Apple/ImageCaptureCore（ICA）、Linux 为 SANE；扫描入口固定 A4 平板首张和 150/300/600 DPI。没有虚构设备，也没有执行物理扫描或打印。
+
+本轮未在 macOS/Linux 上运行应用、枚举设备、打开文件选择器或连接 ICA/SANE 后端；三平台测试和 CI 继续暂缓。`design.png` 未加载、未入程序、未提交。
+
+SkiaSharp 依赖已统一为 3.119.2，与 Uno desktop 解析的 Windows/Linux/macOS native asset patch 一致；NAPS2 1.3.0 的 ImageSharp 适配使用独立的 ImageSharp 3.1.11 依赖，没有 SkiaSharp 版本约束冲突。
+
+## 2026-09-19 Windows 单窗口导航 UI 验收
+
+在已完成 Windows Desktop 构建的 `Omrina.Desktop.exe` 上，使用现有 synthetic 图像素材完成了单窗口 UI 验收。截图和 SVG 证据保存在相对路径 `artifacts/ui-acceptance-20260919/`，未上传截图或原图。
+
+- 启动后仅有一个主窗口，标题为 `OMRINA 本地服务`；自定义 TitleBar、NavigationView 和页面内容属于同一窗口。“状态”“模板”“采集”“设置”“关于”均可切换，TitleBar 页面标题同步，模板页和采集页状态可缓存。
+- 模板页修改标题后，保存 SVG、系统打印和导入图像操作均禁用；重新生成预览后恢复。离开模板页再返回，标题“验收模板”和模板 ID 仍保留。
+- 从模板页进入“导入图像”会回到同一主窗口的采集页，并带入模板参数和模板 ID。
+- SVG 文件保存成功，生成的 `template-acceptance.svg` 可读取且包含 A4 SVG 根元素；再次打开保存对话框后取消，界面显示“已取消保存 SVG”。
+- 采集页取消文件选择后显示“已取消图像导入，未留下采集记录”；选择 synthetic 3×2 PNG 后显示导入成功、像素尺寸 `3×2` 和模板关联。
+- Compact 与展开的 NavigationView 均可操作；TitleBar 最大化、恢复、最小化、恢复均可操作。本轮未形成窄窗口实际尺寸的重排证据，也没有执行实体扫描或打印。
+
+macOS/Linux 未运行应用或设备后端，三平台 CI 和设备测试继续暂缓。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
 - HTTPS 浏览器到真实本地服务的 HTTP / WebSocket 连接。
 - 纸面打印比例、不同设备兼容性和重复采集。
+- 窄窗口尺寸、系统缩放和多显示器切换下的 UI 重排。
 - 配对授权与业务接口（尚未实现）。
 - macOS / Linux 实机 UI 与扫描验收；三平台 CI 当前暂缓。
 
