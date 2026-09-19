@@ -1,9 +1,7 @@
 using Omrina.Core;
+using Omrina.Platform;
 using System.Text;
 using System.Text.Json;
-using Windows.Graphics.Imaging;
-using Windows.Storage;
-using Windows.Storage.FileProperties;
 
 namespace Omrina.Desktop;
 
@@ -92,7 +90,7 @@ public sealed class CaptureStorageException : CaptureException
 
 /// <summary>
 /// Validates user-selected PNG/JPEG files and stores an immutable capture directory.
-/// The source is read only after the user has selected a <see cref="StorageFile" />.
+/// The source is read only after the user has selected an <see cref="IInputImageFile" />.
 /// </summary>
 public sealed class CaptureStore
 {
@@ -133,7 +131,7 @@ public sealed class CaptureStore
     /// </summary>
     public async Task<CaptureRecord> ImportAsync(
         AnswerSheetLayout layout,
-        StorageFile file,
+        IInputImageFile file,
         CaptureSourceType sourceType = CaptureSourceType.Import,
         CancellationToken cancellationToken = default)
     {
@@ -157,7 +155,7 @@ public sealed class CaptureStore
 
     private async Task<CaptureRecord> PersistAsync(
         CaptureTemplateReference template,
-        StorageFile sourceFile,
+        IInputImageFile sourceFile,
         CaptureImageInfo image,
         CaptureSourceType sourceType,
         CancellationToken cancellationToken)
@@ -239,7 +237,7 @@ public sealed class CaptureStore
     }
 
     private static async Task CopyOriginalAsync(
-        StorageFile sourceFile,
+        IInputImageFile sourceFile,
         CaptureImageInfo image,
         string destinationPath,
         CancellationToken cancellationToken)
@@ -247,9 +245,8 @@ public sealed class CaptureStore
         try
         {
             ulong copiedLength;
-            using (var randomAccessStream = await sourceFile.OpenReadAsync())
+            await using (var input = await sourceFile.OpenReadAsync(cancellationToken))
             {
-                await using var input = randomAccessStream.AsStreamForRead();
                 await using var output = new FileStream(
                     destinationPath,
                     FileMode.CreateNew,
@@ -272,7 +269,7 @@ public sealed class CaptureStore
 
             // Validate the bytes that are actually stored. This closes the gap between
             // initial picker metadata and the copy if the source changed while it was read.
-            var copiedFile = await StorageFile.GetFileFromPathAsync(destinationPath);
+            var copiedFile = new LocalInputImageFile(destinationPath);
             var copiedImage = await CaptureImageValidator.ValidateAsync(copiedFile, cancellationToken);
             if (copiedImage != image)
             {
@@ -392,8 +389,10 @@ internal static class CaptureImageValidator
         ".jpeg"
     };
 
+    private static readonly SkiaImageDecoder Decoder = new();
+
     public static async Task<CaptureImageInfo> ValidateAsync(
-        StorageFile file,
+        IInputImageFile file,
         CancellationToken cancellationToken)
     {
         var extension = Path.GetExtension(file.Name);
@@ -404,10 +403,10 @@ internal static class CaptureImageValidator
                 "只支持 PNG 或 JPEG 图像。请重新选择文件。");
         }
 
-        BasicProperties properties;
+        ulong byteLength;
         try
         {
-            properties = await file.GetBasicPropertiesAsync();
+            byteLength = file.Length;
         }
         catch (OperationCanceledException)
         {
@@ -421,14 +420,14 @@ internal static class CaptureImageValidator
                 exception);
         }
 
-        if (properties.Size == 0)
+        if (byteLength == 0)
         {
             throw new CaptureValidationException(
                 "EMPTY_IMAGE",
                 "所选图像为空，请重新选择 PNG 或 JPEG 文件。");
         }
 
-        if (properties.Size > CaptureStore.MaximumFileSizeBytes)
+        if (byteLength > CaptureStore.MaximumFileSizeBytes)
         {
             throw new CaptureValidationException(
                 "IMAGE_FILE_TOO_LARGE",
@@ -438,18 +437,16 @@ internal static class CaptureImageValidator
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            using var randomAccessStream = await file.OpenReadAsync();
-            var decoder = await BitmapDecoder.CreateAsync(randomAccessStream);
-            var codecId = decoder.DecoderInformation.CodecId;
-            if (codecId != BitmapDecoder.PngDecoderId && codecId != BitmapDecoder.JpegDecoderId)
+            var decoded = await Decoder.DecodeAsync(file, cancellationToken);
+            if (decoded.ByteLength != byteLength)
             {
                 throw new CaptureValidationException(
-                    "UNSUPPORTED_IMAGE_CODEC",
-                    "图像编码格式不是受支持的 PNG 或 JPEG，请重新选择文件。");
+                    "SOURCE_CHANGED",
+                    "图像在读取过程中发生变化，请重新选择文件。");
             }
 
-            var pixelWidth = decoder.PixelWidth;
-            var pixelHeight = decoder.PixelHeight;
+            var pixelWidth = decoded.PixelWidth;
+            var pixelHeight = decoded.PixelHeight;
             if (pixelWidth == 0 || pixelHeight == 0)
             {
                 throw new CaptureValidationException(
@@ -466,27 +463,11 @@ internal static class CaptureImageValidator
                     $"图像尺寸不能超过 {CaptureStore.MaximumImageWidth}×{CaptureStore.MaximumImageHeight}，且像素总数不能超过 {CaptureStore.MaximumPixelCount:N0}。");
             }
 
-            // BitmapDecoder.CreateAsync validates the container header. Requesting a
-            // one-pixel transformed decode also exercises the compressed pixel data,
-            // without allocating a full-size RGBA buffer for a large page.
-            var transform = new BitmapTransform
-            {
-                ScaledWidth = 1,
-                ScaledHeight = 1
-            };
-            var pixelData = await decoder.GetPixelDataAsync(
-                BitmapPixelFormat.Rgba8,
-                BitmapAlphaMode.Ignore,
-                transform,
-                ExifOrientationMode.IgnoreExifOrientation,
-                ColorManagementMode.DoNotColorManage);
-            _ = pixelData.DetachPixelData();
-
             return new CaptureImageInfo(
-                extension.ToLowerInvariant(),
+                decoded.Extension,
                 pixelWidth,
                 pixelHeight,
-                properties.Size);
+                byteLength);
         }
         catch (OperationCanceledException)
         {
@@ -495,6 +476,20 @@ internal static class CaptureImageValidator
         catch (CaptureException)
         {
             throw;
+        }
+        catch (ImageDecodeException exception) when (exception.Failure == ImageDecodeFailure.UnsupportedCodec)
+        {
+            throw new CaptureValidationException(
+                "UNSUPPORTED_IMAGE_CODEC",
+                "图像编码格式不是受支持的 PNG 或 JPEG，请重新选择文件。",
+                exception);
+        }
+        catch (ImageDecodeException exception) when (exception.Failure == ImageDecodeFailure.DimensionsTooLarge)
+        {
+            throw new CaptureValidationException(
+                "IMAGE_DIMENSIONS_TOO_LARGE",
+                $"图像尺寸不能超过 {CaptureStore.MaximumImageWidth}×{CaptureStore.MaximumImageHeight}，且像素总数不能超过 {CaptureStore.MaximumPixelCount:N0}。",
+                exception);
         }
         catch (Exception exception)
         {

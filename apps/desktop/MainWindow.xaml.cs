@@ -1,64 +1,53 @@
-using Microsoft.UI.Xaml;
+using Omrina.Core;
+using Omrina.Platform;
 using Omrina.Scanning;
 using Omrina.Server;
-using NAPS2.Images.Gdi;
-using NAPS2.Scan;
-using System.Collections.ObjectModel;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace Omrina.Desktop;
 
 public sealed partial class MainWindow : Window
 {
-    private const double WideLayoutBreakpoint = 720;
     private readonly LoopbackHealthServer _healthServer = new();
-    private readonly ScanningContext _scanningContext;
-    private readonly ScanController _scanController;
-    private readonly ObservableCollection<ScannerDeviceItem> _devices = [];
-    private TemplateWindow? _templateWindow;
-    private bool _enumerationInProgress;
-    private bool _scanInProgress;
+    private readonly CaptureStore _captureStore = new();
+    private readonly IScannerService _scannerService;
+    private readonly IFileDialogService _fileDialogService;
+    private readonly TemplatePrintController? _printController;
+    private readonly StatusPage _statusPage;
+    private readonly TemplatePage _templatePage;
+    private readonly CapturePage _capturePage;
+    private readonly SettingsPage _settingsPage;
+    private readonly AboutPage _aboutPage;
     private bool _isClosed;
-    private bool _scanningContextDisposed;
-    private CancellationTokenSource? _scanCancellation;
 
     public MainWindow()
     {
         InitializeComponent();
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
 
-        _scanningContext = new ScanningContext(new GdiImageContext());
-        _scanningContext.SetUpWin32Worker();
-        _scanController = new ScanController(_scanningContext);
+        _statusPage = new StatusPage();
+        _settingsPage = new SettingsPage();
+        _aboutPage = new AboutPage();
+        _fileDialogService = DesktopPlatformFactory.CreateFileDialogs(this);
+        _scannerService = DesktopPlatformFactory.CreateScanner(_captureStore.RootDirectory);
+        _printController = CreatePrintController();
+        _templatePage = new TemplatePage(
+            SaveSvgAsync,
+            _printController is null ? null : PrintAsync,
+            () => _printController?.IsBusy == true);
+        _capturePage = new CapturePage(
+            _scannerService,
+            PickImageAsync,
+            OpenScanImageAsync,
+            PersistCaptureAsync,
+            DesktopPlatformFactory.DeleteTemporaryScanFile);
+        _templatePage.CaptureRequested += TemplatePage_CaptureRequested;
 
-        DeviceList.ItemsSource = _devices;
+        NavigationFrame.Content = _statusPage;
+        AppNavigationView.SelectedItem = AppNavigationView.MenuItems[0];
         Closed += MainWindow_Closed;
-    }
-
-    private void RootLayout_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        var useWideLayout = e.NewSize.Width >= WideLayoutBreakpoint;
-        DeviceActions.Orientation = useWideLayout
-            ? Microsoft.UI.Xaml.Controls.Orientation.Horizontal
-            : Microsoft.UI.Xaml.Controls.Orientation.Vertical;
-        Microsoft.UI.Xaml.Controls.Grid.SetRow(DeviceActions, useWideLayout ? 0 : 1);
-        Microsoft.UI.Xaml.Controls.Grid.SetColumn(DeviceActions, useWideLayout ? 1 : 0);
-        Microsoft.UI.Xaml.Controls.Grid.SetColumnSpan(DeviceActions, useWideLayout ? 1 : 2);
-        Microsoft.UI.Xaml.Controls.Grid.SetColumnSpan(DeviceHeading, useWideLayout ? 1 : 2);
-        DeviceActions.HorizontalAlignment = useWideLayout
-            ? HorizontalAlignment.Right
-            : HorizontalAlignment.Stretch;
-    }
-
-    private void TemplateButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_templateWindow is not null)
-        {
-            _templateWindow.Activate();
-            return;
-        }
-
-        _templateWindow = new TemplateWindow();
-        _templateWindow.Closed += (_, _) => _templateWindow = null;
-        _templateWindow.Activate();
     }
 
     public async Task StartHealthServerAsync()
@@ -68,7 +57,8 @@ public sealed partial class MainWindow : Window
             await _healthServer.StartAsync();
             if (!_isClosed)
             {
-                ConnectionStatusText.Text = $"本地连接服务已就绪： http://127.0.0.1:{LoopbackHealthServer.Port}/health";
+                _statusPage.SetConnectionStatus(
+                    $"本地连接服务已就绪： http://127.0.0.1:{LoopbackHealthServer.Port}/health");
             }
         }
         catch (Exception exception)
@@ -76,196 +66,148 @@ public sealed partial class MainWindow : Window
             if (!_isClosed)
             {
                 var rootCause = exception.GetBaseException();
-                ConnectionStatusText.Text = $"本地连接服务启动失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。设备枚举仍可使用。";
+                _statusPage.SetConnectionStatus(
+                    $"本地连接服务启动失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。模板和采集仍可使用。");
             }
         }
     }
 
-    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+    private void AppNavigationView_SelectionChanged(
+        NavigationView sender,
+        NavigationViewSelectionChangedEventArgs args)
     {
-        RefreshButton.IsEnabled = false;
-        LoadingRing.Visibility = Visibility.Visible;
-        LoadingRing.IsActive = true;
-        _devices.Clear();
-        DeviceList.SelectedItem = null;
-        ScanButton.IsEnabled = false;
-        _enumerationInProgress = true;
-        var failures = new List<string>();
-
-        try
-        {
-            await EnumerateDriverAsync(Driver.Wia, failures);
-            await EnumerateDriverAsync(Driver.Twain, failures);
-
-            if (!_isClosed)
-            {
-                var result = _devices.Count == 0
-                    ? "未发现 WIA 或 TWAIN 扫描设备。请确认设备已连接并安装驱动后重试。"
-                    : $"已发现 {_devices.Count} 个设备入口。";
-                DeviceStatusText.Text = failures.Count == 0
-                    ? result
-                    : $"{result} 枚举异常：{string.Join("；", failures)}。请检查相应驱动后重试。";
-            }
-        }
-        finally
-        {
-            _enumerationInProgress = false;
-            if (_isClosed)
-            {
-                DisposeScanningContext();
-            }
-            else
-            {
-                LoadingRing.IsActive = false;
-                LoadingRing.Visibility = Visibility.Collapsed;
-                RefreshButton.IsEnabled = true;
-                UpdateScanButtonState();
-            }
-        }
-    }
-
-    private async Task EnumerateDriverAsync(Driver driver, ICollection<string> failures)
-    {
-        if (_isClosed)
+        if (args.SelectedItem is not NavigationViewItem item || item.Tag is not string tag)
         {
             return;
         }
 
+        switch (tag)
+        {
+            case "status":
+                NavigateTo(_statusPage, "状态");
+                break;
+            case "template":
+                NavigateTo(_templatePage, "模板");
+                break;
+            case "capture":
+                NavigateTo(_capturePage, "采集");
+                break;
+            case "settings":
+                NavigateTo(_settingsPage, "设置");
+                break;
+            case "about":
+                NavigateTo(_aboutPage, "关于");
+                break;
+        }
+    }
+
+    private void NavigateTo(Page page, string title)
+    {
+        if (!ReferenceEquals(NavigationFrame.Content, page))
+        {
+            NavigationFrame.Content = page;
+        }
+
+        TitleBarPageText.Text = title;
+    }
+
+    private void TemplatePage_CaptureRequested(AnswerSheetLayout layout)
+    {
+        _capturePage.SetLayout(layout);
+        SelectNavigationItem("capture");
+    }
+
+    private void SelectNavigationItem(string tag)
+    {
+        foreach (var item in AppNavigationView.MenuItems.OfType<NavigationViewItem>())
+        {
+            if (string.Equals(item.Tag as string, tag, StringComparison.Ordinal))
+            {
+                AppNavigationView.SelectedItem = item;
+                return;
+            }
+        }
+    }
+
+    private TemplatePrintController? CreatePrintController()
+    {
         try
         {
-            var devices = await _scanController.GetDeviceList(driver);
-            if (!_isClosed)
-            {
-                AddDevices(devices);
-            }
+            return new TemplatePrintController(
+                this,
+                message => _templatePage?.ReportPlatformStatus(message));
         }
         catch (Exception exception)
         {
-            failures.Add($"{driver}：{exception.GetType().Name}（0x{exception.HResult:X8}）");
+            var rootCause = exception.GetBaseException();
+            _statusPage?.SetConnectionStatus(
+                $"系统打印不可用：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。模板仍可保存和导入。");
+            return null;
         }
     }
 
-    private void AddDevices(IEnumerable<ScanDevice> devices)
+    private async Task PrintAsync(AnswerSheetLayout layout)
     {
-        foreach (var device in devices)
+        if (_printController is null)
         {
-            _devices.Add(new ScannerDeviceItem(device));
+            throw new InvalidOperationException("系统打印服务不可用。");
         }
+
+        await _printController.RequestPrintAsync(layout);
     }
 
-    private void DeviceList_SelectionChanged(object sender, Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs e)
+    private async Task<SvgSaveResult> SaveSvgAsync(AnswerSheetLayout layout)
     {
-        UpdateScanButtonState();
+        var result = await _fileDialogService.SaveTextAsync(
+            "omrina-template",
+            ".svg",
+            layout.ToSvg());
+        return new SvgSaveResult(result.Cancelled, result.Path);
     }
 
-    private async void ScanButton_Click(object sender, RoutedEventArgs e)
+    private async Task<IInputImageFile?> PickImageAsync(CancellationToken cancellationToken)
     {
-        if (DeviceList.SelectedItem is not ScannerDeviceItem selectedDevice || _scanInProgress)
-        {
-            return;
-        }
-
-        _scanInProgress = true;
-        _scanCancellation = new CancellationTokenSource();
-        RefreshButton.IsEnabled = false;
-        ScanButton.IsEnabled = false;
-        CancelScanButton.IsEnabled = true;
-        DeviceStatusText.Text = $"正在使用 {selectedDevice.Name} 扫描测试纸（平板、A4、300 DPI）。";
-
-        try
-        {
-            var outputPath = await TestScanService.ScanFirstPageAsync(
-                _scanController,
-                selectedDevice.Device,
-                _scanCancellation.Token);
-            if (!_isClosed)
-            {
-                DeviceStatusText.Text = $"测试扫描完成，已保存首张 PNG：{outputPath}";
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            if (!_isClosed)
-            {
-                DeviceStatusText.Text = "测试扫描已取消。";
-            }
-        }
-        catch (Exception exception)
-        {
-            if (!_isClosed)
-            {
-                var rootCause = exception.GetBaseException();
-                DeviceStatusText.Text = $"测试扫描失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请检查设备与测试纸后重试。";
-            }
-        }
-        finally
-        {
-            _scanCancellation.Dispose();
-            _scanCancellation = null;
-            _scanInProgress = false;
-            if (_isClosed)
-            {
-                if (!_enumerationInProgress)
-                {
-                    DisposeScanningContext();
-                }
-            }
-            else
-            {
-                RefreshButton.IsEnabled = true;
-                CancelScanButton.IsEnabled = false;
-                UpdateScanButtonState();
-            }
-        }
+        return await _fileDialogService.PickImageAsync(cancellationToken);
     }
 
-    private void CancelScanButton_Click(object sender, RoutedEventArgs e)
+    private static Task<IInputImageFile> OpenScanImageAsync(
+        string path,
+        CancellationToken cancellationToken)
     {
-        _scanCancellation?.Cancel();
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<IInputImageFile>(new LocalInputImageFile(path));
     }
 
-    private void UpdateScanButtonState()
+    private Task<CaptureRecord> PersistCaptureAsync(
+        AnswerSheetLayout layout,
+        IInputImageFile file,
+        CaptureSourceType sourceType,
+        CancellationToken cancellationToken)
     {
-        ScanButton.IsEnabled = !_isClosed
-            && !_enumerationInProgress
-            && !_scanInProgress
-            && DeviceList.SelectedItem is ScannerDeviceItem;
+        return _captureStore.ImportAsync(layout, file, sourceType, cancellationToken);
     }
 
     private async void MainWindow_Closed(object sender, WindowEventArgs args)
     {
         _isClosed = true;
-        _scanCancellation?.Cancel();
-        if (!_enumerationInProgress && !_scanInProgress)
-        {
-            DisposeScanningContext();
-        }
-
         try
         {
+            await _capturePage.CancelAndWaitAsync();
+            if (_printController is not null)
+            {
+                await _printController.WaitForIdleAsync();
+            }
             await _healthServer.StopAsync();
         }
         catch (Exception exception)
         {
-            System.Diagnostics.Debug.WriteLine($"本地连接服务停止失败：{exception.GetType().Name}（0x{exception.HResult:X8}）");
+            System.Diagnostics.Debug.WriteLine(
+                $"OMRINA 主窗口关闭清理失败：{exception.GetType().Name}（0x{exception.HResult:X8}）。");
         }
-    }
-
-    private void DisposeScanningContext()
-    {
-        if (_scanningContextDisposed)
+        finally
         {
-            return;
+            _printController?.Dispose();
+            await _scannerService.DisposeAsync();
         }
-
-        _scanningContext.Dispose();
-        _scanningContextDisposed = true;
     }
-}
-
-public sealed record ScannerDeviceItem(ScanDevice Device)
-{
-    public string Driver => Device.Driver.ToString().ToUpperInvariant();
-
-    public string Name => Device.Name;
 }

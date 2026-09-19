@@ -1,60 +1,119 @@
 using Omrina.Core;
 using Omrina.Scanning;
+using Omrina.Platform;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using System.Globalization;
 using System.Collections.ObjectModel;
-using Windows.Storage.Pickers;
-using Windows.Storage;
+using System.Globalization;
 
 namespace Omrina.Desktop;
 
 /// <summary>
-/// Local M1 capture window. A caller may provide a generated layout so the image
-/// can be associated with the same template that was previewed elsewhere.
+/// Cached capture page hosted by <see cref="MainWindow"/>.
+/// Native file selection, temporary-file wrapping and scanner lifetime are
+/// supplied by the host/platform boundary.
 /// </summary>
-public sealed partial class CaptureWindow : Window
+public sealed partial class CapturePage : Page
 {
-    private readonly CaptureStore _captureStore;
-    private readonly Naps2ScannerService _scannerService;
+    private readonly IScannerService? _scannerService;
+    private readonly Func<CancellationToken, Task<IInputImageFile?>>? _pickImageAsync;
+    private readonly Func<string, CancellationToken, Task<IInputImageFile>>? _openScanImageAsync;
+    private readonly Func<
+        AnswerSheetLayout,
+        IInputImageFile,
+        CaptureSourceType,
+        CancellationToken,
+        Task<CaptureRecord>>? _persistCaptureAsync;
+    private readonly Action<string>? _deleteTemporaryScanFile;
     private readonly ObservableCollection<CaptureScannerDeviceItem> _scannerDevices = [];
     private AnswerSheetLayout? _layout;
     private bool _templateMatchesInputs;
     private CancellationTokenSource? _importCancellation;
+    private CancellationTokenSource? _enumerationCancellation;
     private CancellationTokenSource? _scanCancellation;
     private bool _enumerationInProgress;
     private bool _scanInProgress;
-    private bool _scannerServiceDisposed;
+    private TaskCompletionSource<bool>? _activeOperationCompletion;
     private bool _isClosed;
+    private bool _updatingLayoutInputs;
 
-    public CaptureWindow()
-        : this(null, null)
+    public CapturePage()
+        : this(null, null, null, null, null, null)
     {
     }
 
-    public CaptureWindow(AnswerSheetLayout layout)
-        : this(layout, null)
-    {
-    }
-
-    public CaptureWindow(AnswerSheetLayout? layout, CaptureStore? captureStore)
+    public CapturePage(
+        IScannerService? scannerService,
+        Func<CancellationToken, Task<IInputImageFile?>>? pickImageAsync,
+        Func<string, CancellationToken, Task<IInputImageFile>>? openScanImageAsync,
+        Func<
+            AnswerSheetLayout,
+            IInputImageFile,
+            CaptureSourceType,
+            CancellationToken,
+            Task<CaptureRecord>>? persistCaptureAsync,
+        Action<string>? deleteTemporaryScanFile,
+        AnswerSheetLayout? initialLayout = null)
     {
         InitializeComponent();
-        _captureStore = captureStore ?? new CaptureStore();
-        _scannerService = new Naps2ScannerService(_captureStore.RootDirectory);
+        _scannerService = scannerService;
+        _pickImageAsync = pickImageAsync;
+        _openScanImageAsync = openScanImageAsync;
+        _persistCaptureAsync = persistCaptureAsync;
+        _deleteTemporaryScanFile = deleteTemporaryScanFile;
         ScannerList.ItemsSource = _scannerDevices;
-        Closed += CaptureWindow_Closed;
 
-        if (layout is null)
+        if (initialLayout is not null)
+        {
+            TitleBox.Text = initialLayout.Title;
+            QuestionCountBox.Value = initialLayout.QuestionCount;
+            OptionsPerQuestionBox.Value = initialLayout.OptionsPerQuestion;
+            SetLayout(initialLayout);
+        }
+        else
         {
             UpdateImportButtonState();
-            return;
+            UpdateScannerAvailability();
         }
+    }
 
-        TitleBox.Text = layout.Title;
-        QuestionCountBox.Value = layout.QuestionCount;
-        OptionsPerQuestionBox.Value = layout.OptionsPerQuestion;
-        SetLayout(layout);
+    public AnswerSheetLayout? CurrentLayout => _layout;
+
+    public bool IsBusy => _importCancellation is not null || _enumerationInProgress || _scanInProgress;
+
+    public Task WaitForIdleAsync() => _activeOperationCompletion?.Task ?? Task.CompletedTask;
+
+    public void SetLayout(AnswerSheetLayout layout)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        _layout = layout;
+        _templateMatchesInputs = true;
+        _updatingLayoutInputs = true;
+        try
+        {
+            TitleBox.Text = layout.Title;
+            QuestionCountBox.Value = layout.QuestionCount;
+            OptionsPerQuestionBox.Value = layout.OptionsPerQuestion;
+        }
+        finally
+        {
+            _updatingLayoutInputs = false;
+        }
+        var template = CaptureTemplateReference.FromLayout(layout);
+        TemplateIdText.Text = $"模板 ID：{template.TemplateId}";
+        CaptureStatusText.Text = $"模板参数已确认：{layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项。";
+        UpdateImportButtonState();
+        UpdateScanCaptureButtonState();
+    }
+
+    public async Task CancelAndWaitAsync()
+    {
+        _isClosed = true;
+        _importCancellation?.Cancel();
+        _enumerationCancellation?.Cancel();
+        _scanCancellation?.Cancel();
+        var idle = WaitForIdleAsync();
+        await idle.ConfigureAwait(true);
     }
 
     private void GenerateTemplateButton_Click(object sender, RoutedEventArgs e)
@@ -74,6 +133,11 @@ public sealed partial class CaptureWindow : Window
 
     private void GenerateLayout()
     {
+        if (IsBusy)
+        {
+            return;
+        }
+
         GenerateTemplateButton.IsEnabled = false;
         CaptureStatusText.Text = "正在确认模板参数。";
 
@@ -83,7 +147,6 @@ public sealed partial class CaptureWindow : Window
             var optionsPerQuestion = ReadInteger(OptionsPerQuestionBox, "每题选项数");
             var layout = AnswerSheetLayout.Create(TitleBox.Text, questionCount, optionsPerQuestion);
             SetLayout(layout);
-            CaptureStatusText.Text = $"模板参数已确认：{layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项。";
         }
         catch (Exception exception)
         {
@@ -92,16 +155,17 @@ public sealed partial class CaptureWindow : Window
             TemplateIdText.Text = "模板参数无效。";
             CaptureStatusText.Text = FormatFailure("模板参数确认失败", exception, "请检查标题、题数和选项数后重试。");
             UpdateImportButtonState();
+            UpdateScanCaptureButtonState();
         }
         finally
         {
-            GenerateTemplateButton.IsEnabled = !_isClosed && _importCancellation is null;
+            GenerateTemplateButton.IsEnabled = !_isClosed;
         }
     }
 
     private async void ImportButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_layout is null || !_templateMatchesInputs || _importCancellation is not null)
+        if (_layout is null || !_templateMatchesInputs || _pickImageAsync is null || _persistCaptureAsync is null)
         {
             CaptureStatusText.Text = "请先确认有效的模板参数。";
             UpdateImportButtonState();
@@ -109,30 +173,19 @@ public sealed partial class CaptureWindow : Window
         }
 
         var layout = _layout;
-        using var cancellation = new CancellationTokenSource();
-        _importCancellation = cancellation;
-        SetBusy(true);
-
+        var cancellation = BeginImportOperation();
         try
         {
-            var picker = new FileOpenPicker();
-            picker.FileTypeFilter.Add(".png");
-            picker.FileTypeFilter.Add(".jpg");
-            picker.FileTypeFilter.Add(".jpeg");
-            WinRT.Interop.InitializeWithWindow.Initialize(
-                picker,
-                WinRT.Interop.WindowNative.GetWindowHandle(this));
-
             CaptureStatusText.Text = "请选择要导入的 PNG 或 JPEG 图像。";
-            var file = await picker.PickSingleFileAsync();
+            var file = await _pickImageAsync(cancellation.Token);
             if (file is null)
             {
-                CaptureStatusText.Text = "已取消图像导入。";
+                CaptureStatusText.Text = "已取消图像导入，未留下采集记录。";
                 return;
             }
 
             CaptureStatusText.Text = "正在验证图像并保存原图。";
-            var capture = await _captureStore.ImportAsync(
+            var capture = await _persistCaptureAsync(
                 layout,
                 file,
                 CaptureSourceType.Import,
@@ -155,19 +208,11 @@ public sealed partial class CaptureWindow : Window
         }
         catch (Exception exception)
         {
-            CaptureStatusText.Text = FormatFailure(
-                "图像导入失败",
-                exception,
-                "请重新选择文件后重试。");
+            CaptureStatusText.Text = FormatFailure("图像导入失败", exception, "请重新选择文件后重试。");
         }
         finally
         {
-            _importCancellation = null;
-            SetBusy(false);
-            if (_isClosed && !_enumerationInProgress && !_scanInProgress)
-            {
-                DisposeScannerService();
-            }
+            EndImportOperation(cancellation);
         }
     }
 
@@ -184,20 +229,23 @@ public sealed partial class CaptureWindow : Window
 
     private async void RefreshScannerButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_enumerationInProgress || _scanInProgress || _importCancellation is not null)
+        if (_scannerService is null || _enumerationInProgress || _scanInProgress || _importCancellation is not null)
         {
+            CaptureStatusText.Text = "当前平台暂未提供扫描设备服务。";
             return;
         }
 
         _enumerationInProgress = true;
+        _enumerationCancellation = new CancellationTokenSource();
+        BeginOperation();
         _scannerDevices.Clear();
         ScannerList.SelectedItem = null;
         RefreshScannerButton.IsEnabled = false;
         ScanCaptureButton.IsEnabled = false;
-        CaptureStatusText.Text = "正在刷新 WIA 与 TWAIN 扫描设备。";
+        CaptureStatusText.Text = "正在刷新扫描设备。";
         try
         {
-            var devices = await _scannerService.GetDevicesAsync();
+            var devices = await _scannerService.GetDevicesAsync(_enumerationCancellation.Token);
             foreach (var device in devices)
             {
                 _scannerDevices.Add(new CaptureScannerDeviceItem(device));
@@ -205,23 +253,29 @@ public sealed partial class CaptureWindow : Window
 
             if (!_isClosed)
             {
-                var result = _scannerDevices.Count == 0
-                    ? "未发现 WIA 或 TWAIN 扫描设备，请连接设备并重试。"
+                CaptureStatusText.Text = _scannerDevices.Count == 0
+                    ? "未发现扫描设备，请连接设备并重试。"
                     : $"已发现 {_scannerDevices.Count} 个扫描设备入口。";
-                CaptureStatusText.Text = result;
             }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_isClosed)
+            {
+                CaptureStatusText.Text = "刷新扫描设备已取消。";
+            }
+        }
+        catch (Exception exception)
+        {
+            CaptureStatusText.Text = FormatFailure("扫描设备刷新失败", exception, "请检查设备与驱动后重试。");
         }
         finally
         {
+            _enumerationCancellation.Dispose();
+            _enumerationCancellation = null;
             _enumerationInProgress = false;
-            if (_isClosed)
-            {
-                if (!_scanInProgress)
-                {
-                    DisposeScannerService();
-                }
-            }
-            else
+            EndOperation();
+            if (!_isClosed)
             {
                 RefreshScannerButton.IsEnabled = true;
                 UpdateScanCaptureButtonState();
@@ -241,6 +295,9 @@ public sealed partial class CaptureWindow : Window
             || _scanInProgress
             || _enumerationInProgress
             || _importCancellation is not null
+            || _scannerService is null
+            || _openScanImageAsync is null
+            || _persistCaptureAsync is null
             || ScannerList.SelectedItem is not CaptureScannerDeviceItem selectedDevice)
         {
             CaptureStatusText.Text = "请先确认模板参数并选择扫描设备。";
@@ -256,14 +313,13 @@ public sealed partial class CaptureWindow : Window
         }
         catch (Exception exception)
         {
-            CaptureStatusText.Text = FormatFailure(
-                "扫描参数无效",
-                exception,
-                "请选择 150、300 或 600 DPI 后重试。");
+            CaptureStatusText.Text = FormatFailure("扫描参数无效", exception, "请选择 150、300 或 600 DPI 后重试。");
             return;
         }
+
         _scanInProgress = true;
         _scanCancellation = new CancellationTokenSource();
+        BeginOperation();
         SetScanBusy(true);
         SetBusy(true);
         CaptureStatusText.Text =
@@ -277,9 +333,8 @@ public sealed partial class CaptureWindow : Window
                 new ScanOptions(dpi),
                 _scanCancellation.Token);
             temporaryPath = scan.ImagePath;
-
-            var scanFile = await StorageFile.GetFileFromPathAsync(temporaryPath);
-            var capture = await _captureStore.ImportAsync(
+            var scanFile = await _openScanImageAsync(temporaryPath, _scanCancellation.Token);
+            var capture = await _persistCaptureAsync(
                 layout,
                 scanFile,
                 CaptureSourceType.Scan,
@@ -297,34 +352,24 @@ public sealed partial class CaptureWindow : Window
         }
         catch (CaptureException exception)
         {
-            CaptureStatusText.Text =
-                $"扫描保存失败：{exception.Message} 错误代码：{exception.Code}。请重试。";
+            CaptureStatusText.Text = $"扫描保存失败：{exception.Message} 错误代码：{exception.Code}。请重试。";
         }
         catch (Exception exception)
         {
-            CaptureStatusText.Text = FormatFailure(
-                "扫描保存失败",
-                exception,
-                "请检查设备、测试纸和分辨率后重试。");
+            CaptureStatusText.Text = FormatFailure("扫描保存失败", exception, "请检查设备、测试纸和分辨率后重试。");
         }
         finally
         {
             if (temporaryPath is not null)
             {
-                CaptureScanService.DeleteTemporaryFile(temporaryPath);
+                _deleteTemporaryScanFile?.Invoke(temporaryPath);
             }
 
             _scanCancellation?.Dispose();
             _scanCancellation = null;
             _scanInProgress = false;
-            if (_isClosed)
-            {
-                if (!_enumerationInProgress)
-                {
-                    DisposeScannerService();
-                }
-            }
-            else
+            EndOperation();
+            if (!_isClosed)
             {
                 SetBusy(false);
                 SetScanBusy(false);
@@ -343,29 +388,14 @@ public sealed partial class CaptureWindow : Window
         _scanCancellation.Cancel();
     }
 
-    private void CaptureWindow_Closed(object sender, WindowEventArgs args)
+    private void SetLayoutFromTemplate(AnswerSheetLayout layout)
     {
-        _isClosed = true;
-        _importCancellation?.Cancel();
-        _scanCancellation?.Cancel();
-        if (!_enumerationInProgress && !_scanInProgress)
-        {
-            DisposeScannerService();
-        }
-    }
-
-    private void SetLayout(AnswerSheetLayout layout)
-    {
-        _layout = layout;
-        _templateMatchesInputs = true;
-        var template = CaptureTemplateReference.FromLayout(layout);
-        TemplateIdText.Text = $"模板 ID：{template.TemplateId}";
-        UpdateImportButtonState();
+        SetLayout(layout);
     }
 
     private void MarkTemplateOutdated()
     {
-        if (_layout is null || !_templateMatchesInputs)
+        if (_updatingLayoutInputs || _layout is null || !_templateMatchesInputs)
         {
             return;
         }
@@ -375,6 +405,7 @@ public sealed partial class CaptureWindow : Window
         TemplateIdText.Text = "参数已变更，请重新确认模板参数。";
         CaptureStatusText.Text = "参数已变更，请重新确认模板参数。";
         UpdateImportButtonState();
+        UpdateScanCaptureButtonState();
     }
 
     private void SetBusy(bool busy)
@@ -384,8 +415,12 @@ public sealed partial class CaptureWindow : Window
         QuestionCountBox.IsEnabled = !busy && !_isClosed;
         OptionsPerQuestionBox.IsEnabled = !busy && !_isClosed;
         ImportButton.IsEnabled = !busy && !_isClosed && _layout is not null && _templateMatchesInputs;
-        CancelImportButton.IsEnabled = busy && !_isClosed;
-        RefreshScannerButton.IsEnabled = !busy && !_isClosed && !_enumerationInProgress && !_scanInProgress;
+        CancelImportButton.IsEnabled = busy && _importCancellation is not null && !_isClosed;
+        RefreshScannerButton.IsEnabled = !busy
+            && !_isClosed
+            && _scannerService is not null
+            && !_enumerationInProgress
+            && !_scanInProgress;
         ResolutionComboBox.IsEnabled = !busy && !_isClosed && !_scanInProgress;
         UpdateScanCaptureButtonState();
     }
@@ -397,7 +432,88 @@ public sealed partial class CaptureWindow : Window
             return;
         }
 
-        ImportButton.IsEnabled = !_isClosed && _layout is not null && _templateMatchesInputs;
+        ImportButton.IsEnabled = !_isClosed
+            && _pickImageAsync is not null
+            && _persistCaptureAsync is not null
+            && _layout is not null
+            && _templateMatchesInputs;
+    }
+
+    private void SetScanBusy(bool busy)
+    {
+        RefreshScannerButton.IsEnabled = !busy
+            && !_isClosed
+            && _scannerService is not null
+            && !_enumerationInProgress
+            && _importCancellation is null;
+        ResolutionComboBox.IsEnabled = !busy && !_isClosed && _importCancellation is null;
+        ScannerList.IsEnabled = !busy && !_isClosed && _importCancellation is null;
+        CancelScanCaptureButton.IsEnabled = busy && !_isClosed;
+        UpdateScanCaptureButtonState();
+    }
+
+    private void UpdateScanCaptureButtonState()
+    {
+        ScanCaptureButton.IsEnabled = !_isClosed
+            && _scannerService is not null
+            && !_enumerationInProgress
+            && !_scanInProgress
+            && _importCancellation is null
+            && _layout is not null
+            && _templateMatchesInputs
+            && _openScanImageAsync is not null
+            && _persistCaptureAsync is not null
+            && ScannerList.SelectedItem is CaptureScannerDeviceItem;
+    }
+
+    private void UpdateScannerAvailability()
+    {
+        var available = _scannerService is not null;
+        RefreshScannerButton.IsEnabled = available && !_isClosed;
+        ScannerList.IsEnabled = available && !_isClosed;
+        if (!available)
+        {
+            CaptureStatusText.Text = "当前平台暂未提供扫描设备服务；你仍可导入图像。";
+        }
+    }
+
+    private CancellationTokenSource BeginImportOperation()
+    {
+        var cancellation = new CancellationTokenSource();
+        _importCancellation = cancellation;
+        BeginOperation();
+        SetBusy(true);
+        return cancellation;
+    }
+
+    private void EndImportOperation(CancellationTokenSource cancellation)
+    {
+        if (ReferenceEquals(_importCancellation, cancellation))
+        {
+            _importCancellation = null;
+        }
+
+        cancellation.Dispose();
+        EndOperation();
+        if (!_isClosed)
+        {
+            SetBusy(false);
+            UpdateImportButtonState();
+        }
+    }
+
+    private void BeginOperation()
+    {
+        _activeOperationCompletion ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private void EndOperation()
+    {
+        if (_importCancellation is null && !_enumerationInProgress && !_scanInProgress)
+        {
+            _activeOperationCompletion?.TrySetResult(true);
+            _activeOperationCompletion = null;
+        }
     }
 
     private static int ReadInteger(NumberBox numberBox, string name)
@@ -424,37 +540,6 @@ public sealed partial class CaptureWindow : Window
         throw new InvalidOperationException("请选择 150、300 或 600 DPI。");
     }
 
-    private void SetScanBusy(bool busy)
-    {
-        RefreshScannerButton.IsEnabled = !busy && !_isClosed && !_enumerationInProgress && _importCancellation is null;
-        ResolutionComboBox.IsEnabled = !busy && !_isClosed && _importCancellation is null;
-        ScannerList.IsEnabled = !busy && !_isClosed && _importCancellation is null;
-        CancelScanCaptureButton.IsEnabled = busy && !_isClosed;
-        UpdateScanCaptureButtonState();
-    }
-
-    private void UpdateScanCaptureButtonState()
-    {
-        ScanCaptureButton.IsEnabled = !_isClosed
-            && !_enumerationInProgress
-            && !_scanInProgress
-            && _importCancellation is null
-            && _layout is not null
-            && _templateMatchesInputs
-            && ScannerList.SelectedItem is CaptureScannerDeviceItem;
-    }
-
-    private void DisposeScannerService()
-    {
-        if (_scannerServiceDisposed)
-        {
-            return;
-        }
-
-        _scannerService.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        _scannerServiceDisposed = true;
-    }
-
     private static string FormatFailure(string operation, Exception exception, string nextStep)
     {
         var rootCause = exception.GetBaseException();
@@ -464,7 +549,7 @@ public sealed partial class CaptureWindow : Window
 
 public sealed record CaptureScannerDeviceItem(ScannerDevice Device)
 {
-    public string Driver => Device.Driver.ToString().ToUpperInvariant();
+    public string Driver => Device.Driver.ToUpperInvariant();
 
     public string Name => Device.Name;
 }

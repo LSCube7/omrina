@@ -5,6 +5,7 @@ namespace Omrina.Desktop;
 public partial class App : Application
 {
     private MainWindow? _window;
+    private bool _healthServerStarted;
 
     public App()
     {
@@ -13,8 +14,12 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        _window = new MainWindow();
+        _window ??= new MainWindow();
         _window.Activate();
-        _ = _window.StartHealthServerAsync();
+        if (!_healthServerStarted)
+        {
+            _healthServerStarted = true;
+            _ = _window.StartHealthServerAsync();
+        }
     }
 }

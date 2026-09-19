@@ -1,10 +1,10 @@
-<Window
-    x:Class="Omrina.Desktop.CaptureWindow"
+<Page
+    x:Class="Omrina.Desktop.CapturePage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:automation="using:Microsoft.UI.Xaml.Automation"
     xmlns:local="using:Omrina.Desktop"
-    Title="OMRINA 图像采集 - M1">
+    NavigationCacheMode="Required">
 
     <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
         <StackPanel Padding="24" Spacing="16">
@@ -108,4 +108,4 @@
                 Message="只能读取你在文件选择器中明确选择的 PNG 或 JPEG 文件；取消选择不会保存记录。" />
         </StackPanel>
     </ScrollViewer>
-</Window>
+</Page>

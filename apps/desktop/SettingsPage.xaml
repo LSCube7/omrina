@@ -1,0 +1,27 @@
+<Page
+    x:Class="Omrina.Desktop.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16">
+            <StackPanel Spacing="4">
+                <TextBlock Text="设置" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="查看当前应用范围和本地数据策略。" TextWrapping="Wrap" />
+            </StackPanel>
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="本地数据" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="采集原图和 manifest 保存在应用本地数据目录，并按每次采集建立独立记录。" TextWrapping="Wrap" />
+                    <TextBlock Text="文件选择器取消时不会创建采集记录。" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="设备访问" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="只有在采集页明确刷新设备并发起操作时，才会访问扫描设备。" TextWrapping="Wrap" />
+                    <TextBlock Text="当前扫描流程固定为平板、A4 和单页。" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

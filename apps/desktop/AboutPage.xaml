@@ -1,0 +1,26 @@
+<Page
+    x:Class="Omrina.Desktop.AboutPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16">
+            <StackPanel Spacing="4">
+                <TextBlock Text="关于 OMRINA" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="本地 Integration Agent 的桌面入口。" TextWrapping="Wrap" />
+            </StackPanel>
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="已实现范围" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="模板几何、预览、SVG 导出、系统打印请求、图像导入和模板关联采集。" TextWrapping="Wrap" />
+                    <TextBlock Text="阅卷、评分、人工复核及浏览器业务接口属于后续范围。" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+            <InfoBar
+                IsOpen="True"
+                IsClosable="False"
+                Severity="Informational"
+                Title="品牌资源"
+                Message="品牌图标入口已预留，当前保持隐藏，不加载外部设计图。" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

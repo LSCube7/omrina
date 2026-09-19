@@ -1,19 +1,19 @@
-using NAPS2.Images.Gdi;
 using NAPS2.Scan;
 using Omrina.Scanning;
 
 namespace Omrina.Desktop;
 
 /// <summary>
-/// Windows NAPS2 adapter for the platform-neutral scanner contract.
-/// NAPS2 and WIA/TWAIN types stay inside this file and the desktop project.
+/// NAPS2 adapter for the platform-neutral scanner contract.
+/// NAPS2 and native driver types stay inside this file and the matching platform
+/// implementation selected by Naps2ScannerPlatform.
 /// </summary>
 internal sealed class Naps2ScannerService : IScannerService
 {
     private readonly string _temporaryRoot;
     private readonly ScanningContext _scanningContext;
     private readonly ScanController _scanController;
-    private readonly Dictionary<string, ScanDevice> _nativeDevices = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ScanDevice Device, Driver Driver)> _nativeDevices = new(StringComparer.Ordinal);
     private bool _disposed;
 
     public Naps2ScannerService(string temporaryRoot)
@@ -24,8 +24,7 @@ internal sealed class Naps2ScannerService : IScannerService
         }
 
         _temporaryRoot = Path.GetFullPath(temporaryRoot);
-        _scanningContext = new ScanningContext(new GdiImageContext());
-        _scanningContext.SetUpWin32Worker();
+        _scanningContext = Naps2ScannerPlatform.CreateContext();
         _scanController = new ScanController(_scanningContext);
     }
 
@@ -36,7 +35,7 @@ internal sealed class Naps2ScannerService : IScannerService
         _nativeDevices.Clear();
         var devices = new List<ScannerDevice>();
 
-        foreach (var driver in new[] { Driver.Wia, Driver.Twain })
+        foreach (var driver in Naps2ScannerPlatform.GetDrivers())
         {
             cancellationToken.ThrowIfCancellationRequested();
             var nativeDevices = await _scanController.GetDeviceList(driver);
@@ -45,8 +44,8 @@ internal sealed class Naps2ScannerService : IScannerService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var id = $"{driver.ToString().ToLowerInvariant()}:{driverIndex++}";
-                _nativeDevices.Add(id, nativeDevice);
-                devices.Add(new ScannerDevice(id, nativeDevice.Name, driver.ToString().ToUpperInvariant()));
+                _nativeDevices.Add(id, (nativeDevice, driver));
+                devices.Add(new ScannerDevice(id, nativeDevice.Name, Naps2ScannerPlatform.GetDriverLabel(driver)));
             }
         }
 
@@ -79,7 +78,7 @@ internal sealed class Naps2ScannerService : IScannerService
 
         var imagePath = await CaptureScanService.ScanFirstPageAsync(
             _scanController,
-            nativeDevice,
+            nativeDevice.Device,
             options.Dpi,
             _temporaryRoot,
             cancellationToken);

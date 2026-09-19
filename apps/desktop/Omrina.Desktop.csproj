@@ -1,17 +1,23 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Uno.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
-    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <TargetFrameworks>net10.0-windows10.0.26100.0;net10.0-desktop</TargetFrameworks>
+    <TargetPlatformMinVersion Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">10.0.17763.0</TargetPlatformMinVersion>
     <AssemblyName>Omrina.Desktop</AssemblyName>
     <RootNamespace>Omrina.Desktop</RootNamespace>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">app.manifest</ApplicationManifest>
     <Platforms>x86;x64;ARM64</Platforms>
-    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</RuntimeIdentifier>
+    <RuntimeIdentifiers Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0' and '$(RuntimeIdentifier)' == ''">win-$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</RuntimeIdentifier>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- The app's user-facing resources are Chinese; matching the Uno resource
+         set removes PRI257's default-language mismatch without suppressing it. -->
+    <DefaultLanguage Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">zh-CN</DefaultLanguage>
+    <!-- Keep self-contained Windows App SDK activation for the WinAppSDK head. -->
+    <WindowsAppSDKSelfContained Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">true</WindowsAppSDKSelfContained>
+    <WinAppSdkVersion Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">2.4.0</WinAppSdkVersion>
+    <WinAppSdkBuildToolsVersion Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">10.0.28000.2705</WinAppSdkBuildToolsVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- NAPS2 1.3.0 marks its SDK assemblies as preview; this executable explicitly opts in. -->
@@ -23,14 +29,30 @@
     <ProjectReference Include="..\..\src\Omrina.Protocol\Omrina.Protocol.csproj" />
     <ProjectReference Include="..\..\src\Omrina.Scanning\Omrina.Scanning.csproj" />
     <ProjectReference Include="..\..\src\Omrina.Server\Omrina.Server.csproj" />
+    <ProjectReference Include="..\..\src\Omrina.Platform\Omrina.Platform.csproj" />
+  </ItemGroup>
+
+  <!-- Uno's default item path is rooted at the project working directory;
+       include the application definition explicitly for the net10.0-desktop
+       head so App.xaml.cs receives InitializeComponent generation. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-desktop'">
+    <ApplicationDefinition Include="App.xaml" SubType="Designer" XamlRuntime="WinUI" Generator="MSBuild:Compile" />
+    <Compile Update="App.xaml.cs" XamlRuntime="WinUI" DependentUpon="App.xaml" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="NAPS2.Sdk" Version="1.3.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.6.1" PrivateAssets="all" />
-    <PackageReference Include="NAPS2.Sdk" Version="1.3.0" />
     <PackageReference Include="NAPS2.Images.Gdi" Version="1.3.0" />
     <PackageReference Include="NAPS2.Sdk.Worker.Win32" Version="1.3.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-desktop'">
+    <PackageReference Include="NAPS2.Images.ImageSharp" Version="1.3.0" />
   </ItemGroup>
 </Project>

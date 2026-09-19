@@ -1,38 +1,55 @@
 using Omrina.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Windows.Storage;
-using Windows.Storage.Pickers;
 
 namespace Omrina.Desktop;
 
-public sealed partial class TemplateWindow : Window
+/// <summary>
+/// Cached template page hosted by <see cref="MainWindow"/>.
+/// File picking, printing and navigation are supplied by the host so this page
+/// never needs a native window handle.
+/// </summary>
+public sealed partial class TemplatePage : Page
 {
     private const double PreviewScale = 2;
+
+    private readonly Func<AnswerSheetLayout, Task<SvgSaveResult>>? _saveSvgAsync;
+    private readonly Func<AnswerSheetLayout, Task>? _printAsync;
+    private readonly Func<bool>? _isPrintBusy;
     private AnswerSheetLayout? _layout;
-    private TemplatePrintController? _printController;
-    private CaptureWindow? _captureWindow;
     private bool _previewMatchesInputs;
     private bool _printUiLocked;
 
-    public TemplateWindow()
+    public TemplatePage()
+        : this(null, null, null)
+    {
+    }
+
+    public TemplatePage(
+        Func<AnswerSheetLayout, Task<SvgSaveResult>>? saveSvgAsync,
+        Func<AnswerSheetLayout, Task>? printAsync,
+        Func<bool>? isPrintBusy)
     {
         InitializeComponent();
+        _saveSvgAsync = saveSvgAsync;
+        _printAsync = printAsync;
+        _isPrintBusy = isPrintBusy;
         SaveSvgButton.IsEnabled = false;
         PrintButton.IsEnabled = false;
         ImportButton.IsEnabled = false;
-        try
-        {
-            _printController = new TemplatePrintController(this, SetStatus);
-        }
-        catch (Exception exception)
-        {
-            var rootCause = exception.GetBaseException();
-            SetStatus($"系统打印不可用：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。");
-        }
-
-        Closed += TemplateWindow_Closed;
         GenerateLayout();
+    }
+
+    /// <summary>Raised when the current layout should be used on the capture page.</summary>
+    public event Action<AnswerSheetLayout>? CaptureRequested;
+
+    public AnswerSheetLayout? CurrentLayout => _layout;
+
+    public bool HasValidPreview => _layout is not null && _previewMatchesInputs;
+
+    public void ReportPlatformStatus(string message)
+    {
+        SetStatus(message);
     }
 
     private void GenerateButton_Click(object sender, RoutedEventArgs e)
@@ -64,8 +81,8 @@ public sealed partial class TemplateWindow : Window
             RenderLayout(layout);
             _layout = layout;
             _previewMatchesInputs = true;
-            SaveSvgButton.IsEnabled = true;
-            PrintButton.IsEnabled = _printController is not null && !_printController.IsBusy;
+            SaveSvgButton.IsEnabled = _saveSvgAsync is not null;
+            PrintButton.IsEnabled = _printAsync is not null && !IsPrintBusy();
             ImportButton.IsEnabled = true;
             SetStatus($"已生成 {layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项的 A4 模板。编号：{layout.TemplateNumber}。");
         }
@@ -88,9 +105,9 @@ public sealed partial class TemplateWindow : Window
 
     private async void SaveSvgButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_layout is null || !_previewMatchesInputs)
+        if (_layout is null || !_previewMatchesInputs || _saveSvgAsync is null)
         {
-            TemplateStatusText.Text = "参数已变更，请先重新生成预览后再保存。";
+            SetStatus("参数已变更或文件保存不可用，请先重新生成预览后再保存。");
             return;
         }
 
@@ -99,31 +116,16 @@ public sealed partial class TemplateWindow : Window
         SaveSvgButton.IsEnabled = false;
         try
         {
-            TemplateStatusText.Text = "正在选择 SVG 保存位置。";
-            var picker = new FileSavePicker
-            {
-                SuggestedFileName = "omrina-template"
-            };
-            picker.FileTypeChoices.Add("SVG 图像", [".svg"]);
-            WinRT.Interop.InitializeWithWindow.Initialize(
-                picker,
-                WinRT.Interop.WindowNative.GetWindowHandle(this));
-
-            var file = await picker.PickSaveFileAsync();
-            if (file is null)
-            {
-                TemplateStatusText.Text = "已取消保存 SVG。";
-                return;
-            }
-
-            TemplateStatusText.Text = "正在保存 SVG。";
-            await FileIO.WriteTextAsync(file, layout.ToSvg(), Windows.Storage.Streams.UnicodeEncoding.Utf8);
-            TemplateStatusText.Text = $"SVG 已保存：{file.Path}";
+            SetStatus("正在选择 SVG 保存位置。");
+            var result = await _saveSvgAsync(layout);
+            SetStatus(result.Cancelled
+                ? "已取消保存 SVG。"
+                : $"SVG 已保存：{result.Path ?? "已选择文件"}");
         }
         catch (Exception exception)
         {
             var rootCause = exception.GetBaseException();
-            TemplateStatusText.Text = $"保存 SVG 失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请重新选择位置后再试。";
+            SetStatus($"保存 SVG 失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请重新选择位置后再试。");
         }
         finally
         {
@@ -134,7 +136,7 @@ public sealed partial class TemplateWindow : Window
 
     private async void PrintButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_layout is null || !_previewMatchesInputs || _printController is null)
+        if (_layout is null || !_previewMatchesInputs || _printAsync is null)
         {
             SetStatus("参数已变更或系统打印不可用，请先生成预览后再试。");
             return;
@@ -145,7 +147,7 @@ public sealed partial class TemplateWindow : Window
         SetControlsEnabled(false);
         try
         {
-            await _printController.RequestPrintAsync(layout);
+            await _printAsync(layout);
         }
         catch (Exception exception)
         {
@@ -154,9 +156,7 @@ public sealed partial class TemplateWindow : Window
         }
         finally
         {
-            if (ReferenceEquals(_layout, layout)
-                && _previewMatchesInputs
-                && (_printController is null || !_printController.IsBusy))
+            if (ReferenceEquals(_layout, layout) && _previewMatchesInputs && !IsPrintBusy())
             {
                 _printUiLocked = false;
                 SetControlsEnabled(true);
@@ -172,16 +172,7 @@ public sealed partial class TemplateWindow : Window
             return;
         }
 
-        if (_captureWindow is not null)
-        {
-            _captureWindow.Activate();
-            return;
-        }
-
-        var captureWindow = new CaptureWindow(_layout);
-        _captureWindow = captureWindow;
-        captureWindow.Closed += CaptureWindow_Closed;
-        captureWindow.Activate();
+        CaptureRequested?.Invoke(_layout);
     }
 
     private void RenderLayout(AnswerSheetLayout layout)
@@ -215,44 +206,32 @@ public sealed partial class TemplateWindow : Window
         SetStatus("参数已变更，请重新生成预览。");
     }
 
-    private void TemplateWindow_Closed(object sender, WindowEventArgs args)
-    {
-        _printController?.Dispose();
-        _printController = null;
-        _captureWindow?.Close();
-        _captureWindow = null;
-    }
-
     private void SetControlsEnabled(bool enabled)
     {
         TitleBox.IsEnabled = enabled;
         QuestionCountBox.IsEnabled = enabled;
         OptionsPerQuestionBox.IsEnabled = enabled;
         GenerateButton.IsEnabled = enabled;
-        SaveSvgButton.IsEnabled = enabled && _layout is not null && _previewMatchesInputs;
+        SaveSvgButton.IsEnabled = enabled && _saveSvgAsync is not null && _layout is not null && _previewMatchesInputs;
         PrintButton.IsEnabled = enabled
+            && _printAsync is not null
             && _layout is not null
             && _previewMatchesInputs
-            && _printController is not null
-            && !_printController.IsBusy;
+            && !IsPrintBusy();
         ImportButton.IsEnabled = enabled && _layout is not null && _previewMatchesInputs;
     }
 
     private void SetStatus(string message)
     {
         TemplateStatusText.Text = message;
-        if (_printUiLocked && (_printController is null || !_printController.IsBusy))
+        if (_printUiLocked && !IsPrintBusy())
         {
             _printUiLocked = false;
             SetControlsEnabled(true);
         }
     }
 
-    private void CaptureWindow_Closed(object sender, WindowEventArgs args)
-    {
-        if (ReferenceEquals(_captureWindow, sender))
-        {
-            _captureWindow = null;
-        }
-    }
+    private bool IsPrintBusy() => _isPrintBusy?.Invoke() == true;
 }
+
+public sealed record SvgSaveResult(bool Cancelled, string? Path);

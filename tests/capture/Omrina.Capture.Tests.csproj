@@ -14,10 +14,11 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Omrina.Core/Omrina.Core.csproj" />
+    <ProjectReference Include="../../src/Omrina.Platform/Omrina.Platform.csproj" />
     <Compile Include="../../apps/desktop/CaptureStore.cs" Link="CaptureStore.cs" />
   </ItemGroup>
 
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.Windows.SDK.NET.Ref" />
+    <PackageReference Include="SkiaSharp" Version="3.119.2" />
   </ItemGroup>
 </Project>

@@ -1,9 +1,9 @@
-<Window
-    x:Class="Omrina.Desktop.TemplateWindow"
+<Page
+    x:Class="Omrina.Desktop.TemplatePage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:automation="using:Microsoft.UI.Xaml.Automation"
-    Title="OMRINA 模板 - M1">
+    NavigationCacheMode="Required">
 
     <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
         <StackPanel Padding="24" Spacing="16">
@@ -42,4 +42,4 @@
             </Border>
         </StackPanel>
     </ScrollViewer>
-</Window>
+</Page>

@@ -25,6 +25,7 @@ internal sealed class TemplatePrintController : IDisposable
     private PrintTask? _activeTask;
     private bool _printSessionActive;
     private bool _disposed;
+    private TaskCompletionSource<bool> _printIdle = CreateCompletedSource();
 
     public TemplatePrintController(Window owner, Action<string> reportStatus)
     {
@@ -45,6 +46,8 @@ internal sealed class TemplatePrintController : IDisposable
 
     public bool IsBusy => _printSessionActive;
 
+    public Task WaitForIdleAsync() => _printIdle.Task;
+
     public async Task RequestPrintAsync(AnswerSheetLayout layout)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -55,6 +58,7 @@ internal sealed class TemplatePrintController : IDisposable
         }
 
         _printSessionActive = true;
+        _printIdle = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _printLayout = layout;
         _printPage = null;
         ReportStatus("正在打开系统打印设置。请在系统窗口中选择 A4 纵向纸张。");
@@ -234,5 +238,13 @@ internal sealed class TemplatePrintController : IDisposable
         _printSessionActive = false;
         _printLayout = null;
         _printPage = null;
+        _printIdle.TrySetResult(true);
+    }
+
+    private static TaskCompletionSource<bool> CreateCompletedSource()
+    {
+        var source = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        source.TrySetResult(true);
+        return source;
     }
 }
