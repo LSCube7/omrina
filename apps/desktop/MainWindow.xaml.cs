@@ -12,11 +12,13 @@ public sealed partial class MainWindow : Window
     private readonly LoopbackHealthServer _healthServer = new();
     private readonly CaptureStore _captureStore = new();
     private readonly IScannerService _scannerService;
+    private readonly IAnswerSheetRecognitionService _recognitionService;
     private readonly IFileDialogService _fileDialogService;
     private readonly TemplatePrintController? _printController;
     private readonly StatusPage _statusPage;
     private readonly TemplatePage _templatePage;
     private readonly CapturePage _capturePage;
+    private readonly RecognitionPage _recognitionPage;
     private readonly SettingsPage _settingsPage;
     private readonly AboutPage _aboutPage;
     private bool _isClosed;
@@ -32,6 +34,7 @@ public sealed partial class MainWindow : Window
         _aboutPage = new AboutPage();
         _fileDialogService = DesktopPlatformFactory.CreateFileDialogs(this);
         _scannerService = DesktopPlatformFactory.CreateScanner(_captureStore.RootDirectory);
+        _recognitionService = new SkiaAnswerSheetRecognitionService();
         _printController = CreatePrintController();
         _templatePage = new TemplatePage(
             SaveSvgAsync,
@@ -43,7 +46,34 @@ public sealed partial class MainWindow : Window
             OpenScanImageAsync,
             PersistCaptureAsync,
             DesktopPlatformFactory.DeleteTemporaryScanFile);
+        _recognitionPage = new RecognitionPage(
+            recognitionRunner: RecognizeCaptureAsync,
+            scoreRunner: ScoreRecognitionAsync,
+            reviewRunner: ApplyReviewAsync,
+            exportRunner: ExportResultAsync,
+            saveTextAsync: SaveTextAsync);
         _templatePage.CaptureRequested += TemplatePage_CaptureRequested;
+        _capturePage.RecognitionRequested += CapturePage_RecognitionRequested;
+
+        try
+        {
+            var latestCapture = _captureStore.LoadLatest();
+            if (latestCapture is not null)
+            {
+                _capturePage.SetExistingCapture(latestCapture);
+            }
+        }
+        catch (CaptureException exception)
+        {
+            _capturePage.SetExistingCaptureLoadError(exception.Code, exception.Message);
+        }
+        catch (Exception exception)
+        {
+            var rootCause = exception.GetBaseException();
+            _capturePage.SetExistingCaptureLoadError(
+                "CAPTURE_HISTORY_READ_FAILED",
+                $"{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。");
+        }
 
         NavigationFrame.Content = _statusPage;
         AppNavigationView.SelectedItem = AppNavigationView.MenuItems[0];
@@ -92,6 +122,18 @@ public sealed partial class MainWindow : Window
             case "capture":
                 NavigateTo(_capturePage, "采集");
                 break;
+            case "recognition":
+            {
+                var latestCapture = _capturePage.LatestCapture;
+                if (latestCapture is not null
+                    && !ReferenceEquals(_recognitionPage.CurrentCapture, latestCapture))
+                {
+                    _recognitionPage.SetCapture(latestCapture);
+                }
+
+                NavigateTo(_recognitionPage, "识别 / 复核");
+                break;
+            }
             case "settings":
                 NavigateTo(_settingsPage, "设置");
                 break;
@@ -115,6 +157,12 @@ public sealed partial class MainWindow : Window
     {
         _capturePage.SetLayout(layout);
         SelectNavigationItem("capture");
+    }
+
+    private void CapturePage_RecognitionRequested(object? sender, CaptureRecord capture)
+    {
+        _recognitionPage.SetCapture(capture);
+        SelectNavigationItem("recognition");
     }
 
     private void SelectNavigationItem(string tag)
@@ -165,6 +213,167 @@ public sealed partial class MainWindow : Window
         return new SvgSaveResult(result.Cancelled, result.Path);
     }
 
+    private Task<FileSaveResult> SaveTextAsync(
+        string suggestedFileName,
+        string extension,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        return _fileDialogService.SaveTextAsync(
+            suggestedFileName,
+            extension,
+            content,
+            cancellationToken);
+    }
+
+    private async Task<RecognitionResult> RecognizeCaptureAsync(
+        RecognitionCaptureContext context,
+        IProgress<RecognitionProgressUpdate>? progress,
+        CancellationToken cancellationToken)
+    {
+        progress?.Report(new RecognitionProgressUpdate("正在解码原图并准备识别", 0, 0));
+        var result = await _recognitionService.RecognizeAsync(
+            context.Layout,
+            new LocalInputImageFile(context.ImagePath),
+            cancellationToken);
+        progress?.Report(new RecognitionProgressUpdate(
+            "识别结果已生成",
+            result.Questions.Count,
+            result.Questions.Count,
+            1));
+        return result;
+    }
+
+    private static Task<RecognitionScoreView?> ScoreRecognitionAsync(
+        AnswerSheetLayout layout,
+        ManualReviewSession review,
+        IReadOnlyDictionary<int, string> answerKey,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var key = AnswerKey.Create(layout.QuestionCount, layout.OptionsPerQuestion, answerKey);
+        var scoring = ScoringEngine.Score(review, key);
+        return Task.FromResult<RecognitionScoreView?>(CreateScoreView(scoring));
+    }
+
+    private static Task<RecognitionReviewView?> ApplyReviewAsync(
+        AnswerSheetLayout layout,
+        ManualReviewSession session,
+        IReadOnlyDictionary<int, string>? answerKey,
+        IReadOnlyList<ManualReviewEdit> edits,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var review = session;
+        foreach (var edit in edits)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            review = string.IsNullOrEmpty(edit.CorrectedAnswer)
+                ? review.ConfirmBlank(
+                    edit.QuestionNumber,
+                    edit.Reviewer,
+                    edit.Reason,
+                    edit.TimestampUtc)
+                : review.SetAnswer(
+                    edit.QuestionNumber,
+                    edit.CorrectedAnswer,
+                    edit.Reviewer,
+                    edit.Reason,
+                    edit.TimestampUtc);
+        }
+
+        AnswerKey? key = null;
+        if (answerKey is not null)
+        {
+            key = AnswerKey.Create(layout.QuestionCount, layout.OptionsPerQuestion, answerKey);
+        }
+
+        // Keep a score snapshot even when the user has not supplied an answer key;
+        // ResultExporter then retains the immutable review history in recognition-only exports.
+        var scoring = ScoringEngine.Score(review, key);
+        var audits = review.History
+            .Select(change => new ManualReviewAuditView(
+                change.QuestionNumber,
+                change.Before.AnswerLabel ?? string.Empty,
+                change.After.AnswerLabel ?? string.Empty,
+                change.Reason ?? string.Empty,
+                change.Reviewer,
+                change.Timestamp))
+            .ToArray();
+        return Task.FromResult<RecognitionReviewView?>(
+            new RecognitionReviewView(review.OriginalRecognition, review, audits, CreateScoreView(scoring)));
+    }
+
+    private static Task<string?> ExportResultAsync(
+        RecognitionExportRequest request,
+        RecognitionExportFormat format,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        AnswerKey? answerKey = null;
+        if (Enumerable.Range(1, request.Layout.QuestionCount).All(
+                questionNumber => request.AnswerKey.TryGetValue(questionNumber, out var answer)
+                    && !string.IsNullOrWhiteSpace(answer)))
+        {
+            var answerValues = Enumerable.Range(1, request.Layout.QuestionCount)
+                .ToDictionary(questionNumber => questionNumber, questionNumber => request.AnswerKey[questionNumber]!);
+            answerKey = AnswerKey.Create(
+                request.Layout.QuestionCount,
+                request.Layout.OptionsPerQuestion,
+                answerValues);
+        }
+
+        var scoring = ScoringEngine.Score(request.Review, answerKey);
+        var coreFormat = format == RecognitionExportFormat.Json
+            ? Omrina.Core.ResultExportFormat.Json
+            : Omrina.Core.ResultExportFormat.Csv;
+        return Task.FromResult<string?>(ResultExporter.Export(scoring, coreFormat, indented: true));
+    }
+
+    private static RecognitionScoreView CreateScoreView(ScoringResult scoring)
+    {
+        var originalAnswers = scoring.Review?.OriginalRecognition.Questions
+            .ToDictionary(
+                question => question.QuestionNumber,
+                RecognitionQuestionRow.GetOriginalAnswer)
+            ?? new Dictionary<int, string>();
+        var questions = scoring.QuestionScores
+            .OrderBy(question => question.QuestionNumber)
+            .Select(question => new RecognitionScoreQuestionView(
+                question.QuestionNumber,
+                originalAnswers.TryGetValue(question.QuestionNumber, out var originalAnswer)
+                    ? originalAnswer
+                    : question.RecognizedAnswer ?? string.Empty,
+                question.RecognizedAnswer ?? string.Empty,
+                question.ExpectedAnswer ?? string.Empty,
+                (double)question.EarnedPoints,
+                question.RequiresReview))
+            .ToArray();
+        var summary = scoring.IsScored
+            ? $"{scoring.TotalScore:0.##}/{scoring.MaximumScore:0.##} 分（{FormatScoringDisposition(scoring.Disposition)}）"
+            : $"未评分：{FormatUnavailableReason(scoring.UnavailableReason)}";
+        return new RecognitionScoreView(
+            scoring.TotalScore is decimal total ? (double)total : 0,
+            scoring.MaximumScore is decimal maximum ? (double)maximum : 0,
+            questions,
+            summary,
+            scoring);
+    }
+
+    private static string FormatScoringDisposition(ScoringDisposition disposition) => disposition switch
+    {
+        ScoringDisposition.Final => "最终",
+        ScoringDisposition.Provisional => "待复核",
+        _ => "未评分"
+    };
+
+    private static string FormatUnavailableReason(ScoreUnavailableReason reason) => reason switch
+    {
+        ScoreUnavailableReason.AnswerKeyMissing => "尚未提供完整标准答案",
+        ScoreUnavailableReason.RecognitionRejected => "识别结果已拒绝",
+        _ => "未知原因"
+    };
+
     private async Task<IInputImageFile?> PickImageAsync(CancellationToken cancellationToken)
     {
         return await _fileDialogService.PickImageAsync(cancellationToken);
@@ -193,6 +402,7 @@ public sealed partial class MainWindow : Window
         try
         {
             await _capturePage.CancelAndWaitAsync();
+            await _recognitionPage.CancelAndWaitAsync();
             if (_printController is not null)
             {
                 await _printController.WaitForIdleAsync();

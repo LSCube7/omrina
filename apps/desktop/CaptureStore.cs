@@ -127,6 +127,228 @@ public sealed class CaptureStore
     public string RootDirectory { get; }
 
     /// <summary>
+    /// Loads the newest committed capture without touching the original bytes.
+    /// A malformed newest record is reported to the caller instead of being
+    /// silently replaced with an older capture.
+    /// </summary>
+    public CaptureRecord? LoadLatest()
+    {
+        var capturesDirectory = Path.Combine(RootDirectory, "captures");
+        if (!Directory.Exists(capturesDirectory))
+        {
+            return null;
+        }
+
+        DirectoryInfo? latestDirectory;
+        try
+        {
+            latestDirectory = new DirectoryInfo(capturesDirectory)
+                .EnumerateDirectories()
+                .Where(directory => !directory.Name.StartsWith(".", StringComparison.Ordinal))
+                .OrderByDescending(directory => directory.LastWriteTimeUtc)
+                .ThenByDescending(directory => directory.Name, StringComparer.Ordinal)
+                .FirstOrDefault();
+        }
+        catch (Exception exception)
+        {
+            throw new CaptureStorageException(
+                "CAPTURE_HISTORY_READ_FAILED",
+                "无法读取最近采集记录，请稍后重试。",
+                exception);
+        }
+
+        return latestDirectory is null ? null : ReadCommittedRecord(latestDirectory);
+    }
+
+    private CaptureRecord ReadCommittedRecord(DirectoryInfo captureDirectory)
+    {
+        var manifestFilePath = Path.Combine(captureDirectory.FullName, "manifest.json");
+        try
+        {
+            if (!File.Exists(manifestFilePath))
+            {
+                throw InvalidHistory("最近采集记录缺少 manifest，无法打开。", null);
+            }
+
+            var manifestJson = File.ReadAllText(manifestFilePath, Encoding.UTF8);
+            var manifest = JsonSerializer.Deserialize<CaptureManifest>(manifestJson, ManifestJsonOptions)
+                ?? throw InvalidHistory("最近采集记录的 manifest 为空。", null);
+
+            if (manifest.ManifestSchemaVersion != ManifestSchemaVersion)
+            {
+                throw InvalidHistory(
+                    $"最近采集记录的 manifest schema {manifest.ManifestSchemaVersion} 不受当前版本支持。",
+                    null);
+            }
+
+            if (manifest.TemplateSchemaVersion != AnswerSheetLayout.TemplateSchemaVersion)
+            {
+                throw InvalidHistory(
+                    $"最近采集记录的模板 schema {manifest.TemplateSchemaVersion} 不受当前版本支持。",
+                    null);
+            }
+
+            ValidateHistoryManifest(manifest, captureDirectory, imagePath: null);
+
+            if (string.IsNullOrWhiteSpace(manifest.CaptureId)
+                || !string.Equals(manifest.CaptureId, captureDirectory.Name, StringComparison.Ordinal))
+            {
+                throw InvalidHistory("最近采集记录的 CaptureId 与目录不一致。", null);
+            }
+
+            if (string.IsNullOrWhiteSpace(manifest.ImagePath)
+                || Path.IsPathRooted(manifest.ImagePath))
+            {
+                throw InvalidHistory("最近采集记录的原图路径无效。", null);
+            }
+
+            var imagePath = Path.GetFullPath(
+                Path.Combine(RootDirectory, manifest.ImagePath.Replace('/', Path.DirectorySeparatorChar)));
+            var rootDirectory = Path.GetFullPath(RootDirectory);
+            var captureRoot = Path.GetFullPath(
+                Path.Combine(rootDirectory, "captures", captureDirectory.Name));
+            EnsurePathWithinRoot(rootDirectory, imagePath, "最近采集记录的原图路径越过了应用数据目录。", null);
+
+            if (!PathsEqual(captureRoot, captureDirectory.FullName)
+                || !PathsEqual(Path.GetDirectoryName(imagePath) ?? string.Empty, captureRoot))
+            {
+                throw InvalidHistory("最近采集记录的原图路径与记录目录不一致。", null);
+            }
+
+            if (!File.Exists(imagePath))
+            {
+                throw InvalidHistory("最近采集记录的原图不存在，无法打开。", null);
+            }
+
+            ValidateHistoryManifest(manifest, captureDirectory, imagePath);
+
+            return new CaptureRecord(
+                manifest,
+                captureDirectory.FullName,
+                imagePath,
+                manifestFilePath);
+        }
+        catch (CaptureStorageException)
+        {
+            throw;
+        }
+        catch (JsonException exception)
+        {
+            throw InvalidHistory("最近采集记录的 manifest 格式无效。", exception);
+        }
+        catch (IOException exception)
+        {
+            throw InvalidHistory("最近采集记录无法读取，请确认本地文件仍可访问。", exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw InvalidHistory("最近采集记录无法读取，请检查应用本地数据权限。", exception);
+        }
+        catch (Exception exception)
+        {
+            throw InvalidHistory("最近采集记录已损坏，无法打开。", exception);
+        }
+    }
+
+    private static void EnsurePathWithinRoot(
+        string rootDirectory,
+        string candidatePath,
+        string message,
+        Exception? innerException)
+    {
+        var relative = Path.GetRelativePath(rootDirectory, candidatePath);
+        if (Path.IsPathRooted(relative)
+            || relative.Equals("..", StringComparison.Ordinal)
+            || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            throw InvalidHistory(message, innerException);
+        }
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        return string.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal);
+    }
+
+    private static CaptureStorageException InvalidHistory(string message, Exception? innerException)
+    {
+        return new CaptureStorageException("CAPTURE_HISTORY_INVALID", message, innerException);
+    }
+
+    private static void ValidateHistoryManifest(
+        CaptureManifest manifest,
+        DirectoryInfo captureDirectory,
+        string? imagePath)
+    {
+        if (manifest.CreatedAtUtc == default)
+        {
+            throw InvalidHistory("最近采集记录缺少创建时间。", null);
+        }
+
+        if (!string.Equals(manifest.SourceType, "import", StringComparison.Ordinal)
+            && !string.Equals(manifest.SourceType, "scan", StringComparison.Ordinal))
+        {
+            throw InvalidHistory("最近采集记录的来源类型无效。", null);
+        }
+
+        if (string.IsNullOrWhiteSpace(manifest.TemplateId)
+            || string.IsNullOrWhiteSpace(manifest.TemplateTitle)
+            || manifest.QuestionCount <= 0
+            || manifest.OptionsPerQuestion is < AnswerSheetLayout.MinOptionsPerQuestion
+                or > AnswerSheetLayout.MaxOptionsPerQuestion
+            || manifest.QuestionCount > AnswerSheetLayout.MaxQuestionCount(manifest.OptionsPerQuestion))
+        {
+            throw InvalidHistory("最近采集记录的模板参数无效。", null);
+        }
+
+        if (string.IsNullOrWhiteSpace(manifest.ImageExtension)
+            || (!string.Equals(manifest.ImageExtension, ".png", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(manifest.ImageExtension, ".jpg", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(manifest.ImageExtension, ".jpeg", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw InvalidHistory("最近采集记录的图像扩展名无效。", null);
+        }
+
+        if (manifest.PixelWidth == 0
+            || manifest.PixelHeight == 0
+            || manifest.PixelWidth > MaximumImageWidth
+            || manifest.PixelHeight > MaximumImageHeight
+            || (ulong)manifest.PixelWidth * manifest.PixelHeight > MaximumPixelCount)
+        {
+            throw InvalidHistory("最近采集记录的图像尺寸无效。", null);
+        }
+
+        if (manifest.ByteLength == 0 || manifest.ByteLength > MaximumFileSizeBytes)
+        {
+            throw InvalidHistory("最近采集记录的图像大小无效。", null);
+        }
+
+        if (imagePath is null)
+        {
+            return;
+        }
+
+        var imageFile = new FileInfo(imagePath);
+        if (imageFile.Length != checked((long)manifest.ByteLength))
+        {
+            throw InvalidHistory("最近采集记录的原图大小与 manifest 不一致。", null);
+        }
+
+        var expectedFileName = $"original{manifest.ImageExtension.ToLowerInvariant()}";
+        if (!string.Equals(imageFile.Name, expectedFileName, StringComparison.OrdinalIgnoreCase)
+            || !PathsEqual(imageFile.DirectoryName ?? string.Empty, captureDirectory.FullName))
+        {
+            throw InvalidHistory("最近采集记录的原图文件名与记录目录不一致。", null);
+        }
+    }
+
+    /// <summary>
     /// Imports a user-selected PNG/JPEG file, or saves a scan output, while associating it with a layout.
     /// </summary>
     public async Task<CaptureRecord> ImportAsync(

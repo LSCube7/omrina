@@ -12,7 +12,7 @@
                 <StackPanel Spacing="8">
                     <TextBlock Text="已实现范围" Style="{StaticResource SubtitleTextBlockStyle}" />
                     <TextBlock Text="模板几何、预览、SVG 导出、系统打印请求、图像导入和模板关联采集。" TextWrapping="Wrap" />
-                    <TextBlock Text="阅卷、评分、人工复核及浏览器业务接口属于后续范围。" TextWrapping="Wrap" />
+                    <TextBlock Text="本地单页识别、人工复核与评分已接入；批量处理和浏览器业务接口仍属于后续范围。" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
             <InfoBar

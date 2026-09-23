@@ -3,6 +3,7 @@ using Omrina.Desktop;
 using Omrina.Platform;
 using SkiaSharp;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 var failures = new List<string>();
 var repositoryRoot = FindRepositoryRoot();
@@ -30,11 +31,26 @@ if (File.Exists(authorizedSamplePath))
 try
 {
     await RunAsync("template identity is shared with Core", failures, VerifyTemplateIdentityAsync);
+    await RunAsync("Skia grayscale decode returns pixels", failures, () => VerifyGrayscaleDecodeAsync(sourcePath));
+    var recognitionSamplePath = Environment.GetEnvironmentVariable("OMRINA_RECOGNITION_SAMPLE");
+    if (!string.IsNullOrWhiteSpace(recognitionSamplePath) && File.Exists(recognitionSamplePath))
+    {
+        await RunAsync(
+            "optional answer-sheet recognition sample",
+            failures,
+            () => VerifyRecognitionSampleAsync(recognitionSamplePath));
+    }
     await RunAsync("PNG import keeps bytes and writes association manifest", failures, () => VerifyImportAsync(sourcePath, testRoot));
     await RunAsync("JPEG import decodes the complete multi-pixel image", failures, () => VerifyJpegImportAsync(jpegSourcePath, testRoot));
     await RunAsync("scan source type uses the same storage API", failures, () => VerifyScanSourceAsync(sourcePath, testRoot));
     await RunAsync("invalid, truncated, and unsupported files leave no staging record", failures, () => VerifyInvalidInputsAsync(sourcePath, jpegSourcePath, testRoot));
     await RunAsync("cancelled import leaves no staging record", failures, () => VerifyCancellationAsync(sourcePath, testRoot));
+    await RunAsync("latest capture history accepts the newest valid record", failures, () => VerifyLatestCaptureAsync(sourcePath, testRoot));
+    await RunAsync("unsupported latest manifest schema is rejected without fallback", failures, () => VerifyUnsupportedLatestSchemaAsync(sourcePath, testRoot));
+    await RunAsync("unsupported latest template schema is rejected", failures, () => VerifyUnsupportedLatestTemplateSchemaAsync(sourcePath, testRoot));
+    await RunAsync("latest capture image path traversal is rejected", failures, () => VerifyLatestPathTraversalAsync(sourcePath, testRoot));
+    await RunAsync("missing latest manifest is rejected", failures, () => VerifyMissingLatestManifestAsync(sourcePath, testRoot));
+    await RunAsync("missing latest capture image is rejected", failures, () => VerifyMissingLatestImageAsync(sourcePath, testRoot));
 }
 finally
 {
@@ -51,7 +67,7 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: 6 capture regression tests.");
+Console.WriteLine("PASS: 13 capture regression tests.");
 return 0;
 
 static async Task WriteFixtureImagesAsync(string pngPath, string jpegPath)
@@ -101,6 +117,44 @@ static Task VerifyTemplateIdentityAsync()
     AssertEqual(AnswerSheetLayout.TemplateSchemaVersion, reference.SchemaVersion, "capture should reuse Core template schema");
     AssertEqual(layout.Title, reference.Title, "manifest reference should preserve normalized title");
     return Task.CompletedTask;
+}
+
+static async Task VerifyGrayscaleDecodeAsync(string sourcePath)
+{
+    var decoder = new SkiaImageDecoder();
+    var image = await decoder.DecodeGrayscaleAsync(new LocalInputImageFile(sourcePath));
+
+    AssertEqual(3, image.Width, "grayscale decode should preserve width");
+    AssertEqual(2, image.Height, "grayscale decode should preserve height");
+    AssertTrue(image.GetPixel(0, 0) < 100, "red should have non-zero luminance conversion");
+    AssertTrue(image.GetPixel(1, 0) is > 40 and < 220, "green should have middle luminance");
+    AssertTrue(image.GetPixel(2, 0) < 100, "blue should have non-zero luminance conversion");
+    AssertEqual((byte)255, image.GetPixel(0, 1), "white should remain white");
+    AssertEqual((byte)0, image.GetPixel(1, 1), "black should remain black");
+}
+
+static async Task VerifyRecognitionSampleAsync(string sourcePath)
+{
+    var layout = AnswerSheetLayout.Create("真实样本", 20, 4);
+    var service = new SkiaAnswerSheetRecognitionService();
+    var result = await service.RecognizeAsync(layout, new LocalInputImageFile(sourcePath));
+
+    Console.WriteLine(
+        $"Recognition sample: status={result.Status}, orientation={result.Orientation}, "
+        + $"confidence={result.Confidence:0.###}, questions={result.Questions.Count}");
+    foreach (var question in result.Questions)
+    {
+        var selected = string.Join(
+            ",",
+            question.Options
+                .Where(option => option.State == OptionMarkState.Selected)
+                .Select(option => option.OptionLabel));
+        Console.WriteLine($"Q{question.QuestionNumber}: {question.State} [{selected}]");
+    }
+
+    AssertTrue(result.Status != RecognitionStatus.Rejected, "authorized recognition sample should locate the page");
+    AssertEqual(PageOrientation.Degrees0, result.Orientation, "authorized sample should be upright");
+    AssertEqual(20, result.Questions.Count, "authorized sample question count");
 }
 
 static async Task VerifyImportAsync(string sourcePath, string testRoot)
@@ -229,6 +283,102 @@ static async Task VerifyCancellationAsync(string sourcePath, string testRoot)
     await AssertThrowsAsync<OperationCanceledException>(
         () => store.ImportAsync(layout, source, CaptureSourceType.Import, cancellation.Token));
     AssertEqual(0, CountStagingDirectories(testRoot), "cancelled import should leave no staging directory");
+}
+
+static async Task VerifyLatestCaptureAsync(string sourcePath, string testRoot)
+{
+    var store = new CaptureStore(Path.Combine(testRoot, "history-latest"));
+    var layout = AnswerSheetLayout.Create("最近记录", 1, 2);
+    var older = await store.ImportAsync(layout, new LocalInputImageFile(sourcePath));
+    var latest = await store.ImportAsync(layout, new LocalInputImageFile(sourcePath));
+    Directory.SetLastWriteTimeUtc(older.CaptureDirectory, DateTime.UtcNow.AddMinutes(-2));
+    Directory.SetLastWriteTimeUtc(latest.CaptureDirectory, DateTime.UtcNow.AddMinutes(-1));
+
+    var loaded = store.LoadLatest();
+    AssertEqual(latest.Manifest.CaptureId, loaded?.Manifest.CaptureId, "history should load the newest committed capture");
+    AssertTrue(
+        File.ReadAllBytes(loaded!.ImageFilePath).AsSpan().SequenceEqual(File.ReadAllBytes(sourcePath)),
+        "history should preserve the stored original bytes");
+}
+
+static async Task VerifyUnsupportedLatestSchemaAsync(string sourcePath, string testRoot)
+{
+    var store = new CaptureStore(Path.Combine(testRoot, "history-schema"));
+    var layout = AnswerSheetLayout.Create("Schema 边界", 1, 2);
+    var older = await store.ImportAsync(layout, new LocalInputImageFile(sourcePath));
+    var latest = await store.ImportAsync(layout, new LocalInputImageFile(sourcePath));
+    await UpdateManifestAsync(
+        latest,
+        manifest => manifest["manifestSchemaVersion"] = CaptureStore.ManifestSchemaVersion + 1);
+    Directory.SetLastWriteTimeUtc(older.CaptureDirectory, DateTime.UtcNow.AddMinutes(-2));
+    Directory.SetLastWriteTimeUtc(latest.CaptureDirectory, DateTime.UtcNow.AddMinutes(-1));
+
+    var exception = await AssertThrowsAsync<CaptureStorageException>(
+        () => Task.Run(() => store.LoadLatest()));
+    AssertEqual("CAPTURE_HISTORY_INVALID", exception.Code, "unsupported newest manifest should fail without falling back");
+}
+
+static async Task VerifyUnsupportedLatestTemplateSchemaAsync(string sourcePath, string testRoot)
+{
+    var (store, capture) = await CreateHistoryCaptureAsync(sourcePath, testRoot, "template-schema");
+    await UpdateManifestAsync(
+        capture,
+        manifest => manifest["templateSchemaVersion"] = AnswerSheetLayout.TemplateSchemaVersion + 1);
+
+    var exception = await AssertThrowsAsync<CaptureStorageException>(
+        () => Task.Run(() => store.LoadLatest()));
+    AssertEqual("CAPTURE_HISTORY_INVALID", exception.Code, "unsupported template schema should be rejected");
+}
+
+static async Task VerifyLatestPathTraversalAsync(string sourcePath, string testRoot)
+{
+    var (store, capture) = await CreateHistoryCaptureAsync(sourcePath, testRoot, "path-traversal");
+    await UpdateManifestAsync(
+        capture,
+        manifest => manifest["imagePath"] = $"captures/{capture.Manifest.CaptureId}/../../../outside.png");
+
+    var exception = await AssertThrowsAsync<CaptureStorageException>(
+        () => Task.Run(() => store.LoadLatest()));
+    AssertEqual("CAPTURE_HISTORY_INVALID", exception.Code, "image paths outside the app data root must be rejected");
+}
+
+static async Task VerifyMissingLatestManifestAsync(string sourcePath, string testRoot)
+{
+    var (store, capture) = await CreateHistoryCaptureAsync(sourcePath, testRoot, "missing-manifest");
+    File.Delete(capture.ManifestFilePath);
+
+    var exception = await AssertThrowsAsync<CaptureStorageException>(
+        () => Task.Run(() => store.LoadLatest()));
+    AssertEqual("CAPTURE_HISTORY_INVALID", exception.Code, "missing manifest should be reported as invalid history");
+}
+
+static async Task VerifyMissingLatestImageAsync(string sourcePath, string testRoot)
+{
+    var (store, capture) = await CreateHistoryCaptureAsync(sourcePath, testRoot, "missing-image");
+    File.Delete(capture.ImageFilePath);
+
+    var exception = await AssertThrowsAsync<CaptureStorageException>(
+        () => Task.Run(() => store.LoadLatest()));
+    AssertEqual("CAPTURE_HISTORY_INVALID", exception.Code, "missing original image should be reported as invalid history");
+}
+
+static async Task<(CaptureStore Store, CaptureRecord Capture)> CreateHistoryCaptureAsync(
+    string sourcePath,
+    string testRoot,
+    string scenario)
+{
+    var store = new CaptureStore(Path.Combine(testRoot, $"history-{scenario}"));
+    var layout = AnswerSheetLayout.Create($"历史 {scenario}", 1, 2);
+    var capture = await store.ImportAsync(layout, new LocalInputImageFile(sourcePath));
+    return (store, capture);
+}
+
+static async Task UpdateManifestAsync(CaptureRecord capture, Action<JsonObject> update)
+{
+    var manifest = JsonNode.Parse(await File.ReadAllTextAsync(capture.ManifestFilePath))?.AsObject()
+        ?? throw new InvalidOperationException("Capture manifest fixture is not a JSON object.");
+    update(manifest);
+    await File.WriteAllTextAsync(capture.ManifestFilePath, manifest.ToJsonString());
 }
 
 static int CountStagingDirectories(string rootDirectory)

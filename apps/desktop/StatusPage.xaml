@@ -39,7 +39,7 @@
                     IsClosable="False"
                     Severity="Informational"
                     Title="当前范围"
-                    Message="状态、模板和采集流程已接入主窗口导航；阅卷、评分和批量任务尚未实现。" />
+                    Message="本地单页识别、人工复核与评分已接入；批量处理和浏览器业务接口仍在后续范围。" />
             </Grid>
         </StackPanel>
     </ScrollViewer>

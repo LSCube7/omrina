@@ -14,7 +14,7 @@ internal interface IFileDialogService
         CancellationToken cancellationToken = default);
 }
 
-internal sealed record FileSaveResult(bool Cancelled, string? Path);
+public sealed record FileSaveResult(bool Cancelled, string? Path);
 
 internal static partial class PlatformFileDialogService
 {

@@ -50,7 +50,7 @@ internal sealed class UnoDesktopFileDialogService : IFileDialogService
             SuggestedFileName = suggestedFileName,
             DefaultFileExtension = normalizedExtension
         };
-        picker.FileTypeChoices.Add("SVG 图像", [normalizedExtension]);
+        picker.FileTypeChoices.Add(GetTextFileTypeLabel(normalizedExtension), [normalizedExtension]);
 
         var file = await picker.PickSaveFileAsync();
         cancellationToken.ThrowIfCancellationRequested();
@@ -63,4 +63,12 @@ internal sealed class UnoDesktopFileDialogService : IFileDialogService
         cancellationToken.ThrowIfCancellationRequested();
         return new FileSaveResult(false, file.Path);
     }
+
+    private static string GetTextFileTypeLabel(string extension) => extension.ToLowerInvariant() switch
+    {
+        ".svg" => "SVG 图像",
+        ".json" => "JSON 文件",
+        ".csv" => "CSV 文件",
+        _ => "文本文件"
+    };
 }

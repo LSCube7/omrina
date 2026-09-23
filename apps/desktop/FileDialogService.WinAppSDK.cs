@@ -49,9 +49,15 @@ internal sealed class WinAppSdkFileDialogService : IFileDialogService
 
         var picker = new FileSavePicker
         {
-            SuggestedFileName = suggestedFileName
+            SuggestedFileName = suggestedFileName,
+            DefaultFileExtension = extension.StartsWith(".", StringComparison.Ordinal)
+                ? extension
+                : $".{extension}"
         };
-        picker.FileTypeChoices.Add("SVG 图像", [extension]);
+        var normalizedExtension = extension.StartsWith(".", StringComparison.Ordinal)
+            ? extension
+            : $".{extension}";
+        picker.FileTypeChoices.Add(GetTextFileTypeLabel(normalizedExtension), [normalizedExtension]);
         WinRT.Interop.InitializeWithWindow.Initialize(
             picker,
             WinRT.Interop.WindowNative.GetWindowHandle(_owner));
@@ -69,4 +75,12 @@ internal sealed class WinAppSdkFileDialogService : IFileDialogService
             Windows.Storage.Streams.UnicodeEncoding.Utf8);
         return new FileSaveResult(false, file.Path);
     }
+
+    private static string GetTextFileTypeLabel(string extension) => extension.ToLowerInvariant() switch
+    {
+        ".svg" => "SVG 图像",
+        ".json" => "JSON 文件",
+        ".csv" => "CSV 文件",
+        _ => "文本文件"
+    };
 }

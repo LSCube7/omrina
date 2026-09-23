@@ -84,5 +84,6 @@ public enum ImageDecodeFailure
 {
     InvalidImage,
     UnsupportedCodec,
-    DimensionsTooLarge
+    DimensionsTooLarge,
+    FileTooLarge
 }

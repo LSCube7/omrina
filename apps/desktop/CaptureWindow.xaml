@@ -100,6 +100,14 @@
             </Border>
 
             <TextBlock x:Name="CaptureStatusText" Text="请先确认模板参数。" TextWrapping="Wrap" />
+            <Button
+                x:Name="OpenRecognitionButton"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left"
+                Click="OpenRecognitionButton_Click"
+                automation:AutomationProperties.Name="打开识别和复核">
+                <TextBlock Text="打开识别 / 复核" />
+            </Button>
             <InfoBar
                 IsOpen="True"
                 IsClosable="False"

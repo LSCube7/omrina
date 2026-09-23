@@ -36,6 +36,7 @@ public sealed partial class CapturePage : Page
     private TaskCompletionSource<bool>? _activeOperationCompletion;
     private bool _isClosed;
     private bool _updatingLayoutInputs;
+    private CaptureRecord? _latestCapture;
 
     public CapturePage()
         : this(null, null, null, null, null, null)
@@ -79,6 +80,14 @@ public sealed partial class CapturePage : Page
 
     public AnswerSheetLayout? CurrentLayout => _layout;
 
+    public CaptureRecord? LatestCapture => _latestCapture;
+
+    /// <summary>Raised after a capture has been persisted successfully.</summary>
+    public event EventHandler<CaptureRecord>? CaptureSaved;
+
+    /// <summary>Raised when the user asks to open the latest capture in recognition/review.</summary>
+    public event EventHandler<CaptureRecord>? RecognitionRequested;
+
     public bool IsBusy => _importCancellation is not null || _enumerationInProgress || _scanInProgress;
 
     public Task WaitForIdleAsync() => _activeOperationCompletion?.Task ?? Task.CompletedTask;
@@ -104,6 +113,25 @@ public sealed partial class CapturePage : Page
         CaptureStatusText.Text = $"模板参数已确认：{layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项。";
         UpdateImportButtonState();
         UpdateScanCaptureButtonState();
+    }
+
+    /// <summary>Restores a previously committed local record for same-window review.</summary>
+    public void SetExistingCapture(CaptureRecord capture)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        _latestCapture = capture;
+        OpenRecognitionButton.Visibility = Visibility.Visible;
+        CaptureStatusText.Text =
+            $"已找到最近采集记录：{capture.Manifest.CreatedAtUtc.ToLocalTime():g}，"
+            + $"已关联模板 {capture.Manifest.TemplateId}。可直接打开识别 / 复核。";
+    }
+
+    /// <summary>Shows a local history error without falling back to another record.</summary>
+    public void SetExistingCaptureLoadError(string code, string message)
+    {
+        _latestCapture = null;
+        OpenRecognitionButton.Visibility = Visibility.Collapsed;
+        CaptureStatusText.Text = $"最近采集记录无法打开：{message} 错误代码：{code}。";
     }
 
     public async Task CancelAndWaitAsync()
@@ -190,6 +218,7 @@ public sealed partial class CapturePage : Page
                 file,
                 CaptureSourceType.Import,
                 cancellation.Token);
+            SetLatestCapture(capture);
             CaptureStatusText.Text =
                 $"图像导入成功：{capture.Manifest.PixelWidth}×{capture.Manifest.PixelHeight}，"
                 + $"已关联模板 {capture.Manifest.TemplateId}。";
@@ -339,6 +368,7 @@ public sealed partial class CapturePage : Page
                 scanFile,
                 CaptureSourceType.Scan,
                 _scanCancellation.Token);
+            SetLatestCapture(capture);
             CaptureStatusText.Text =
                 $"扫描并保存成功：{capture.Manifest.PixelWidth}×{capture.Manifest.PixelHeight}，"
                 + $"已关联模板 {capture.Manifest.TemplateId}。";
@@ -544,6 +574,21 @@ public sealed partial class CapturePage : Page
     {
         var rootCause = exception.GetBaseException();
         return $"{operation}：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。{nextStep}";
+    }
+
+    private void SetLatestCapture(CaptureRecord capture)
+    {
+        _latestCapture = capture;
+        OpenRecognitionButton.Visibility = Visibility.Visible;
+        CaptureSaved?.Invoke(this, capture);
+    }
+
+    private void OpenRecognitionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_latestCapture is not null)
+        {
+            RecognitionRequested?.Invoke(this, _latestCapture);
+        }
     }
 }
 
