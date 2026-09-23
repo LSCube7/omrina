@@ -149,6 +149,17 @@ SkiaSharp 依赖已统一为 3.119.2，与 Uno desktop 解析的 Windows/Linux/m
 
 macOS/Linux 未运行应用或设备后端，三平台 CI 和设备测试继续暂缓。
 
+## 2026-09-23 M2 本地识别与评分回归
+
+- `dotnet run --project tests/core/Omrina.Core.Tests.csproj --no-restore`：10 组通过。除既有模板检查外，识别回归覆盖四种直角方向、尺寸/透视变化、空白、多选、浅涂、定位块缺失与伪定位块、无效透视域，以及页级质量不足但每题仍判单选的情况。
+- `dotnet run --project tests/m2/Omrina.M2.Tests.csproj --no-restore`：10 组通过。覆盖完整答案键、最终/临时/不可评分状态、人工复核历史、JSON/CSV 安全导出、透明与半透明像素白底合成、普通图像解码、超大输入在打开前拒绝、后台识别与取消、页级质量警告不会因逐题复核升级为最终分。
+- `Omrina.Platform` 本机构建为 0 警告、0 错误。以上测试使用本地缓存依赖；初次 M2 测试运行缺少 Skia runtime asset，使用工作区已有 NuGet 缓存离线恢复测试项目后解决，没有新增网络下载。
+- `tests/capture/Omrina.Capture.Tests.csproj` 在新增最新记录读取边界后运行 13 组通过。新增项覆盖最近有效记录、manifest/template schema 不兼容、原图路径越界，以及 manifest 或原图缺失时的明确错误；测试只使用新生成的 3×2 合成图。
+- 对此前已由用户打印、填涂并采集的一张 2481 × 3506 图像，在本机按采集记录的完整模板 ID 和 20 题、每题 4 选模板运行自动识别。结果为 `Accepted`、方向 0°，20 道题与此前人工读值逐题一致。最浅的一个被选选项填涂量约为 0.265；该结果仅证明此样本的当前算法输出，不代表总体准确率。
+- 本次没有再次驱动扫描仪、打印或向仓库加入原图、manifest、标准答案或成绩。真实样本未提供独立标准答案，因此不将这次识别写成真实自动评分验收。
+
+桌面 M2 的 Windows 与 Uno Desktop 目标在最终文案改动后以隔离 `OutputPath` 各构建通过，均为 0 个错误、1 条 `NU1900`（NuGet 漏洞审计源不可达）。普通输出路径被正在运行的 OMRINA 窗口占用，所以没有关闭该进程；第一次隔离参数误将 `MSBuildProjectExtensionsPath` 传播给引用项目并产生 `NETSDK1005`，改为仅隔离输出目录后通过。Windows 实际窗口已成功启动，单窗口 NavigationView 可见“识别 / 复核”入口；工具随后检测到窗口有用户输入，停止自动点击，所以识别、复核、导出的完整 UI 交互本轮未验收。macOS/Linux 实机与三平台 CI 仍暂缓。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。

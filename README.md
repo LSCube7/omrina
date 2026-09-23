@@ -1,16 +1,16 @@
 # OMRINA
 
-**Optical Mark Recognition Integration Agent** 是运行在本机的跨平台 Local Integration Agent。当前代码提供 Windows、macOS 和 Linux 桌面目标、平台无关的模板与扫描契约、图像导入保存和只读的本地健康检查；完整的浏览器连接、任务、本地授权、状态事件和 WebSocket 能力仍按后续里程碑推进。
+**Optical Mark Recognition Integration Agent** 是运行在本机的跨平台 Local Integration Agent。当前代码提供 Windows、macOS 和 Linux 桌面目标、平台无关的模板与扫描契约、图像导入保存、本地识别与评分复核，以及只读的本地健康检查；完整的浏览器连接、任务、本地授权、状态事件和 WebSocket 能力仍按后续里程碑推进。
 
 公开仓库：[LSCube7/omrina](https://github.com/LSCube7/omrina)
 
-OMRINA 不是面向终端用户的完整答题应用。桌面 UI 主要用于配置、状态查看和需要用户确认的操作；模板、识别、评分与复核能力由本地引擎逐步提供。
+OMRINA 不是面向终端用户的完整答题应用。桌面 UI 主要用于配置、状态查看和需要用户确认的操作；模板、识别、评分与复核能力由本地引擎提供。
 
 ## 当前状态
 
 - 桌面目标为 Windows、macOS 和 Linux；不考虑 Android / iOS。
 - Windows 仍是主要开发平台和主要实机扫描平台。
-- Uno 桌面迁移代码已落地：Windows target 使用 Windows App SDK / WinUI 3，macOS 与 Linux 使用 Uno Skia Desktop target；单窗口导航壳由另一代理负责维护。
+- Uno 桌面迁移代码已落地：Windows target 使用 Windows App SDK / WinUI 3，macOS 与 Linux 使用 Uno Skia Desktop target；界面使用单窗口 NavigationView 与 TitleBar。
 - Windows 使用 `WindowsAppSDKSelfContained=true` 随输出提供 Windows App SDK runtime payload；macOS/Linux 使用 Skia desktop entrypoint。
 - Windows 构建与 CaptureStore 回归已在本机验证；macOS/Linux 编译、运行、设备发现和文件选择器实机验收暂缓，不能写成已验收。
 - 三平台 CI 当前暂缓，不能把 macOS / Linux 编译、发布或实机验收写成已通过。
@@ -20,12 +20,12 @@ OMRINA 不是面向终端用户的完整答题应用。桌面 UI 主要用于配
 
 代码按职责拆分，平台相关 API 保持在明确的边界内：
 
-- `Omrina.Core`：当前提供模板数据模型、A4 几何和 SVG 输出；扫描任务、状态和配置仍属规划范围；只包含平台无关的 .NET 逻辑。
+- `Omrina.Core`：提供模板数据模型、A4 几何、SVG 输出、定位与填涂识别、答案键、评分、复核及 JSON/CSV 导出；扫描任务、状态和配置仍属规划范围；只包含平台无关的 .NET 逻辑。
 - `Omrina.Protocol`：当前只定义 M0 健康检查的协议常量和响应模型；完整的 HTTP、WebSocket、授权、设备和任务协议仍属规划范围。
 - `Omrina.Scanning`：统一扫描抽象与结果模型；具体驱动由扫描适配层处理。
 - `Omrina.Server`：当前提供仅监听回环地址的健康检查 HTTP 服务和来源校验；事件与任务调度仍属规划范围。
-- `Omrina.Platform`：平台无关的输入图像文件契约、Skia PNG/JPEG 完整解码校验和本地文件实现。
-- `Omrina.Desktop`：Uno 桌面入口与平台适配边界；Windows、macOS/Linux 分别选择文件、扫描和打印实现。页面包含状态、模板、采集、设置和关于，模板页与采集页在主窗口内缓存。
+- `Omrina.Platform`：平台无关的输入图像文件契约、Skia PNG/JPEG 完整解码校验、灰度图解码与本地文件实现。
+- `Omrina.Desktop`：Uno 桌面入口与平台适配边界；Windows、macOS/Linux 分别选择文件、扫描和打印实现。页面包含状态、模板、采集、识别/复核、设置和关于，业务页面在主窗口内缓存。
 
 `Microsoft.UI.*`、`Windows.*` 和 Win32 类型不得进入 Core、Protocol、Scanning 抽象或 Server。Windows 的原生能力通过 Platform 层或明确的 Windows 实现提供。详细的品牌、资源和平台边界见 [OMRINA 品牌与资源约定](docs/brand.md)。
 
@@ -59,14 +59,26 @@ node .\tests\integration\health.mjs
 
 `CaptureStore` 保留 100 MB 文件、16000×16000 尺寸和 100Mpx 总像素限制，先检查 codec 头部，再完整遍历 JPEG scanline 或在 PNG scanline 不可用时执行受上述限制约束的 exact-size 解码；复制后再次校验并使用 atomic staging，取消和失败会清理暂存目录。默认数据目录仍是 `%LocalAppData%\AnswerSheet`（其他系统为对应的 LocalApplicationData 下 `AnswerSheet`）。
 
-2026-09-18 已完成一张生成模板的打印、填涂和本地应用扫描。采集图为 2481 × 3506 像素，目视确认页面四角定位与方向标记完整，人工复核确认填涂内容可读。纸面实际尺寸尚未测量，因此不能把打印比例写成已验收；M2 的自动识别、评分和人工复核功能尚未实现。
+2026-09-18 已完成一张生成模板的打印、填涂和本地应用扫描。采集图为 2481 × 3506 像素，目视确认页面四角定位与方向标记完整，人工复核确认填涂内容可读。纸面实际尺寸尚未测量，因此不能把打印比例写成已验收。该样本随后用于 M2 本机识别检查；这不等于跨设备准确率验收。
 
 迁移前 Windows 原型的模板、打印和采集记录仍保留在验证文档中；它们不替代本轮的代码级构建与 CaptureStore 回归。当前验证结果、平台未实测项和能力限制见 [M0 / M1 验证记录](docs/development/validation.md) 和 [M1 计划](docs/architecture/m1.md)。文档不包含本机用户路径，也不上传真实扫描样本。
+
+## M2：本地识别、评分与复核
+
+采集记录中的模板参数、schema 和完整 `TemplateId` 经校验后，已有的 SkiaSharp 图像层把原图交给 Core。Core 检测四角定位块和方向标记，建立纸面到像素的变换，返回各题填涂状态、质量指标和诊断。评分必须由用户提供完整的标准答案；拒绝的识别结果不给分，尚未解决的待复核问题只能产生临时分数。人工修订及其原因可连同原识别结果导出为 JSON/CSV。桌面使用同一 NavigationView 中的“识别 / 复核”页，不通过健康检查接口开放设备或结果。
+
+Core 与平台回归可用以下现有项目运行；详细流程和边界见 [M2 架构](docs/architecture/m2.md) 与 [验证记录](docs/development/validation.md)：
+
+```powershell
+dotnet run --project .\tests\core\Omrina.Core.Tests.csproj --no-restore
+dotnet run --project .\tests\m2\Omrina.M2.Tests.csproj --no-restore
+dotnet run --project .\tests\capture\Omrina.Capture.Tests.csproj --no-restore
+```
 
 ## 后续里程碑
 
 1. M0：完成 HTTPS 浏览器访问、WebSocket、配对授权和授权撤销验证。
 2. M1：补充纸面尺寸测量，并固化打印、填涂、扫描的可重复验收记录。
-3. M2：实现模板定位、填涂识别、评分、人工复核和导出。
+3. M2：补充更多实际纸张、扫描方向、分辨率和设备的识别验证。
 4. M3：完成跨平台 SDK 业务接入。
 5. M4：确定安装分发、兼容性和使用文档；恢复三平台 CI 后再安排 macOS / Linux 实机验收。

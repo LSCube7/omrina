@@ -1,6 +1,6 @@
 # OMRINA Desktop
 
-此目录是 OMRINA 本地 Integration Agent 的 Uno 桌面入口。项目只包含 Windows、macOS 和 Linux 桌面目标，不包含 Android / iOS；Windows 使用 WinUI 3 / Windows App SDK，macOS/Linux 使用 Uno Skia Desktop。这里提供单窗口导航、本地健康检查、模板操作、图像导入和平台扫描适配，不包含完整阅卷、识别或评分功能。
+此目录是 OMRINA 本地 Integration Agent 的 Uno 桌面入口。项目只包含 Windows、macOS 和 Linux 桌面目标，不包含 Android / iOS；Windows 使用 WinUI 3 / Windows App SDK，macOS/Linux 使用 Uno Skia Desktop。这里提供单窗口导航、本地健康检查、模板操作、图像导入、平台扫描适配和本地识别/复核入口。
 
 当前已验证 Windows 单窗口导航 UI、Windows 与 Skia desktop 的代码级构建，以及 CaptureStore 回归；macOS/Linux 实机运行、设备发现、文件选择器和扫描尚未验收，不能把编译通过写成三平台验收。
 
@@ -58,9 +58,17 @@ Windows 目标的“系统打印”入口使用 Windows 系统打印流程。打
 
 “扫描并保存首张”在 Windows 使用 WIA/TWAIN，在 macOS 使用 Apple/ImageCaptureCore（ICA），在 Linux 使用 SANE；固定使用平板、A4、非原生驱动界面，并提供 150、300、600 DPI 三个分辨率。扫描得到的首张图像先保存为应用拥有的临时 PNG，再通过同一份 `CaptureStore` 关联模板并保存；取消或失败不会自动重发扫描。macOS/Linux 设备运行尚未验收。
 
-迁移前的软件级验证从已授权测试纸导入 PNG，界面显示 2481 × 3506，并成功关联模板身份；本轮没有执行实体扫描或打印。纸面实际尺寸尚未测量，M2 自动识别尚未实现。
+迁移前的软件级验证从已授权测试纸导入 PNG，界面显示 2481 × 3506，并成功关联模板身份；本轮没有执行实体扫描或打印。纸面实际尺寸尚未测量。M2 随后实现本地识别与复核；验证结果见根目录记录。
 
 上述段落描述当前代码路径。Windows 与 `net10.0-desktop` 代码级构建已通过；macOS/Linux 实机运行、设备发现、文件选择器和扫描仍未验收，不要把这些代码路径写成已通过的设备或 UI 验收。
+
+## M2 本地识别与复核
+
+采集页保存原图后，可在同一主窗口的“识别 / 复核”页打开记录；应用启动时也会尝试读取最近一条已保存记录。页面先核对 manifest 的 schema、完整模板 ID、题数、选项数和原图路径，再允许运行本地识别。结果保留单选、空白、多选、不确定、每个选项的填涂量与诊断信息，用户可对照原图检查。
+
+评分要求逐题填写标准答案。人工修订需记录原因，并与原识别结果一同导出 JSON/CSV。页级定位质量不足的结果不能仅靠修改某一道题升为最终成绩；拒绝的图像不会给出可信分数。这里的置信指标是质量启发值，不是准确率。
+
+本轮不通过浏览器接口运行识别，不启动自动扫描；物理采集只在用户明确选择设备并发起操作时发生。M2 数据流和限制见 [架构说明](../../docs/architecture/m2.md)。
 
 ## 2026-09-19 Windows 单窗口导航 UI 验收
 
@@ -109,7 +117,7 @@ dotnet run --project .\apps\desktop\Omrina.Desktop.csproj -p:Platform=x64
 
 ## 当前验证状态
 
-迁移前 Windows 原型已有 Core/Capture 回归、模板 UI、SVG 文件、PNG 导入关联、Print to PDF 软件路径以及一轮生成模板的打印/填涂/本地扫描记录；这些记录不等同于本轮跨平台实机验收。当前 Windows 与 Skia desktop 构建已通过，CaptureStore 回归已通过；macOS/Linux 实机、设备发现和三平台测试继续暂缓，纸面实际尺寸尚未测量，M2 自动识别尚未实现。
+迁移前 Windows 原型已有 Core/Capture 回归、模板 UI、SVG 文件、PNG 导入关联、Print to PDF 软件路径以及一轮生成模板的打印/填涂/本地扫描记录；这些记录不等同于本轮跨平台实机验收。M2 的本地识别与复核代码现已加入；最终构建、测试和界面验收以根目录 [验证记录](../../docs/development/validation.md) 的对应日期为准。macOS/Linux 实机、设备发现和三平台测试继续暂缓，纸面实际尺寸尚未测量。
 
 2026-09-19 Uno 迁移代码级验证：
 
