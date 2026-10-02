@@ -1,10 +1,8 @@
+using System.Net;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Logging;
-using System.Net;
-
 using Omrina.Protocol;
 
 namespace Omrina.Server;
@@ -12,161 +10,62 @@ namespace Omrina.Server;
 public sealed class LoopbackHealthServer : IAsyncDisposable
 {
     public const int Port = 17843;
-
-    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly LocalAgentHost _host;
+    private readonly int _port;
     private WebApplication? _application;
-
+    public event Action? PairingStateChanged;
+    public event Action<string>? GrantRevoked;
+    public IReadOnlyList<PendingPairing> PendingPairings => _host.PendingPairings;
+    public IReadOnlyList<GrantSummary> ActiveGrants => _host.ActiveGrants;
+    public string? BaseAddress { get; private set; }
+    public LoopbackHealthServer(ILocalAgentOperations? operations = null, IEnumerable<string>? allowedOrigins = null, int port = Port)
+    {
+        _port = port;
+        _host = new LocalAgentHost(operations, allowedOrigins ??
+            (Environment.GetEnvironmentVariable("OMRINA_ALLOWED_ORIGINS") ?? Environment.GetEnvironmentVariable("ANSWERSHEET_ALLOWED_ORIGINS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        _host.StateChanged += () => PairingStateChanged?.Invoke();
+        _host.GrantRevoked += id => GrantRevoked?.Invoke(id);
+    }
+    public string ApprovePairing(string requestId) => _host.ApprovePairing(requestId);
+    public bool RejectPairing(string requestId) => _host.RejectPairing(requestId);
+    public bool RevokeGrant(string grantId) => _host.RevokeGrant(grantId);
     public async Task StartAsync()
     {
-        await _lifecycleGate.WaitAsync();
+        await _gate.WaitAsync();
         try
         {
-            if (_application is not null)
+            if (_application is not null) return;
+            var builder = WebApplication.CreateSlimBuilder();
+            builder.Logging.ClearProviders();
+            builder.WebHost.ConfigureKestrel(options =>
             {
-                return;
-            }
-
-            var application = CreateApplication();
-            try
-            {
-                await application.StartAsync();
-                _application = application;
-            }
-            catch
-            {
-                await application.DisposeAsync();
-                throw;
-            }
+                options.Limits.MaxRequestBodySize = 20 * 1024 * 1024;
+                options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
+                options.Listen(IPAddress.Loopback, _port, listen => listen.Protocols = HttpProtocols.Http1);
+            });
+            var app = builder.Build();
+            _host.Map(app);
+            try { await app.StartAsync(); }
+            catch { await app.DisposeAsync(); throw; }
+            _application = app;
+            BaseAddress = app.Urls.Single();
         }
-        finally
-        {
-            _lifecycleGate.Release();
-        }
+        finally { _gate.Release(); }
     }
-
     public async Task StopAsync()
     {
-        await _lifecycleGate.WaitAsync();
+        await _gate.WaitAsync();
         try
         {
-            var application = _application;
+            var app = _application;
             _application = null;
-            if (application is null)
-            {
-                return;
-            }
-
-            try
-            {
-                await application.StopAsync();
-            }
-            finally
-            {
-                await application.DisposeAsync();
-            }
+            _host.Reset();
+            BaseAddress = null;
+            if (app is null) return;
+            try { await app.StopAsync(); } finally { await app.DisposeAsync(); }
         }
-        finally
-        {
-            _lifecycleGate.Release();
-        }
+        finally { _gate.Release(); }
     }
-
-    public async ValueTask DisposeAsync()
-    {
-        await StopAsync();
-        _lifecycleGate.Dispose();
-    }
-
-    private static WebApplication CreateApplication()
-    {
-        var allowedOrigins = AllowedOrigins.FromEnvironment();
-        var builder = WebApplication.CreateSlimBuilder();
-
-        builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-        {
-            options.Listen(IPAddress.Loopback, Port, listenOptions =>
-            {
-                listenOptions.Protocols = HttpProtocols.Http1;
-            });
-        });
-
-        var application = builder.Build();
-        application.Use(async (context, next) =>
-        {
-            if (context.Request.Headers.TryGetValue("Origin", out var originHeader))
-            {
-                var origin = originHeader.ToString();
-                if (!allowedOrigins.Contains(origin))
-                {
-                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    return;
-                }
-
-                context.Response.Headers.AccessControlAllowOrigin = origin;
-                context.Response.Headers.Vary = "Origin";
-            }
-
-            await next();
-        });
-
-        application.MapGet(HealthProtocol.HealthPath, () => Results.Json(new HealthResponse(
-            Service: HealthProtocol.ServiceName,
-            ProtocolVersion: HealthProtocol.ProtocolVersion,
-            Status: "ready")));
-
-        return application;
-    }
-
-    private sealed class AllowedOrigins
-    {
-        private readonly HashSet<string> _origins;
-
-        private AllowedOrigins(HashSet<string> origins)
-        {
-            _origins = origins;
-        }
-
-        public static AllowedOrigins FromEnvironment()
-        {
-            var configuredOrigins = Environment.GetEnvironmentVariable("OMRINA_ALLOWED_ORIGINS")
-                ?? Environment.GetEnvironmentVariable("ANSWERSHEET_ALLOWED_ORIGINS");
-            var origins = new HashSet<string>(StringComparer.Ordinal);
-
-            foreach (var value in (configuredOrigins ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                origins.Add(NormalizeOrigin(value));
-            }
-
-            return new AllowedOrigins(origins);
-        }
-
-        public bool Contains(string origin)
-        {
-            try
-            {
-                return _origins.Contains(NormalizeOrigin(origin));
-            }
-            catch (ArgumentException)
-            {
-                return false;
-            }
-        }
-
-        private static string NormalizeOrigin(string value)
-        {
-            if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
-                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
-                || string.IsNullOrEmpty(uri.Host)
-                || !string.IsNullOrEmpty(uri.UserInfo)
-                || uri.AbsolutePath != "/"
-                || !string.IsNullOrEmpty(uri.Query)
-                || !string.IsNullOrEmpty(uri.Fragment))
-            {
-                throw new ArgumentException("允许的来源必须是完整的 HTTP 或 HTTPS Origin。", nameof(value));
-            }
-
-            return uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped);
-        }
-    }
+    public async ValueTask DisposeAsync() { await StopAsync(); _gate.Dispose(); }
 }
