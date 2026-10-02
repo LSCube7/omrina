@@ -13,7 +13,7 @@ HTTP 基址 `http://127.0.0.1:17843`。JSON 属性 camelCase；枚举采用 came
 | POST /v1/pairing/exchange | `{requestId,code}` | `{grantId,token,expiresAt}` |
 | DELETE /v1/grant | 当前 Bearer | 204，自撤销 |
 | GET /v1/templates | 当前 Bearer | 静态默认模板数组（10题/4选项，含templateId/schemaVersion/templateNumber/svg），不含用户生成资源 |
-| GET /v1/devices | 当前 Bearer | 硬件描述 JSON |
+| GET /v1/devices | 当前 Bearer | 硬件描述 JSON；deviceId 是当前进程会话中的匿名稳定标识，重启后需重新发现设备 |
 | POST /v1/tasks | `{idempotencyKey,operation,parameters}` | 202 TaskSnapshot |
 | POST /v1/tasks/upload | PNG/JPEG 原始 body | 202 TaskSnapshot |
 | GET /v1/tasks | 当前 Bearer | 当前 grant 的 TaskSnapshot[] |
@@ -42,15 +42,19 @@ HTTP 基址 `http://127.0.0.1:17843`。JSON 属性 camelCase；枚举采用 came
 
 `GET /v1/events` 升级后先发 `{type:"authenticate",token}`；5秒内成功收到 `{type:"authenticated",sequence,task:null}`，之后才发送 `{type:"task",sequence,task}`。HTTP 与 WS 的 Origin/凭据绑定相同，URL query 拒绝。每 grant sequence 单调递增，无历史重播。断线后 GET tasks 恢复状态，不重新创建或触发硬件任务。撤销/过期关闭连接，慢消费者队列溢出关闭连接并通过 GET 恢复。
 
+认证失败、授权撤销或过期使用关闭码 `1008`；事件队列溢出或有效授权的连接容量已满使用 `1013`，授权本身仍有效。SDK 在已建立订阅的临时关闭后重连并查询任务恢复状态；`1008` 则清除内存凭据并停止订阅，需重新配对。
+
 ## Desktop 注入与本地授权
 
 `ILocalAgentOperations.GetTemplatesAsync(CancellationToken)` / `GetDevicesAsync(CancellationToken)` 返回 `JsonElement`；前者只返回静态能力/默认模板，每grant预置相同默认ID。自定义模板必须通过template task生成，且upload/scan不能引用其他grant的自定义模板。`RunAsync(TaskOperationRequest request, Stream? image, CancellationToken)` 返回 `JsonElement`。
 
 `TaskOperationRequest(string GrantId, TaskOperation Operation, JsonElement Parameters)`；Desktop 按 GrantId 隔离模板、采集与结果 ID。image 流由 Server 拥有，operations 必须在 RunAsync 返回前读取/复制，不能保留流引用。operations 必须遵守取消令牌，包含采集协调器调用；不自动重发扫描。可抛 `LocalOperationException(code,message)` 表示业务失败，message 必须为安全用户文本。其他异常只返回通用错误，不回显异常/路径。
 
-`LoopbackHealthServer(ILocalAgentOperations? operations = null, IEnumerable<string>? allowedOrigins = null, int port = 17843)`；`PendingPairings`、`ActiveGrants` 为安全摘要快照；`ApprovePairing(requestId)` 返回一次性 code，仅在桌面本地显示；`RejectPairing(requestId)` / `RevokeGrant(grantId)` 返回 bool。`PairingStateChanged` / `GrantRevoked(string grantId)` 在调用/请求/清理线程发出，UI 自行 dispatcher，不阻塞回调。自然过期由每秒清理触发 grant 撤销通知。
+`LoopbackHealthServer(ILocalAgentOperations? operations = null, IEnumerable<string>? allowedOrigins = null, int port = 17843, TimeProvider? timeProvider = null)`；时钟默认 `TimeProvider.System`，可注入框架时钟以测试过期行为。`PendingPairings`、`ActiveGrants` 为安全摘要快照；`ApprovePairing(requestId)` 返回一次性 code，仅在桌面本地显示；`RejectPairing(requestId)` / `RevokeGrant(grantId)` 返回 bool。`PairingStateChanged` / `GrantRevoked(string grantId)` 在调用/请求/清理线程发出，UI 自行 dispatcher，不阻塞回调。自然过期由每秒清理触发通知；待配对申请过期或错误次数耗尽后也会通知刷新。
 
 凭据仅驻内存 SHA256 哈希，不日志、不存URL、不落盘。code一次性、5分钟过期、最多5次错误；grant 8小时过期。停止/重启清空授权和内存任务/资源索引；不删除 CaptureStore 文件或用户数据。
+
+扫描设备 ID 由当前扫描会话的随机密钥对驱动与原生标识计算 HMAC，避免枚举顺序改变时选错设备，也不公开原生标识。原生身份缺失或同驱动内重复的候选全部排除；已移除设备的旧 ID 不会映射到另一台设备。会话重建后调用方需要重新读取设备列表。
 
 请求 JSON 上限64KiB，上传20MiB，body读取30秒超时。最多8个同时读取body。每Origin配对请求/交换各10次/分钟，全局64个pending和64个grant；每grant任务60次/分钟、历史256个，全局历史512个和同时运行32个（上传同时最多4个）。任务5分钟取消时限，结果JSON上限1MiB，每grant事件连接8个、每连接队列128条。达到容量返回429，重配对或重启可重建内存会话。GET静态能力30秒超时，并跟随grant撤销取消。
 

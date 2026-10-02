@@ -174,6 +174,18 @@ macOS/Linux 未运行应用或设备后端，三平台 CI 和设备测试继续�
 - 直接适配器测试最后补充断言时，普通及重复使用的临时输出被运行中的测试 harness 锁定，产生 `MSB3026` / `MSB3027`。停止该测试 harness 并使用新的独立输出目录后构建与测试通过；未关闭用户桌面窗口，未修改构建依赖。
 - 已启动仅监听回环的开发静态页面 `127.0.0.1:17846` 和模拟服务 `127.0.0.1:17844`，SDK JavaScript 构建成功。内置浏览器和 Chrome 的自动化工具打开页面均返回 `net::ERR_BLOCKED_BY_CLIENT`，未进行页面交互、跨来源 CORS 或浏览器 WebSocket 验收。没有改变浏览器策略或绕过安全检查；测试服务随后已停止。可按 SDK README 在正常浏览器中手动复核。
 
+## 2026-10-02 M3 收尾与 M4 SDK 消费者检查
+
+- 服务端追加回归后共 100 项断言通过，构建 0 警告、0 错误。待配对申请自然过期或错误次数耗尽后会通知刷新；有效授权的事件队列溢出及第 9 个事件连接使用 `1013`，不会误报授权撤销。真实 WebSocket 检查确认前 8 个订阅认证成功，第 9 个收到 `1013` 后同一授权仍能查询任务；队列溢出直接测试生产的 128 条缓冲区，未声称模拟了真实网络背压。
+- SDK 的 14 项测试、类型检查和构建通过。已建立事件订阅在 `1013` 后保留授权、重连并查询任务恢复；握手阶段或认证后的 `1008` 清除内存凭据并停止订阅。
+- `node tests/sdk-package/consumer-smoke.mjs` 通过：使用本机已安装的 TypeScript 5.9.3 编译，再实际执行本地 `npm pack`，检查 tarball 恰好包含 10 个 README/manifest/JavaScript/声明文件，在解包后的临时 `node_modules` 中通过包入口运行 Node 导入，并严格编译 TypeScript 消费者。未联网安装或发布。验证主机 Node 为 v25，不代表所有 Node 或浏览器版本验收。
+- 设备身份回归通过：同一会话的 A/B 设备正反排序保持标识稳定，设备移除后旧标识不可解析，驱动参与匿名摘要；缺失身份或二重/三重重复身份全部排除。测试使用纯 .NET 映射和模拟设备，没有驱动真实扫描仪。
+- 最新扫描修复的 Windows 与 Uno Desktop 目标顺序构建通过，均为 0 错误、1 条已缓存的 `NU1900`（审计源不可用）。命令使用 `--no-restore`、两个独立 `OutputPath` 与 `NuGetAudit=false`，没有恢复或下载依赖，没有覆盖正在运行的应用；关闭此次联网审计不代表漏洞审计已通过。macOS/Linux 实机仍未验收。
+
+Windows 开发包尚未通过隐私检查，正式 Release、干净机器安装与签名尚未验收。首轮 Release publish 报 `UNOB0019`（Uno DevServer 不支持优化构建）；Debug probe 输出包含 Core 与 ASP.NET Core 10.0.0 framework 要求和 Windows App SDK runtime payload。产物中的 Uno MCP 元数据 `UnoMCPProcessorPath`，以及 Hot Design 生成的 `ApplicationPreviewsFolder` 元数据和 `ServerProcessorPathAttribute` 曾嵌入本机绝对路径；尝试独立编译缓存及已有禁用/路径属性后，仍有路径残留，不能作为可交付包。独立发布复制还曾因磁盘空间不足报 `MSB3026`；已只清理本轮创建的探测目录，未改动用户文件或依赖缓存。这些失败不计为成功包，未上传产物。当前分发计划见 [M4 架构](../architecture/m4.md)。
+
+`scripts/package-windows-dev.ps1` 已通过 PowerShell 语法解析和只读审查。`-TestPrivacyScanner` 合成自测通过，覆盖隐藏目录路径命中、无路径时空结果与本次暂存清理；对已有本轮发布探测目录的实际审计返回退出码 1，错误为 `PRIVACY_PATH_EMBEDDED:Omrina.Desktop.dll`，未输出绝对路径、未创建最终包，暂存残留为 0。探测产物的 16 项关键运行文件齐全，runtimeconfig 要求 `Microsoft.NETCore.App` 与 `Microsoft.AspNetCore.App` 10.0.0。脚本默认整包发布到成功产物的完整路径尚未运行验证；以上只证明扫描门禁和清理行为，不能算 Windows 包验收通过。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。

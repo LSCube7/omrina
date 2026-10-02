@@ -83,6 +83,16 @@ SDK 可以生成模板、上传关联的 PNG/JPEG、选择设备扫描，并通�
 
 当前授权与业务索引保存在内存，应用重启后需要重新配对；已保存的采集文件保留在本机。SDK 使用方式见 [SDK README](packages/sdk/README.md)，参数、限额与授权规则见 [M3 契约](docs/architecture/m3-contract.md) 和 [M3 架构](docs/architecture/m3.md)。该 npm 包尚未发布。
 
+## M4：分发准备
+
+已加入实际 npm tarball 的消费者检查，验证包入口的 JavaScript 导入和严格 TypeScript 声明消费。Windows 分发先准备离线开发验证包；正式 Release 配置、安装器、签名和干净机器验收尚未完成。范围与验收矩阵见 [M4 计划](docs/architecture/m4.md)，实际通过项与阻塞见 [验证记录](docs/development/validation.md)。
+
+```powershell
+node .\tests\sdk-package\consumer-smoke.mjs
+```
+
+该检查复用已安装的开发依赖，不联网安装，也不发布 npm 包。
+
 ## 后续里程碑
 
 1. M0 / M3：补充公网 HTTPS 浏览器访问与本地授权界面交互验收。
