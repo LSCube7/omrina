@@ -81,6 +81,31 @@ await client.revokeGrant();
 - `getTemplates()` 返回 `TemplateSummary[]`，包含可用于预览或保存的 `svg` 字符串；`getDevices()` 返回 `DeviceDescriptor[]`。
 - `watchEvents()` 使用固定 WebSocket 路径并首先发送内存令牌。连接恢复时只读取 `GET /v1/tasks`，不会重建任务。用 `AbortSignal` 停止订阅。
 
+## 主观题人工批阅（M5-A）
+
+主观题批阅针对当前授权上传或扫描的原图，由调用方人工指定整数像素区域。坐标以原图左上角为原点，不能直接使用预览缩放后的坐标。
+
+- `createSubjectiveReviewTask()` 创建批阅文档，参数包含 `captureId` 和题目 ID、题号、满分、区域列表。
+- `createSubjectiveReadTask()` 读取批阅文档及当前版本。
+- `createSubjectiveGradeTask()` 提交草稿、确认或重置；包含 `reviewId`、`expectedVersion`、`reviewer` 和 `edits`，整批成功或整批失败。
+- `createSubjectiveExportTask()` 导出 JSON 或 CSV。
+- `getSubjectiveQuestionImage(reviewId, questionId)` 返回 PNG 字节；只读取已保存的题目区域，不开放任意路径或裁剪参数。
+
+先保存草稿，再确认相同的分数和评语。修改已确认题目时，显式提交 `status: "draft"`；`status: "ungraded"` 重置评分。未全部确认时，最终主观题小计为 `null`。任务结果沿用 `TaskSnapshot.result` 的 `unknown` 边界，由宿主按具体操作核对。
+
+创建任务仍需提供幂等键。版本冲突后先重新读取并核对，SDK 不自动覆盖。批阅记录保存于本机，但新授权不会继承旧授权的记录。模板样式、自动定位、批阅界面及 OCR/AI 接入尚未交付，详细限制见 [M5 架构](../../docs/architecture/m5.md)。
+
+### 自动回环验证
+
+M5-A 的自动回环验证使用已编译的实际 Desktop 测试适配器：
+
+```powershell
+dotnet build .\tests\m3-desktop\Omrina.M3.Desktop.Tests.csproj --no-restore
+node .\tests\integration\m5-sdk-e2e.mjs .\tests\m3-desktop\bin\Debug\net10.0\Omrina.M3.Desktop.Tests.dll
+```
+
+先按本文开头构建 SDK。该脚本启动专用测试 harness，自动批准本轮临时授权，使用其生成的合成 PNG，并在结束时撤销授权及退出子进程。不启动桌面界面或扫描设备，不代表浏览器权限和真实纸张验收。
+
 ## Origin、网络与权限
 
 端点只允许 HTTP `localhost` 或 `127.0.0.1`，SDK 将所有 HTTP 与 WebSocket 调用固定到协议路由。HTTP 请求不跟随重定向、不发送 cookies，且不允许调用方传任意 header/path。浏览器会自动发送当前页面的精确 `Origin`；SDK 不尝试设置浏览器禁止脚本修改的 `Origin` 请求头。非浏览器宿主应通过其受控 fetch 实现提供服务端要求的精确来源。

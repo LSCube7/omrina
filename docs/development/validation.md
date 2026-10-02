@@ -199,6 +199,24 @@ Windows 开发包尚未通过隐私检查，正式 Release、干净机器安装�
 - 包内 `app/Omrina.Desktop.runtimeconfig.json` 请求 `Microsoft.NETCore.App 10.0.0` 与 `Microsoft.AspNetCore.App 10.0.0`；Windows App SDK payload 随包提供，.NET 仍依赖目标机提供兼容共享框架。
 - PowerShell 解析、隐私扫描合成自测、诊断脱敏合成自测和 diff 检查通过。最终追加的 `WMC9999` 回归确认有用说明保留，工作区、drive/UNC 路径及多种敏感字段的假值被遮蔽；仅重跑解析与该自测，未重复发布。没有改动业务代码，因此没有重复运行已通过的 Core、SDK 和 HTTP/WebSocket 回归。未启动该新包进行 UI/运行验收，未扫描或打印。
 
+## 2026-10-02–03 M5-A 主观题批阅基础
+
+本阶段先实现独立于纸面版式的人工指定区域与评分基础，未变更现有选择题模板 schema。完整 M5 仍等待模板样式、自动定位和批阅界面。
+
+- 新增受鉴权的题目区域 PNG 接口后，`dotnet run --project tests/server/Omrina.Server.Tests.csproj --no-restore` 最终 120 项断言通过（包含原有 100 项及新增 20 项），退出码 0。覆盖 Origin/Bearer/Host、相同 Origin 的新授权隔离、非法 ID 与 query、PNG 签名与 8MiB 上限、`no-store`、错误脱敏、取消及授权撤销。
+- 图片接口有独立的 32 请求并发上限；底层适配器若忽略取消，会占用请求槽直到真正结束。测试验证过载返回 429、不合作适配器不会通过取消逃脱上限。适配器取消的 504 与授权撤销的 401 已分别验证；没有等待真实 30 秒来宣称实际网络超时验收。
+- Core 以 `dotnet build tests/core/Omrina.Core.Tests.csproj --no-restore -p:OutDir="artifacts/m5-core-build-20261002-01/out/"` 独立构建，0 警告、0 错误；运行生成的测试 DLL 后 11/11 组通过。新主观题回归有 67 个断言调用点，覆盖整数边界、整批原子性、分值/状态、版本冲突、历史限制与篡改拒绝。首轮三个签名/类型编译错误与两处测试断言问题已修复；审查发现的无变化伪造审计批次也已增加拒绝与回归。保留忽略目录中的本轮构建产物。
+- SDK `node --test tests/sdk/*.test.mjs` 首轮 17/17 通过；`dotnet build tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj --no-restore` 0 警告、0 错误，随后 `--no-build` 运行通过。新增回归覆盖真实 PNG/JPEG 区域像素、双题批阅版本与状态、CSV 公式转义、持久化重开和存储故障。审查发现的 JPEG 位图提前释放、采集 ID 的 N/D 格式不一致、取消后 Promise 未观察拒绝及响应限额问题均已修正。
+- `node tests/sdk-package/consumer-smoke.mjs` 退出码 0：TypeScript 5.9.3 构建、实际 tarball 清单、通过包入口消费 JavaScript 与严格 TypeScript 声明检查通过。只使用已有开发依赖，没有安装或发布 npm 包。
+- `node --check tests/integration/m5-sdk-e2e.mjs` 通过。该脚本将程序批准限制在本轮测试 harness 的 stdin，生产服务没有自动批准路由；版本与授权失败路径要求准确错误码，超时或普通 500 不能作为隔离验证成功。
+- `node tests/integration/m5-sdk-e2e.mjs tests/m3-desktop/bin/Debug/net10.0/Omrina.M3.Desktop.Tests.dll` 最终退出码 0。通过真实 Server + Desktop 适配器 + SDK 验证合成 40×40 PNG 上传、10×10/20×10 区域图、两题草稿与确认、未批完小计为空、过期版本和确认后直接改分均无副作用、退回草稿后重新确认小计为 21、JSON 完整历史与 CSV 内容。第二个同 Origin 授权读取/改分/取图获得准确拒绝码；撤销后既检查 SDK 本地清权，也用旧凭据实例确认真实服务返回 401。测试授权在 `finally` 撤销，harness 收到 `quit` 并确认子进程退出。没有验证浏览器权限、自动定位或真实纸张。
+- 端到端脚本初次运行中的回调初始化、校验函数误名、超过模板限制的测试标题和 CSV 引号格式问题均已修复，最终未放宽断言。
+- Windows `net10.0-windows10.0.26100.0` / `win-x64` 与 Uno `net10.0-desktop` 两目标的 Debug 隔离构建最终均退出码 0，分别 1 条 `NU1900`、0 错误。使用 `--no-restore`、独立 `OutputPath` 和临时 `CustomAfterDirectoryBuildProps`，未覆盖默认资产或正在运行的应用，未删除旧 `tmp`。Windows 编译发现的 `FileAttributes` 命名冲突已明确限定为 `System.IO.FileAttributes`。
+- 首次桌面尝试出现 `WMC1509` / `WMC9999`；沿用 M4 验证过的开发工具禁用参数后消失。最终命令包含 `UnoDisableMCPSupport=true`、`UnoDisableHotDesign=true`、`UnoDisableHotDesignAgent=true`、空 `HotDesignPreviewsFolder` 与相对 `ApplicationPreviewsFolder` / `HotDesignSolutionDir`，没有关闭 XAML 编译或跳过业务错误。以上是本轮临时构建条件，不代表默认开发工具、热重载或 UI 已验收。
+- `NU1900` 提示离线漏洞数据源不可用；命令未还原或安装包，并设置 `NuGetAudit=false`。该警告不计为漏洞审计通过。构建产物位于忽略的 `artifacts/m5-target-check-95029850dc084505981bd33024085e1a/`，没有重新发布 M4 开发包或上传二进制。
+- 本轮业务验证只使用本地合成测试与已有缓存，未新增依赖、调用扫描设备或读取真实采集图像。SDK 和桌面改动已做最终窄审查，修复后没有新增问题；未运行真实桌面交互、打印、扫描或三平台实机验收。
+- 随后收紧无效区域的错误映射并增加断言，仅重跑受影响的 `dotnet run --no-restore --project tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj`，最终通过；未重复已通过的其他检查。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
