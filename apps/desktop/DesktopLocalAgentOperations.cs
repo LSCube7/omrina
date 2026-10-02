@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using Omrina.Core;
 using Omrina.Platform;
@@ -13,7 +14,7 @@ namespace Omrina.Desktop;
 /// grant-scoped local agent API. No UI types or caller-provided local paths
 /// cross this boundary.
 /// </summary>
-public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
+public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalAgentSubjectiveImages
 {
     private const int MaximumUploadBytes = 20 * 1024 * 1024;
     private const int MaximumRevokedGrantMarkers = 4096;
@@ -23,6 +24,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
     private readonly IScannerService _scannerService;
     private readonly IAnswerSheetRecognitionService _recognitionService;
     private readonly Action<string> _deleteTemporaryScanFile;
+    private readonly SubjectiveReviewStore _subjectiveReviewStore;
     private readonly AnswerSheetLayout _defaultTemplate;
     private readonly object _grantResourcesGate = new();
     private readonly Dictionary<string, GrantResources> _resources = new(StringComparer.Ordinal);
@@ -39,6 +41,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
         _recognitionService = recognitionService ?? throw new ArgumentNullException(nameof(recognitionService));
         _deleteTemporaryScanFile = deleteTemporaryScanFile
             ?? throw new ArgumentNullException(nameof(deleteTemporaryScanFile));
+        _subjectiveReviewStore = new SubjectiveReviewStore(_captureStore.RootDirectory);
         _defaultTemplate = AnswerSheetLayout.Create("OMRINA 默认答题纸", 10, 4);
     }
 
@@ -133,6 +136,26 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
                 TaskOperation.Score => Score(grantResources!, parameters, operationCancellationToken),
                 TaskOperation.Review => Review(grantResources!, parameters, operationCancellationToken),
                 TaskOperation.Export => Export(grantResources!, parameters, operationCancellationToken),
+                TaskOperation.SubjectiveCreate => await CreateSubjectiveReviewAsync(
+                    request.GrantId,
+                    grantResources,
+                    parameters,
+                    operationCancellationToken).ConfigureAwait(false),
+                TaskOperation.SubjectiveRead => await ReadSubjectiveReviewAsync(
+                    request.GrantId,
+                    grantResources,
+                    parameters,
+                    operationCancellationToken).ConfigureAwait(false),
+                TaskOperation.SubjectiveGrade => await GradeSubjectiveReviewAsync(
+                    request.GrantId,
+                    grantResources,
+                    parameters,
+                    operationCancellationToken).ConfigureAwait(false),
+                TaskOperation.SubjectiveExport => await ExportSubjectiveReviewAsync(
+                    request.GrantId,
+                    grantResources,
+                    parameters,
+                    operationCancellationToken).ConfigureAwait(false),
                 _ => throw new LocalOperationException("UNSUPPORTED_OPERATION", "当前操作暂不支持。")
             };
         }
@@ -403,6 +426,395 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
         }
     }
 
+    private async Task<JsonElement> CreateSubjectiveReviewAsync(
+        string grantId,
+        GrantResources grantResources,
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        await grantResources.SubjectiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var captureGuid = ReadGuid(parameters, "captureId");
+            var capture = FindCapture(grantResources, captureGuid.ToString("N"));
+            var captureRecord = capture.Record;
+            var imageWidth = checked((int)captureRecord.Manifest.PixelWidth);
+            var imageHeight = checked((int)captureRecord.Manifest.PixelHeight);
+            var definitions = ReadSubjectiveQuestionDefinitions(parameters, imageWidth, imageHeight);
+
+            SubjectiveGradingSnapshot snapshot;
+            try
+            {
+                snapshot = SubjectiveGradingSnapshot.Start(
+                    captureRecord.Manifest.CaptureId,
+                    imageWidth,
+                    imageHeight,
+                    definitions);
+            }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or OverflowException)
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题目区域或满分设置无效，请检查后重试。");
+            }
+
+            var reviewId = Guid.NewGuid();
+            var response = CreateCheckedSubjectiveDocument(reviewId, snapshot);
+            await SaveSubjectiveReviewAsync(reviewId, grantId, snapshot, cancellationToken).ConfigureAwait(false);
+            return response;
+        }
+        finally
+        {
+            grantResources.SubjectiveGate.Release();
+        }
+    }
+
+    private async Task<JsonElement> ReadSubjectiveReviewAsync(
+        string grantId,
+        GrantResources grantResources,
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        var reviewId = ReadGuid(parameters, "reviewId");
+        await grantResources.SubjectiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var record = FindSubjectiveReview(grantResources, reviewId, grantId);
+            return CreateCheckedSubjectiveDocument(record.ReviewId, record.Snapshot);
+        }
+        finally
+        {
+            grantResources.SubjectiveGate.Release();
+        }
+    }
+
+    private async Task<JsonElement> GradeSubjectiveReviewAsync(
+        string grantId,
+        GrantResources grantResources,
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        var reviewId = ReadGuid(parameters, "reviewId");
+        var expectedVersion = ReadNonNegativeInt64(parameters, "expectedVersion");
+        var reviewer = ReadString(parameters, "reviewer");
+        var edits = ReadSubjectiveGradeEdits(parameters);
+
+        await grantResources.SubjectiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var record = FindSubjectiveReview(grantResources, reviewId, grantId);
+            if (expectedVersion != record.Snapshot.Version)
+            {
+                throw new LocalOperationException("VERSION_CONFLICT", "批阅记录已更新，请先重新读取后再提交。");
+            }
+
+            if (record.Snapshot.History.Count >= SubjectiveGradingSnapshot.MaximumHistoryBatchCount)
+            {
+                throw new LocalOperationException("SUBJECTIVE_HISTORY_LIMIT", "批阅历史已达到上限，无法继续修改。");
+            }
+
+            SubjectiveGradingSnapshot nextSnapshot;
+            try
+            {
+                nextSnapshot = record.Snapshot.ApplyEdits(edits, reviewer, expectedVersion);
+            }
+            catch (InvalidOperationException exception) when (exception.Message.Contains("不能超过 1 MiB", StringComparison.Ordinal))
+            {
+                throw SubjectiveReviewTooLarge();
+            }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or OverflowException)
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "评分修改无效，请检查状态、分值和评语后重试。");
+            }
+
+            var response = CreateCheckedSubjectiveDocument(reviewId, nextSnapshot);
+            await SaveSubjectiveReviewAsync(reviewId, grantId, nextSnapshot, cancellationToken).ConfigureAwait(false);
+            return response;
+        }
+        finally
+        {
+            grantResources.SubjectiveGate.Release();
+        }
+    }
+
+    private async Task<JsonElement> ExportSubjectiveReviewAsync(
+        string grantId,
+        GrantResources grantResources,
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        var reviewId = ReadGuid(parameters, "reviewId");
+        var format = ReadString(parameters, "format");
+        if (format is not "json" and not "csv")
+        {
+            throw new LocalOperationException("INVALID_EXPORT_FORMAT", "导出格式请选择 JSON 或 CSV。");
+        }
+
+        await grantResources.SubjectiveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var record = FindSubjectiveReview(grantResources, reviewId, grantId);
+            var document = ToSubjectiveDocument(record.ReviewId, record.Snapshot);
+            var content = format == "json"
+                ? JsonSerializer.Serialize(document, AgentJson.Options)
+                : ExportSubjectiveCsv(record.Snapshot);
+            cancellationToken.ThrowIfCancellationRequested();
+            return EnsureSubjectiveResultSize(ToJsonElement(new { format, content }));
+        }
+        finally
+        {
+            grantResources.SubjectiveGate.Release();
+        }
+    }
+
+    public async Task<LocalSubjectiveImage> ReadSubjectiveImageAsync(
+        string grantId,
+        Guid reviewId,
+        Guid questionId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(grantId) || reviewId == Guid.Empty || questionId == Guid.Empty)
+        {
+            throw new LocalOperationException("NOT_FOUND", "找不到此授权下的答题区域。");
+        }
+
+        var grantResources = GetGrantResources(grantId);
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            grantResources.RevocationToken);
+        var operationCancellationToken = linkedCancellation.Token;
+        CaptureRecord captureRecord;
+        SubjectiveGradingQuestion question;
+
+        await grantResources.SubjectiveGate.WaitAsync(operationCancellationToken).ConfigureAwait(false);
+        try
+        {
+            operationCancellationToken.ThrowIfCancellationRequested();
+            var record = FindSubjectiveReview(grantResources, reviewId, grantId);
+            question = record.Snapshot.Questions.FirstOrDefault(candidate => candidate.QuestionId == questionId)
+                ?? throw new LocalOperationException("SUBJECTIVE_QUESTION_NOT_FOUND", "找不到此授权下的答题区域。");
+            if (!grantResources.TryGetCapture(record.Snapshot.CaptureId, out var capture))
+            {
+                throw new LocalOperationException("NOT_FOUND", "找不到此授权下的原始采集图像。");
+            }
+
+            captureRecord = capture.Record;
+        }
+        finally
+        {
+            grantResources.SubjectiveGate.Release();
+        }
+
+        try
+        {
+            var file = new LocalInputImageFile(captureRecord.ImageFilePath);
+            var png = await SubjectiveImageCropper.CropToPngAsync(
+                file,
+                question.Region,
+                checked((int)captureRecord.Manifest.PixelWidth),
+                checked((int)captureRecord.Manifest.PixelHeight),
+                operationCancellationToken).ConfigureAwait(false);
+            operationCancellationToken.ThrowIfCancellationRequested();
+            return new LocalSubjectiveImage(png);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (SubjectiveImageCropException exception)
+        {
+            throw new LocalOperationException(exception.Code, exception.Message);
+        }
+        catch (ImageDecodeException exception)
+        {
+            LogSafeException("subjective-image", exception);
+            throw new LocalOperationException("SUBJECTIVE_IMAGE_INVALID", "答题区域图像无法读取，请重新采集后重试。");
+        }
+        catch (FileNotFoundException)
+        {
+            throw new LocalOperationException("SUBJECTIVE_IMAGE_NOT_FOUND", "找不到此授权下的原始采集图像。");
+        }
+        catch (Exception exception)
+        {
+            LogSafeException("subjective-image", exception);
+            throw new LocalOperationException("SUBJECTIVE_IMAGE_READ_FAILED", "答题区域读取失败，请稍后重试。");
+        }
+    }
+
+    private async Task SaveSubjectiveReviewAsync(
+        Guid reviewId,
+        string grantId,
+        SubjectiveGradingSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _subjectiveReviewStore.SaveAsync(reviewId, grantId, snapshot, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (SubjectiveReviewStoreException exception)
+        {
+            throw new LocalOperationException(exception.Code, exception.Message);
+        }
+    }
+
+    private SubjectiveReviewRecord FindSubjectiveReview(
+        GrantResources grantResources,
+        Guid reviewId,
+        string grantId)
+    {
+        SubjectiveReviewRecord? record;
+        try
+        {
+            record = _subjectiveReviewStore.LoadForGrant(reviewId, grantId);
+        }
+        catch (SubjectiveReviewStoreException exception)
+        {
+            throw new LocalOperationException(exception.Code, exception.Message);
+        }
+
+        if (record is null || !grantResources.TryGetCapture(record.Snapshot.CaptureId, out _))
+        {
+            throw new LocalOperationException("SUBJECTIVE_REVIEW_NOT_FOUND", "找不到此授权下的主观题批阅记录。");
+        }
+
+        return record;
+    }
+
+    private static JsonElement CreateCheckedSubjectiveDocument(Guid reviewId, SubjectiveGradingSnapshot snapshot)
+    {
+        var result = ToJsonElement(ToSubjectiveDocument(reviewId, snapshot));
+        if (Encoding.UTF8.GetByteCount(result.GetRawText()) > SubjectiveReviewStore.MaximumStoredDocumentBytes)
+        {
+            throw SubjectiveReviewTooLarge();
+        }
+
+        return result;
+    }
+
+    private static JsonElement EnsureSubjectiveResultSize(JsonElement result)
+    {
+        if (Encoding.UTF8.GetByteCount(result.GetRawText()) > 1024 * 1024)
+        {
+            throw SubjectiveReviewTooLarge();
+        }
+
+        return result;
+    }
+
+    private static LocalOperationException SubjectiveReviewTooLarge() =>
+        new("SUBJECTIVE_REVIEW_TOO_LARGE", "批阅记录过大，请减少区域或历史内容后重试。");
+
+    private static object ToSubjectiveDocument(Guid reviewId, SubjectiveGradingSnapshot snapshot) => new
+    {
+        reviewId,
+        captureId = snapshot.CaptureId,
+        version = snapshot.Version,
+        questions = snapshot.Questions.Select(question => new
+        {
+            questionId = question.QuestionId,
+            questionNumber = question.QuestionNumber,
+            maxScore = question.MaximumScore,
+            region = new
+            {
+                x = question.Region.X,
+                y = question.Region.Y,
+                width = question.Region.Width,
+                height = question.Region.Height
+            },
+            status = ToWireStatus(question.Status),
+            score = question.Score,
+            comment = question.Comment,
+            reviewer = question.Reviewer,
+            confirmedAtUtc = question.ConfirmedAtUtc
+        }).ToArray(),
+        history = snapshot.History.Select(batch => new
+        {
+            version = batch.Version,
+            reviewer = batch.Reviewer,
+            timestampUtc = batch.TimestampUtc,
+            changes = batch.Changes.Select(change => new
+            {
+                questionId = change.QuestionId,
+                questionNumber = change.QuestionNumber,
+                action = change.Action switch
+                {
+                    SubjectiveGradingAction.SetDraft => "setDraft",
+                    SubjectiveGradingAction.Confirm => "confirm",
+                    SubjectiveGradingAction.Reset => "reset",
+                    _ => throw new InvalidOperationException("Unknown subjective grading action.")
+                },
+                before = ToWireGradeState(change.Before),
+                after = ToWireGradeState(change.After)
+            }).ToArray()
+        }).ToArray(),
+        createdAtUtc = snapshot.CreatedAtUtc,
+        updatedAtUtc = snapshot.UpdatedAtUtc,
+        isFinal = snapshot.IsFinal,
+        finalSubtotal = snapshot.FinalSubtotal
+    };
+
+    private static object ToWireGradeState(SubjectiveGradeState state) => new
+    {
+        status = ToWireStatus(state.Status),
+        score = state.Score,
+        comment = state.Comment,
+        reviewer = state.Reviewer,
+        confirmedAtUtc = state.ConfirmedAtUtc
+    };
+
+    private static string ToWireStatus(SubjectiveReviewStatus status) => status switch
+    {
+        SubjectiveReviewStatus.Unreviewed => "ungraded",
+        SubjectiveReviewStatus.Draft => "draft",
+        SubjectiveReviewStatus.Confirmed => "confirmed",
+        _ => throw new InvalidOperationException("Unknown subjective review status.")
+    };
+
+    private static string ExportSubjectiveCsv(SubjectiveGradingSnapshot snapshot)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("questionId,questionNumber,maxScore,status,score,comment,reviewer,confirmedAtUtc");
+        foreach (var question in snapshot.Questions)
+        {
+            AppendCsvRow(builder,
+                question.QuestionId.ToString("D"),
+                question.QuestionNumber.ToString(CultureInfo.InvariantCulture),
+                question.MaximumScore.ToString(CultureInfo.InvariantCulture),
+                ToWireStatus(question.Status),
+                question.Score?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                question.Comment ?? string.Empty,
+                question.Reviewer ?? string.Empty,
+                question.ConfirmedAtUtc?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendCsvRow(StringBuilder builder, params string[] values)
+    {
+        for (var index = 0; index < values.Length; index++)
+        {
+            if (index > 0)
+            {
+                builder.Append(',');
+            }
+
+            var value = values[index];
+            var firstNonWhitespace = value.AsSpan().TrimStart();
+            if (!firstNonWhitespace.IsEmpty && firstNonWhitespace[0] is '=' or '+' or '-' or '@')
+            {
+                value = "'" + value;
+            }
+
+            builder.Append('"').Append(value.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
+        }
+
+        builder.AppendLine();
+    }
+
     private JsonElement BuildResultSummary(string resultId, ResultResource result)
     {
         var exported = ResultExporter.ToJson(result.Scoring);
@@ -558,6 +970,10 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
             TaskOperation.Score => Names("resultId", "answerKey", "pointsPerQuestion"),
             TaskOperation.Review => Names("resultId", "expectedVersion", "reviewer", "edits", "answerKey"),
             TaskOperation.Export => Names("resultId", "format"),
+            TaskOperation.SubjectiveCreate => Names("captureId", "questions"),
+            TaskOperation.SubjectiveRead => Names("reviewId"),
+            TaskOperation.SubjectiveGrade => Names("reviewId", "expectedVersion", "reviewer", "edits"),
+            TaskOperation.SubjectiveExport => Names("reviewId", "format"),
             _ => new HashSet<string>(StringComparer.Ordinal)
         };
     }
@@ -707,6 +1123,209 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
         return ReadAnswerKey(parameters, layout);
     }
 
+    private static Guid ReadGuid(JsonElement parameters, string name)
+    {
+        var value = ReadString(parameters, name);
+        if (!Guid.TryParse(value, out var parsed) || parsed == Guid.Empty)
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", $"参数 {name} 缺失或无效。");
+        }
+
+        return parsed;
+    }
+
+    private static long ReadNonNegativeInt64(JsonElement parameters, string name)
+    {
+        if (!parameters.TryGetProperty(name, out var value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetInt64(out var parsed)
+            || parsed < 0)
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", $"参数 {name} 缺失或无效。");
+        }
+
+        return parsed;
+    }
+
+    private static SubjectiveRegionDefinition[] ReadSubjectiveQuestionDefinitions(
+        JsonElement parameters,
+        int imageWidth,
+        int imageHeight)
+    {
+        if (!parameters.TryGetProperty("questions", out var questions)
+            || questions.ValueKind != JsonValueKind.Array
+            || questions.GetArrayLength() is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount)
+        {
+            throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "请提供 1 到 64 道有效的题目区域。");
+        }
+
+        var definitions = new List<SubjectiveRegionDefinition>(questions.GetArrayLength());
+        foreach (var question in questions.EnumerateArray())
+        {
+            RequireExactProperties(question, "questionId", "questionNumber", "maxScore", "region");
+            var questionIdText = ReadRequiredString(question, "questionId");
+            if (!Guid.TryParse(questionIdText, out var questionId) || questionId == Guid.Empty)
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题目区域 ID 无效。");
+            }
+
+            var questionNumber = ReadRequiredInt32(question, "questionNumber");
+            var maxScore = ReadRequiredDecimal(question, "maxScore");
+            if (!question.TryGetProperty("region", out var region))
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题目区域缺少像素坐标。");
+            }
+
+            RequireExactProperties(region, "x", "y", "width", "height");
+            try
+            {
+                var rectangle = SubjectivePixelRectangle.Create(
+                    ReadRequiredInt32(region, "x"),
+                    ReadRequiredInt32(region, "y"),
+                    ReadRequiredInt32(region, "width"),
+                    ReadRequiredInt32(region, "height"),
+                    imageWidth,
+                    imageHeight);
+                definitions.Add(SubjectiveRegionDefinition.Create(
+                    questionId,
+                    questionNumber,
+                    rectangle,
+                    maxScore,
+                    imageWidth,
+                    imageHeight));
+            }
+            catch (ArgumentException)
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题号、像素区域或满分超出允许范围。");
+            }
+        }
+
+        return definitions.ToArray();
+    }
+
+    private static SubjectiveGradeEdit[] ReadSubjectiveGradeEdits(JsonElement parameters)
+    {
+        if (!parameters.TryGetProperty("edits", out var edits)
+            || edits.ValueKind != JsonValueKind.Array
+            || edits.GetArrayLength() is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount)
+        {
+            throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "请提供一条或多条有效的评分修改。");
+        }
+
+        var parsed = new List<SubjectiveGradeEdit>(edits.GetArrayLength());
+        foreach (var edit in edits.EnumerateArray())
+        {
+            RequireExactProperties(edit, "questionId", "status", "score", "comment");
+            var questionIdText = ReadRequiredString(edit, "questionId");
+            if (!Guid.TryParse(questionIdText, out var questionId) || questionId == Guid.Empty)
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "评分修改中的题目 ID 无效。");
+            }
+
+            var status = ReadRequiredString(edit, "status") switch
+            {
+                "ungraded" => SubjectiveReviewStatus.Unreviewed,
+                "draft" => SubjectiveReviewStatus.Draft,
+                "confirmed" => SubjectiveReviewStatus.Confirmed,
+                _ => throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "评分状态无效。")
+            };
+
+            if (!edit.TryGetProperty("score", out var scoreValue))
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "评分修改缺少分值字段。");
+            }
+
+            decimal? score = null;
+            if (scoreValue.ValueKind == JsonValueKind.Number)
+            {
+                if (!scoreValue.TryGetDecimal(out var parsedScore))
+                {
+                    throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "分值格式无效。");
+                }
+
+                score = parsedScore;
+            }
+            else if (scoreValue.ValueKind != JsonValueKind.Null)
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "分值必须为数字或空值。");
+            }
+
+            if (!edit.TryGetProperty("comment", out var commentValue)
+                || (commentValue.ValueKind != JsonValueKind.String && commentValue.ValueKind != JsonValueKind.Null))
+            {
+                throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "评语必须是文本或空值。");
+            }
+
+            var comment = commentValue.ValueKind == JsonValueKind.String ? commentValue.GetString() : null;
+            if (string.IsNullOrEmpty(comment))
+            {
+                comment = null;
+            }
+
+            parsed.Add(new SubjectiveGradeEdit(questionId, status, score, comment));
+        }
+
+        return parsed.ToArray();
+    }
+
+    private static void RequireExactProperties(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", "操作参数包含缺失或不受支持的字段。");
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in value.EnumerateObject())
+        {
+            if (!names.Contains(property.Name, StringComparer.Ordinal) || !seen.Add(property.Name))
+            {
+                throw new LocalOperationException("INVALID_PARAMETERS", "操作参数包含重复或不受支持的字段。");
+            }
+        }
+
+        if (names.Any(name => !seen.Contains(name)))
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", "操作参数缺少必要字段。");
+        }
+    }
+
+    private static string ReadRequiredString(JsonElement value, string name)
+    {
+        if (!value.TryGetProperty(name, out var property)
+            || property.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(property.GetString()))
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", $"参数 {name} 缺失或无效。");
+        }
+
+        return property.GetString()!;
+    }
+
+    private static int ReadRequiredInt32(JsonElement value, string name)
+    {
+        if (!value.TryGetProperty(name, out var property)
+            || property.ValueKind != JsonValueKind.Number
+            || !property.TryGetInt32(out var parsed))
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", $"参数 {name} 缺失或无效。");
+        }
+
+        return parsed;
+    }
+
+    private static decimal ReadRequiredDecimal(JsonElement value, string name)
+    {
+        if (!value.TryGetProperty(name, out var property)
+            || property.ValueKind != JsonValueKind.Number
+            || !property.TryGetDecimal(out var parsed))
+        {
+            throw new LocalOperationException("INVALID_PARAMETERS", $"参数 {name} 缺失或无效。");
+        }
+
+        return parsed;
+    }
+
     private static IReadOnlyList<ReviewEdit> ReadReviewEdits(JsonElement parameters, int questionCount)
     {
         if (!parameters.TryGetProperty("edits", out var edits)
@@ -800,6 +1419,8 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations
         {
             _templates.Add(defaultTemplate.TemplateId, defaultTemplate);
         }
+
+        public SemaphoreSlim SubjectiveGate { get; } = new(1, 1);
 
         public CancellationToken RevocationToken => _revocation.Token;
 

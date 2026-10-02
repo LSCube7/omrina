@@ -8,6 +8,7 @@ using Omrina.Platform;
 using Omrina.Protocol;
 using Omrina.Scanning;
 using Omrina.Server;
+using SkiaSharp;
 
 if (args.Contains("--http-harness", StringComparer.Ordinal))
 {
@@ -19,7 +20,8 @@ try
     VerifyScannerDeviceIdentityMap();
     await VerifyDesktopAgentOperationsAsync();
     await VerifyActualSkiaRejectsSyntheticFixtureAsync();
-    Console.WriteLine("PASS: scanner identity stability/revocation, M3 adapter workflow (accepted recognition is simulated), and actual Skia rejection without scoring.");
+    await VerifySubjectiveImageCropperAsync();
+    Console.WriteLine("PASS: scanner identity stability/revocation, M3 workflow, M5 subjective store/adapter workflow, PNG/JPEG crop pixels, and actual Skia rejection without scoring.");
     return 0;
 }
 catch (Exception exception)
@@ -340,6 +342,13 @@ static async Task VerifyDesktopAgentOperationsAsync()
             exportedDocument.RootElement.GetProperty("scoring").GetProperty("disposition").GetString(),
             "JSON export should include the latest reviewed score");
 
+        await VerifySubjectiveReviewWorkflowAsync(
+            operations,
+            grantA,
+            grantB,
+            uploadCaptureId,
+            rootDirectory);
+
         operations.ForgetGrant(grantA);
         await AssertOperationErrorAsync(
             () => RunAsync(
@@ -429,6 +438,269 @@ static async Task VerifyActualSkiaRejectsSyntheticFixtureAsync()
     }
 }
 
+static async Task VerifySubjectiveReviewWorkflowAsync(
+    DesktopLocalAgentOperations operations,
+    string ownerGrant,
+    string otherGrant,
+    string captureId,
+    string storageRoot)
+{
+    var firstQuestionId = Guid.NewGuid();
+    var secondQuestionId = Guid.NewGuid();
+    await AssertOperationErrorAsync(
+        () => RunAsync(
+            operations,
+            ownerGrant,
+            TaskOperation.SubjectiveCreate,
+            new
+            {
+                captureId,
+                questions = new[]
+                {
+                    new
+                    {
+                        questionId = Guid.NewGuid(),
+                        questionNumber = 1,
+                        maxScore = 10m,
+                        region = new { x = -1, y = 0, width = 8, height = 8 }
+                    }
+                }
+            }),
+        "INVALID_SUBJECTIVE_REVIEW");
+
+    var created = await RunAsync(
+        operations,
+        ownerGrant,
+        TaskOperation.SubjectiveCreate,
+        new
+        {
+            captureId,
+            questions = new[]
+            {
+                new
+                {
+                    questionId = firstQuestionId,
+                    questionNumber = 1,
+                    maxScore = 10m,
+                    region = new { x = 0, y = 0, width = 8, height = 8 }
+                },
+                new
+                {
+                    questionId = secondQuestionId,
+                    questionNumber = 2,
+                    maxScore = 5m,
+                    region = new { x = 20, y = 10, width = 10, height = 6 }
+                }
+            }
+        });
+    var reviewIdText = created.GetProperty("reviewId").GetString()
+        ?? throw new InvalidOperationException("subjective create omitted reviewId");
+    var reviewId = Guid.Parse(reviewIdText);
+    AssertEqual(captureId, created.GetProperty("captureId").GetString(), "subjective document must bind to the authorized capture");
+    AssertEqual(1L, created.GetProperty("version").GetInt64(), "subjective document must begin at version one");
+    AssertEqual(2, created.GetProperty("questions").GetArrayLength(), "subjective document should preserve both reviewer-defined regions");
+    AssertEqual("ungraded", created.GetProperty("questions")[0].GetProperty("status").GetString(), "new questions begin ungraded");
+    AssertTrue(!created.TryGetProperty("totalScore", out _), "subjective documents must not invent a mixed OMR score");
+
+    var image = await operations.ReadSubjectiveImageAsync(
+        ownerGrant,
+        reviewId,
+        firstQuestionId,
+        CancellationToken.None);
+    using (var decodedCrop = SKBitmap.Decode(image.Bytes))
+    {
+        AssertTrue(decodedCrop is not null, "subjective image endpoint should return a decodable PNG");
+        AssertEqual(8, decodedCrop!.Width, "subjective image width should match the selected pixel region");
+        AssertEqual(8, decodedCrop.Height, "subjective image height should match the selected pixel region");
+        AssertEqual(new SKColor(0, 0, 0, 255), decodedCrop.GetPixel(0, 0), "crop origin must preserve the source pixel at the selected x/y");
+    }
+
+    await AssertOperationErrorAsync(
+        () => RunAsync(
+            operations,
+            otherGrant,
+            TaskOperation.SubjectiveRead,
+            new { reviewId = reviewIdText }),
+        "SUBJECTIVE_REVIEW_NOT_FOUND");
+    await AssertTaskErrorAsync(
+        () => operations.ReadSubjectiveImageAsync(otherGrant, reviewId, firstQuestionId, CancellationToken.None),
+        "SUBJECTIVE_REVIEW_NOT_FOUND");
+
+    var storedPath = Path.Combine(storageRoot, "subjective-reviews", $"{reviewId:N}.json");
+    using (File.Open(storedPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+        await AssertOperationErrorAsync(
+            () => RunAsync(
+                operations,
+                ownerGrant,
+                TaskOperation.SubjectiveGrade,
+                new
+                {
+                    reviewId = reviewIdText,
+                    expectedVersion = 1,
+                    reviewer = "teacher",
+                    edits = new[]
+                    {
+                        new { questionId = firstQuestionId, status = "draft", score = 8m, comment = "initial draft" }
+                    }
+                }),
+            "SUBJECTIVE_REVIEW_STORE_FAILED");
+    }
+
+    var unchangedAfterFailedWrite = new SubjectiveReviewStore(storageRoot).LoadTrusted(reviewId)
+        ?? throw new InvalidOperationException("store failure should leave the original review available");
+    AssertEqual(1L, unchangedAfterFailedWrite.Snapshot.Version, "failed disk write must not advance the in-memory or persisted version");
+    AssertEqual(0, unchangedAfterFailedWrite.Snapshot.History.Count, "failed disk write must not append history");
+
+    var draft = await RunAsync(
+        operations,
+        ownerGrant,
+        TaskOperation.SubjectiveGrade,
+        new
+        {
+            reviewId = reviewIdText,
+            expectedVersion = 1,
+            reviewer = " \t=teacher",
+            edits = new[]
+            {
+                new { questionId = firstQuestionId, status = "draft", score = 8m, comment = " \t=SUM(1,2)" },
+                new { questionId = secondQuestionId, status = "draft", score = 4m, comment = "+unsafe" }
+            }
+        });
+    AssertEqual(2L, draft.GetProperty("version").GetInt64(), "one atomic batch should increment the version once");
+    AssertEqual("draft", draft.GetProperty("questions")[0].GetProperty("status").GetString(), "draft state should be explicit");
+
+    var csv = await RunAsync(
+        operations,
+        ownerGrant,
+        TaskOperation.SubjectiveExport,
+        new { reviewId = reviewIdText, format = "csv" });
+    var csvContent = csv.GetProperty("content").GetString() ?? string.Empty;
+    AssertTrue(csvContent.Contains("\"'=teacher\"", StringComparison.Ordinal), "CSV must neutralize formula-like reviewer names");
+    AssertTrue(csvContent.Contains("\"'=SUM(1,2)\"", StringComparison.Ordinal), "CSV must neutralize formula-like comments after leading whitespace");
+    AssertTrue(csvContent.Contains("\"'+unsafe\"", StringComparison.Ordinal), "CSV must neutralize plus-prefixed comments");
+
+    await AssertOperationErrorAsync(
+        () => RunAsync(
+            operations,
+            ownerGrant,
+            TaskOperation.SubjectiveGrade,
+            new
+            {
+                reviewId = reviewIdText,
+                expectedVersion = 1,
+                reviewer = "teacher",
+                edits = new[] { new { questionId = firstQuestionId, status = "draft", score = 8m, comment = "stale" } }
+            }),
+        "VERSION_CONFLICT");
+
+    var confirmed = await RunAsync(
+        operations,
+        ownerGrant,
+        TaskOperation.SubjectiveGrade,
+        new
+        {
+            reviewId = reviewIdText,
+            expectedVersion = 2,
+            reviewer = "teacher",
+            edits = new[]
+            {
+                new { questionId = firstQuestionId, status = "confirmed", score = 8m, comment = "=SUM(1,2)" },
+                new { questionId = secondQuestionId, status = "confirmed", score = 4m, comment = "+unsafe" }
+            }
+        });
+    AssertEqual(3L, confirmed.GetProperty("version").GetInt64(), "confirmation batch should advance the version once");
+    AssertEqual(true, confirmed.GetProperty("isFinal").GetBoolean(), "all confirmed regions should form a final subjective document");
+    AssertEqual(12m, confirmed.GetProperty("finalSubtotal").GetDecimal(), "final subtotal should sum only the subjective questions");
+
+    var jsonExport = await RunAsync(
+        operations,
+        ownerGrant,
+        TaskOperation.SubjectiveExport,
+        new { reviewId = reviewIdText, format = "json" });
+    using (var exported = JsonDocument.Parse(jsonExport.GetProperty("content").GetString() ?? string.Empty))
+    {
+        AssertEqual(3L, exported.RootElement.GetProperty("version").GetInt64(), "JSON export should contain the committed version");
+        AssertEqual(2, exported.RootElement.GetProperty("history").GetArrayLength(), "JSON export should retain both audit batches");
+    }
+
+    var reloaded = new SubjectiveReviewStore(storageRoot).LoadTrusted(reviewId)
+        ?? throw new InvalidOperationException("trusted store reload should find the saved review");
+    AssertEqual(3L, reloaded.Snapshot.Version, "store reopen should restore the latest version");
+    AssertEqual(2, reloaded.Snapshot.History.Count, "store reopen should restore audit history");
+    AssertTrue(
+        new SubjectiveReviewStore(storageRoot).LoadForGrant(reviewId, otherGrant) is null,
+        "another grant must not adopt a persisted review");
+}
+
+static async Task VerifySubjectiveImageCropperAsync()
+{
+    var rootDirectory = Path.Combine(Path.GetTempPath(), $"omrina-m5-crop-test-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(rootDirectory);
+    try
+    {
+        const int width = 24;
+        const int height = 16;
+        var rgba = new byte[width * height * 4];
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = (y * width + x) * 4;
+                rgba[offset] = (byte)(x * 7);
+                rgba[offset + 1] = (byte)(y * 11);
+                rgba[offset + 2] = (byte)(x + y);
+                rgba[offset + 3] = 255;
+            }
+        }
+
+        var pngPath = Path.Combine(rootDirectory, "pattern.png");
+        await File.WriteAllBytesAsync(pngPath, EncodePng(width, height, rgba));
+        var region = SubjectivePixelRectangle.Create(4, 5, 6, 3, width, height);
+        var croppedPng = await SubjectiveImageCropper.CropToPngAsync(
+            new LocalInputImageFile(pngPath), region, width, height);
+        using (var decodedPng = SKBitmap.Decode(croppedPng))
+        {
+            AssertTrue(decodedPng is not null, "PNG crop should decode");
+            AssertEqual(6, decodedPng!.Width, "PNG crop should preserve the selected width");
+            AssertEqual(3, decodedPng.Height, "PNG crop should preserve the selected height");
+            AssertEqual(new SKColor(28, 55, 9, 255), decodedPng.GetPixel(0, 0), "PNG crop should copy the requested source origin");
+        }
+
+        using var jpegBitmap = new SKBitmap(new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque));
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                jpegBitmap.SetPixel(x, y, new SKColor(35, 170, 215, 255));
+            }
+        }
+
+        using var jpegImage = SKImage.FromBitmap(jpegBitmap);
+        using var jpegEncoded = jpegImage.Encode(SKEncodedImageFormat.Jpeg, 100)
+            ?? throw new InvalidOperationException("synthetic JPEG encoding failed");
+        var jpegPath = Path.Combine(rootDirectory, "pattern.jpg");
+        await File.WriteAllBytesAsync(jpegPath, jpegEncoded.ToArray());
+        var croppedJpeg = await SubjectiveImageCropper.CropToPngAsync(
+            new LocalInputImageFile(jpegPath), region, width, height);
+        using var decodedJpeg = SKBitmap.Decode(croppedJpeg);
+        AssertTrue(decodedJpeg is not null, "JPEG scanline crop should produce a decodable PNG");
+        AssertEqual(6, decodedJpeg!.Width, "JPEG crop should preserve the selected width");
+        AssertEqual(3, decodedJpeg.Height, "JPEG crop should preserve the selected height");
+        var sampled = decodedJpeg.GetPixel(0, 0);
+        AssertTrue(
+            Math.Abs(sampled.Red - 35) <= 8 && Math.Abs(sampled.Green - 170) <= 8 && Math.Abs(sampled.Blue - 215) <= 8,
+            "JPEG crop should retain pixels from the selected source region");
+    }
+    finally
+    {
+        if (Directory.Exists(rootDirectory))
+        {
+            Directory.Delete(rootDirectory, recursive: true);
+        }
+    }
+}
+
 static Task<JsonElement> RunAsync(
     DesktopLocalAgentOperations operations,
     string grantId,
@@ -448,6 +720,20 @@ static Task<JsonElement> RunAsync(
 }
 
 static async Task AssertOperationErrorAsync(Func<Task<JsonElement>> action, string expectedCode)
+{
+    try
+    {
+        await action();
+    }
+    catch (LocalOperationException exception) when (exception.Code == expectedCode)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException($"Expected local operation error '{expectedCode}'.");
+}
+
+static async Task AssertTaskErrorAsync(Func<Task> action, string expectedCode)
 {
     try
     {

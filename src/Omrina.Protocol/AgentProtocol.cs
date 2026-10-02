@@ -3,7 +3,20 @@ using System.Text.Json.Serialization;
 
 namespace Omrina.Protocol;
 
-public enum TaskOperation { Template, Upload, Scan, Recognize, Score, Review, Export }
+public enum TaskOperation
+{
+    Template,
+    Upload,
+    Scan,
+    Recognize,
+    Score,
+    Review,
+    Export,
+    SubjectiveCreate,
+    SubjectiveRead,
+    SubjectiveGrade,
+    SubjectiveExport
+}
 public enum LocalTaskStatus { Queued, Running, Completed, Failed, Cancelled }
 public sealed record PairingRequest(string ClientName);
 public sealed record PairingTicket(string RequestId, DateTimeOffset ExpiresAt);
