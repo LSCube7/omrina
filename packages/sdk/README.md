@@ -21,6 +21,16 @@ node --test tests/sdk/*.test.mjs
 
 测试通过注入的 fetch 与 WebSocket，不会连接真实的本地 Agent。
 
+## 已打包消费者验收
+
+在仓库根目录运行：
+
+```powershell
+node .\tests\sdk-package\consumer-smoke.mjs
+```
+
+该 smoke 使用已安装的 TypeScript 5.9.3 构建 SDK，以本地 `npm pack` tarball 建立临时消费者，不安装依赖也不访问网络。它检查包中只有 README、package manifest 和 `dist/` 文件；再通过实际包 `exports` 运行 `checkHealth()` 与 `OmrinaClient`，并使用严格 TypeScript 设置编译消费者源码，确认声明文件从解包后的包解析。唯一产物写入根目录忽略的 `artifacts/sdk-package-consumer-*` 临时目录。
+
 ## Desktop adapter 端到端验证
 
 `tests/integration/m3-sdk-e2e.mjs` 可使用 SDK 构建产物联调 Desktop 的本地 HTTP harness。先启动 harness 并从其首行取得合成图片路径：
