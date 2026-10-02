@@ -72,7 +72,21 @@ using (var rejected = await Request("POST", "/v1/pairing/requests", new PairingR
 }
 using (var response = await Request("GET", "/v1/templates", token: grant.Token, from: "https://other.example")) Check(response.StatusCode == HttpStatusCode.Unauthorized, "token origin binding");
 using (var response = await Request("GET", "/v1/devices")) Check(response.StatusCode == HttpStatusCode.Unauthorized, "bearer required");
-using (var response = await Request("GET", "/v1/templates", token: grant.Token)) Check(response.IsSuccessStatusCode && (await Read<JsonElement>(response)).GetProperty("capabilities").GetArrayLength() == 1, "template capabilities response");
+using (var response = await Request("GET", "/v1/templates", token: grant.Token))
+{
+    var templates = await Read<JsonElement>(response);
+    Check(response.IsSuccessStatusCode
+        && templates.ValueKind == JsonValueKind.Array
+        && templates.GetArrayLength() == 1
+        && templates[0].GetProperty("templateId").GetString() == "template-default"
+        && templates[0].GetProperty("schemaVersion").GetInt32() == 1
+        && templates[0].GetProperty("title").GetString() == "OMRINA 答题纸"
+        && templates[0].GetProperty("questionCount").GetInt32() == 10
+        && templates[0].GetProperty("optionsPerQuestion").GetInt32() == 4
+        && templates[0].GetProperty("templateNumber").GetString() == "DEFAULT-10X4"
+        && templates[0].GetProperty("svg").GetString()?.StartsWith("<svg", StringComparison.Ordinal) == true,
+        "default template summary response");
+}
 using (var response = await Request("GET", "/v1/devices", token: grant.Token)) Check(response.IsSuccessStatusCode && (await Read<JsonElement>(response)).GetArrayLength() == 0, "empty device response");
 using (var request = new HttpRequestMessage(HttpMethod.Options, "/v1/tasks/upload"))
 {
@@ -177,7 +191,19 @@ sealed class TestOperations : ILocalAgentOperations
     public bool SlowDevices;
     public TaskCompletionSource QueryStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource QueryCancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public Task<JsonElement> GetTemplatesAsync(CancellationToken cancellationToken) => Task.FromResult(JsonSerializer.SerializeToElement(new { capabilities = new[] { "template" } }));
+    public Task<JsonElement> GetTemplatesAsync(CancellationToken cancellationToken) => Task.FromResult(JsonSerializer.SerializeToElement(new[]
+    {
+        new
+        {
+            templateId = "template-default",
+            schemaVersion = 1,
+            title = "OMRINA 答题纸",
+            questionCount = 10,
+            optionsPerQuestion = 4,
+            templateNumber = "DEFAULT-10X4",
+            svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"></svg>"
+        }
+    }));
     public async Task<JsonElement> GetDevicesAsync(CancellationToken cancellationToken)
     {
         if (SlowDevices)
