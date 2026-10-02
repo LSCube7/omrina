@@ -130,6 +130,13 @@ internal static class RecognitionRegression
         AssertTrue(!singular.TryMapInverse(new PointPx(0, 1), out _), "inverse projective horizon must fail");
     }
 
+    internal static GrayImage RenderMixed(AnswerSheetLayout layout, PageOrientation orientation,
+        bool multiple = false, bool missingMark = false, PageTransform? projective = null)
+        => Render(layout, orientation, question => question.Number % layout.OptionsPerQuestion,
+            extraSelected: multiple ? (_, _) => true : null,
+            omitRegistration: missingMark ? layout.RegistrationMarks[0].Id : null,
+            projectiveTransform: projective);
+
     private static GrayImage Render(
         AnswerSheetLayout layout,
         PageOrientation orientation,
@@ -223,6 +230,13 @@ internal static class RecognitionRegression
                     }
                 }
 
+                foreach (var region in layout.SubjectiveRegions)
+                {
+                    var r = region.Rectangle;
+                    if (InsideRectangle(pageX, pageY, r.X, r.Y, r.Width, r.Height)
+                        && (pageX - r.X < 0.25 || r.X + r.Width - pageX < 0.25
+                            || pageY - r.Y < 0.25 || r.Y + r.Height - pageY < 0.25)) value = 0;
+                }
                 pixels[y * width + x] = value;
             }
         }

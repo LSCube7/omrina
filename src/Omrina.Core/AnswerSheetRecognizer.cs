@@ -32,11 +32,14 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
     private const int BubbleSampleGridSize = 9;
     private const double MaximumRegistrationAspectError = 0.42;
 
-    public RecognitionResult Recognize(
+    public PageLocationResult LocatePage(
         AnswerSheetLayout layout,
         GrayImage image,
         CancellationToken cancellationToken = default)
     {
+        PageLocationResult Rejected(AnswerSheetLayout rejectedLayout, IReadOnlyList<RecognitionDiagnostic> diagnostics)
+            => new(rejectedLayout.TemplateId, rejectedLayout.SchemaVersion, PageLocationStatus.Rejected,
+                PageOrientation.Unknown, null, 0, 0, diagnostics, image.Width, image.Height);
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(image);
         cancellationToken.ThrowIfCancellationRequested();
@@ -113,6 +116,22 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        var needsReview = registrationScore < 0.60 || markerScore < 0.55;
+        return new PageLocationResult(layout.TemplateId, layout.SchemaVersion,
+            needsReview ? PageLocationStatus.ReviewRequired : PageLocationStatus.Located,
+            orientation, transform, registrationScore, markerScore,
+            needsReview ? [Diagnostic(RecognitionDiagnosticCode.PageQualityUncertain,
+                RecognitionDiagnosticSeverity.Warning, "页面定位质量不足，请重新采集清晰完整的答题纸。")] : [], image.Width, image.Height);
+    }
+
+    public RecognitionResult Recognize(AnswerSheetLayout layout, GrayImage image,
+        CancellationToken cancellationToken = default)
+    {
+        var location = LocatePage(layout, image, cancellationToken);
+        if (location.Transform is not { } transform) return Rejected(layout, location.Diagnostics);
+        var orientation = location.Orientation;
+        var registrationScore = location.RegistrationScore;
+        var markerScore = location.MarkerScore;
         var questions = ReadQuestions(layout, image, transform, cancellationToken, out var uncertainQuestionCount);
         var diagnostics = new List<RecognitionDiagnostic>();
         var questionConfidence = questions.Count == 0
@@ -154,7 +173,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
 
         return new RecognitionResult(
             layout.TemplateId,
-            AnswerSheetLayout.TemplateSchemaVersion,
+            layout.SchemaVersion,
             status,
             orientation,
             transform,
@@ -178,7 +197,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
     {
         return new RecognitionResult(
             layout.TemplateId,
-            AnswerSheetLayout.TemplateSchemaVersion,
+            layout.SchemaVersion,
             RecognitionStatus.Rejected,
             PageOrientation.Unknown,
             transform: null,

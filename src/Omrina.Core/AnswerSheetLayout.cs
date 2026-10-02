@@ -70,7 +70,7 @@ public sealed class QuestionGeometry
 /// Deterministic geometry for a single-page A4 multiple-choice answer sheet.
 /// All coordinates and lengths are in millimetres.
 /// </summary>
-public sealed class AnswerSheetLayout
+public sealed partial class AnswerSheetLayout
 {
     public const double PageWidthMm = 210;
     public const double PageHeightMm = 297;
@@ -83,6 +83,7 @@ public sealed class AnswerSheetLayout
     public const double BubblePitchMm = 11;
     public const double QuestionRowHeightMm = 10;
     public const int TemplateSchemaVersion = 1;
+    public const int MixedTemplateSchemaVersion = 2;
 
     private const double RegistrationMarkInsetMm = 10;
     private const double OrientationMarkerTopMm = 10;
@@ -111,7 +112,9 @@ public sealed class AnswerSheetLayout
         OrientationMarker orientationMarker,
         IReadOnlyList<OptionHeader> optionHeaders,
         IReadOnlyList<QuestionGeometry> questions,
-        IReadOnlyList<AnswerBubble> bubbles)
+        IReadOnlyList<AnswerBubble> bubbles,
+        int schemaVersion = TemplateSchemaVersion,
+        IReadOnlyList<TemplateSubjectiveRegion>? subjectiveRegions = null)
     {
         Title = title;
         QuestionCount = questionCount;
@@ -125,7 +128,12 @@ public sealed class AnswerSheetLayout
         OptionHeaders = optionHeaders;
         Questions = questions;
         Bubbles = bubbles;
+        SchemaVersion = schemaVersion;
+        SubjectiveRegions = subjectiveRegions ?? Array.Empty<TemplateSubjectiveRegion>();
     }
+
+    public int SchemaVersion { get; }
+    public IReadOnlyList<TemplateSubjectiveRegion> SubjectiveRegions { get; }
 
     public string Title { get; }
 
@@ -562,7 +570,7 @@ public static class SvgTemplateExporter
             + "viewBox=\"0 0 210 297\" role=\"document\" shape-rendering=\"geometricPrecision\">");
         svg.AppendLine("  <metadata>");
         svg.Append("    <answer-sheet-template schema-version=\"")
-            .Append(AnswerSheetLayout.TemplateSchemaVersion.ToString(CultureInfo.InvariantCulture))
+            .Append(layout.SchemaVersion.ToString(CultureInfo.InvariantCulture))
             .Append("\" template-id=\"")
             .Append(EscapeXml(layout.TemplateId))
             .Append("\" template-number=\"")
@@ -697,6 +705,26 @@ public static class SvgTemplateExporter
         }
 
         svg.AppendLine("  </g>");
+        if (layout.SubjectiveRegions.Count > 0)
+        {
+            svg.AppendLine("  <g id=\"subjective-regions\" font-family=\"Arial, sans-serif\">");
+            foreach (var region in layout.SubjectiveRegions)
+            {
+                var rectangle = region.Rectangle;
+                var id = region.QuestionId.ToString("N");
+                svg.Append("    <rect data-role=\"subjective-region\" data-question-id=\"").Append(id)
+                    .Append("\" x=\"").Append(rectangle.X.ToString("R", CultureInfo.InvariantCulture)).Append("\" y=\"").Append(rectangle.Y.ToString("R", CultureInfo.InvariantCulture))
+                    .Append("\" width=\"").Append(rectangle.Width.ToString("R", CultureInfo.InvariantCulture)).Append("\" height=\"").Append(rectangle.Height.ToString("R", CultureInfo.InvariantCulture))
+                    .AppendLine("\" fill=\"none\" stroke=\"#000000\" stroke-width=\"0.5\" />");
+                var label = string.Create(CultureInfo.InvariantCulture, $"{region.QuestionNumber}（{region.MaximumScore:G29} 分）");
+                svg.Append("    <text x=\"").Append(Format(rectangle.X + 2)).Append("\" y=\"").Append(Format(rectangle.Y + 5))
+                    .Append("\" font-size=\"3.5\"");
+                if (label.Length * 3.5 > rectangle.Width - 4)
+                    svg.Append(" textLength=\"").Append(Format(rectangle.Width - 4)).Append("\" lengthAdjust=\"spacingAndGlyphs\"");
+                svg.Append('>').Append(label).AppendLine("</text>");
+            }
+            svg.AppendLine("  </g>");
+        }
         svg.AppendLine("</svg>");
         return svg.ToString();
     }
