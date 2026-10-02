@@ -167,17 +167,17 @@ public sealed class CaptureStore
         {
             if (!File.Exists(manifestFilePath))
             {
-                throw InvalidHistory("最近采集记录缺少 manifest，无法打开。", null);
+                throw InvalidHistory("最近采集记录缺少模板关联信息，无法打开。", null);
             }
 
             var manifestJson = File.ReadAllText(manifestFilePath, Encoding.UTF8);
             var manifest = JsonSerializer.Deserialize<CaptureManifest>(manifestJson, ManifestJsonOptions)
-                ?? throw InvalidHistory("最近采集记录的 manifest 为空。", null);
+                ?? throw InvalidHistory("最近采集记录的模板关联信息为空。", null);
 
             if (manifest.ManifestSchemaVersion != ManifestSchemaVersion)
             {
                 throw InvalidHistory(
-                    $"最近采集记录的 manifest schema {manifest.ManifestSchemaVersion} 不受当前版本支持。",
+                    "最近采集记录的关联信息版本不受当前应用支持。",
                     null);
             }
 
@@ -234,7 +234,7 @@ public sealed class CaptureStore
         }
         catch (JsonException exception)
         {
-            throw InvalidHistory("最近采集记录的 manifest 格式无效。", exception);
+            throw InvalidHistory("最近采集记录的模板关联信息格式无效。", exception);
         }
         catch (IOException exception)
         {
@@ -337,7 +337,7 @@ public sealed class CaptureStore
         var imageFile = new FileInfo(imagePath);
         if (imageFile.Length != checked((long)manifest.ByteLength))
         {
-            throw InvalidHistory("最近采集记录的原图大小与 manifest 不一致。", null);
+            throw InvalidHistory("最近采集记录的原图大小与保存信息不一致。", null);
         }
 
         var expectedFileName = $"original{manifest.ImageExtension.ToLowerInvariant()}";

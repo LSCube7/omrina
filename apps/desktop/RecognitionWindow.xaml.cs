@@ -308,7 +308,7 @@ public sealed partial class RecognitionPage : Page
 
     public Task WaitForIdleAsync() => _idleCompletion?.Task ?? Task.CompletedTask;
 
-    /// <summary>Loads and validates the manifest-associated layout and original image.</summary>
+    /// <summary>Loads and validates the template-linked layout and original image.</summary>
     public void SetCapture(CaptureRecord capture)
     {
         ArgumentNullException.ThrowIfNull(capture);
@@ -349,8 +349,8 @@ public sealed partial class RecognitionPage : Page
         }
 
         _layout = layout;
-        AssociationStatusText.Text = "已验证 manifest、模板 schema、TemplateId 和原图路径。";
-        SetInfo("已载入采集记录", "识别将使用 manifest 关联的模板；不会从像素或短编号猜测模板。", InfoBarSeverity.Informational);
+        AssociationStatusText.Text = "已验证模板关联信息和原图。";
+        SetInfo("已载入采集记录", "识别将使用已关联的模板，不会从原图自行判断模板。", InfoBarSeverity.Informational);
         LoadOriginalImage(capture.ImageFilePath);
         RunRecognitionButton.IsEnabled = _recognitionRunner is not null && !_isClosed;
         if (_recognitionRunner is null)
@@ -372,7 +372,7 @@ public sealed partial class RecognitionPage : Page
         if (!string.Equals(result.TemplateId, _capture.Manifest.TemplateId, StringComparison.Ordinal)
             || result.TemplateSchemaVersion != _capture.Manifest.TemplateSchemaVersion)
         {
-            SetInfo("识别结果关联不一致", "识别结果的模板身份或 schema 与采集 manifest 不一致，已拒绝显示。", InfoBarSeverity.Error);
+            SetInfo("识别结果关联不一致", "识别结果的模板身份与采集记录不一致，已拒绝显示。", InfoBarSeverity.Error);
             return;
         }
 
@@ -880,7 +880,7 @@ public sealed partial class RecognitionPage : Page
         var manifest = capture.Manifest;
         if (manifest.TemplateSchemaVersion != AnswerSheetLayout.TemplateSchemaVersion)
         {
-            message = $"模板 schema {manifest.TemplateSchemaVersion} 与当前支持的 {AnswerSheetLayout.TemplateSchemaVersion} 不一致。";
+            message = "关联模板版本与当前支持版本不一致。";
             return false;
         }
 
@@ -898,7 +898,7 @@ public sealed partial class RecognitionPage : Page
                 manifest.OptionsPerQuestion);
             if (!string.Equals(resolved.TemplateId, manifest.TemplateId, StringComparison.Ordinal))
             {
-                message = "manifest 中的 TemplateId 与可重建布局不一致，已停止识别。";
+                message = "关联模板信息与采集记录不一致，已停止识别。";
                 return false;
             }
 
