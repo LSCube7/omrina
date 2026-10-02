@@ -22,6 +22,7 @@
     <Compile Include="../../apps/desktop/LocalSubjectiveReviewService.cs" Link="LocalSubjectiveReviewService.cs" />
     <Compile Include="../../apps/desktop/SubjectiveReviewExporter.cs" Link="SubjectiveReviewExporter.cs" />
     <Compile Include="../../apps/desktop/SubjectiveReviewInputParser.cs" Link="SubjectiveReviewInputParser.cs" />
+    <Compile Include="../../apps/desktop/SubjectiveCaptureTemplateMapper.cs" Link="SubjectiveCaptureTemplateMapper.cs" />
     <Compile Include="../../apps/desktop/SubjectiveReviewStore.cs" Link="SubjectiveReviewStore.cs" />
     <Compile Include="../../apps/desktop/ScannerDeviceIdentityMap.cs" Link="ScannerDeviceIdentityMap.cs" />
   </ItemGroup>

@@ -34,7 +34,9 @@ public sealed record LocalSubjectiveCaptureSummary(
     string SourceType,
     uint PixelWidth,
     uint PixelHeight,
-    int QuestionCount);
+    int QuestionCount,
+    int TemplateSchemaVersion,
+    int SubjectiveQuestionCount);
 
 public sealed record LocalSubjectiveReviewDiagnostic(string ResourceId, string Code, string Message);
 
@@ -142,10 +144,8 @@ public sealed class LocalSubjectiveReviewService
 
     public async Task<LocalSubjectiveReviewDocument> CreateAsync(
         string captureId,
-        IReadOnlyList<SubjectiveRegionDefinition> regions,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(regions);
         CaptureRecord? capture;
         try
         {
@@ -168,15 +168,70 @@ public sealed class LocalSubjectiveReviewService
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        var layout = capture.TemplateLayout;
+        if (layout is null
+            || layout.TemplateId != capture.Manifest.TemplateId
+            || layout.SchemaVersion != capture.Manifest.TemplateSchemaVersion)
+        {
+            throw new LocalSubjectiveReviewException(
+                "CAPTURE_TEMPLATE_INVALID",
+                "采集记录缺少有效的关联模板，无法创建主观题批阅记录。");
+        }
+
+        SubjectiveReviewTemplateMapping templateMapping;
+        try
+        {
+            var file = await Task.Run(
+                () => _captureStore.GetInputFile(capture.Manifest.CaptureId, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+            templateMapping = await SubjectiveCaptureTemplateMapper.LocateAndMapAsync(
+                layout,
+                file,
+                checked((int)capture.Manifest.PixelWidth),
+                checked((int)capture.Manifest.PixelHeight),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (SubjectiveCaptureMappingException exception)
+        {
+            throw new LocalSubjectiveReviewException(exception.Code, exception.Message, exception);
+        }
+        catch (CaptureException exception)
+        {
+            throw ToServiceException(exception);
+        }
+        catch (ImageDecodeException)
+        {
+            throw new LocalSubjectiveReviewException(
+                "SUBJECTIVE_IMAGE_INVALID",
+                "原始采集图像无法读取，未创建批阅记录。");
+        }
+
         SubjectiveGradingSnapshot snapshot;
         var reviewId = Guid.NewGuid();
         try
         {
+            var imageWidth = checked((int)capture.Manifest.PixelWidth);
+            var imageHeight = checked((int)capture.Manifest.PixelHeight);
+            var definitions = templateMapping.Regions.Select(region =>
+            {
+                var mapped = region.ToMapped(imageWidth, imageHeight);
+                return SubjectiveRegionDefinition.Create(
+                    mapped.QuestionId,
+                    mapped.QuestionNumber,
+                    mapped.BoundingRectangle,
+                    mapped.MaximumScore,
+                    imageWidth,
+                    imageHeight);
+            }).ToArray();
             snapshot = SubjectiveGradingSnapshot.Start(
                 capture.Manifest.CaptureId,
-                checked((int)capture.Manifest.PixelWidth),
-                checked((int)capture.Manifest.PixelHeight),
-                regions);
+                imageWidth,
+                imageHeight,
+                definitions);
             EnsureStoredResponseSize(reviewId, snapshot);
         }
         catch (LocalSubjectiveReviewException)
@@ -196,7 +251,8 @@ public sealed class LocalSubjectiveReviewService
                 reviewId,
                 SubjectiveReviewStore.DesktopLocalOwner,
                 snapshot,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                templateMapping).ConfigureAwait(false);
             return ToDocument(record, ToSummary(capture));
         }
         catch (OperationCanceledException)
@@ -296,12 +352,38 @@ public sealed class LocalSubjectiveReviewService
             var file = await Task.Run(
                 () => _captureStore.GetInputFile(record.Snapshot.CaptureId, cancellationToken),
                 cancellationToken).ConfigureAwait(false);
-            var png = await SubjectiveImageCropper.CropToPngAsync(
-                file,
-                question.Region,
-                record.Snapshot.ImageWidth,
-                record.Snapshot.ImageHeight,
-                cancellationToken).ConfigureAwait(false);
+            byte[] png;
+            if (record.TemplateMapping is { } templateMapping)
+            {
+                var regionProvenance = templateMapping.Regions.FirstOrDefault(item => item.QuestionId == questionId)
+                    ?? throw new LocalSubjectiveReviewException(
+                        "SUBJECTIVE_IMAGE_INVALID",
+                        "批阅记录缺少该题的模板区域映射。");
+                if (capture.TemplateLayout is null
+                    || !string.Equals(capture.TemplateLayout.ToJson(), templateMapping.TemplateJson, StringComparison.Ordinal))
+                {
+                    throw new LocalSubjectiveReviewException(
+                        "CAPTURE_TEMPLATE_MISMATCH",
+                        "原图关联的模板与批阅记录不一致，无法读取题目区域。");
+                }
+
+                png = await SubjectiveImageCropper.RectifyToPngAsync(
+                    file,
+                    regionProvenance.ToMapped(record.Snapshot.ImageWidth, record.Snapshot.ImageHeight),
+                    record.Snapshot.ImageWidth,
+                    record.Snapshot.ImageHeight,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Released pixel-defined documents remain readable as legacy records.
+                png = await SubjectiveImageCropper.CropToPngAsync(
+                    file,
+                    question.Region,
+                    record.Snapshot.ImageWidth,
+                    record.Snapshot.ImageHeight,
+                    cancellationToken).ConfigureAwait(false);
+            }
             cancellationToken.ThrowIfCancellationRequested();
             return new LocalSubjectiveImage(png);
         }
@@ -452,7 +534,9 @@ public sealed class LocalSubjectiveReviewService
             manifest.SourceType,
             manifest.PixelWidth,
             manifest.PixelHeight,
-            manifest.QuestionCount);
+            manifest.QuestionCount,
+            record.TemplateLayout?.SchemaVersion ?? manifest.TemplateSchemaVersion,
+            record.TemplateLayout?.SubjectiveRegions.Count ?? 0);
     }
 
     private static LocalSubjectiveReviewDocument ToDocument(

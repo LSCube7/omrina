@@ -22,8 +22,9 @@ try
     VerifyScannerDeviceIdentityMap();
     await VerifyDesktopAgentOperationsAsync();
     await VerifyActualSkiaRejectsSyntheticFixtureAsync();
+    await SubjectivePerspectiveRegression.RunAsync();
     await VerifySubjectiveImageCropperAsync();
-    Console.WriteLine("PASS: scanner identity/revocation, M3 workflow, M5 trusted/web subjective store workflows, parser boundaries, PNG/JPEG crop pixels, and actual Skia rejection without scoring.");
+    Console.WriteLine("PASS: scanner identity/revocation, schema-2 mixed-template mapping, M3 workflow, M5 trusted/web subjective store workflows, input boundaries, PNG/JPEG crop pixels, and actual Skia rejection without scoring.");
     return 0;
 }
 catch (Exception exception)
@@ -344,17 +345,72 @@ static async Task VerifyDesktopAgentOperationsAsync()
             exportedDocument.RootElement.GetProperty("scoring").GetProperty("disposition").GetString(),
             "JSON export should include the latest reviewed score");
 
+        var subjectiveLayout = CreateMixedSubjectiveLayout();
+        var subjectiveTemplate = await RunAsync(
+            operations,
+            grantA,
+            TaskOperation.Template,
+            new
+            {
+                title = subjectiveLayout.Title,
+                questionCount = subjectiveLayout.QuestionCount,
+                optionsPerQuestion = subjectiveLayout.OptionsPerQuestion,
+                subjectiveRegions = subjectiveLayout.SubjectiveRegions.Select(region => new
+                {
+                    questionNumber = region.QuestionNumber,
+                    maxScore = region.MaximumScore,
+                    rectangleMm = new
+                    {
+                        x = region.Rectangle.X,
+                        y = region.Rectangle.Y,
+                        width = region.Rectangle.Width,
+                        height = region.Rectangle.Height
+                    }
+                }).ToArray()
+            });
+        AssertEqual(AnswerSheetLayout.MixedTemplateSchemaVersion, subjectiveTemplate.GetProperty("schemaVersion").GetInt32(), "subjective template task should report its actual schema version");
+        AssertEqual(subjectiveLayout.SubjectiveRegions.Count, subjectiveTemplate.GetProperty("subjectiveRegions").GetArrayLength(), "template response should report generated stable region identities");
+        AssertEqual(subjectiveLayout.SubjectiveRegions[0].QuestionId, subjectiveTemplate.GetProperty("subjectiveRegions")[0].GetProperty("questionId").GetGuid(), "template response should preserve Core-generated question IDs");
+
+        var locatedImageBytes = CreateLocatedTemplatePng(subjectiveLayout);
+        using var subjectiveUploadBody = new MemoryStream(locatedImageBytes, writable: false);
+        var subjectiveUpload = await RunAsync(
+            operations,
+            grantA,
+            TaskOperation.Upload,
+            new { templateId = subjectiveTemplate.GetProperty("templateId").GetString(), fileName = "located-template.png" },
+            subjectiveUploadBody);
+        var subjectiveCaptureId = subjectiveUpload.GetProperty("captureId").GetString()
+            ?? throw new InvalidOperationException("mixed-template upload omitted its capture ID");
+        var persistedSubjectiveCapture = store.LoadById(subjectiveCaptureId)
+            ?? throw new InvalidOperationException("mixed-template capture should be persisted");
+        AssertEqual(AnswerSheetLayout.MixedTemplateSchemaVersion, persistedSubjectiveCapture.Manifest.TemplateSchemaVersion, "capture manifest should preserve the mixed-template schema version");
+        AssertTrue(persistedSubjectiveCapture.TemplateLayout?.ToJson() == subjectiveLayout.ToJson(), "capture recovery should load the exact persisted mixed layout snapshot");
+        AssertTrue(File.Exists(Path.Combine(persistedSubjectiveCapture.CaptureDirectory, "template.json")), "the mixed template snapshot should be committed beside the original image");
+
+        await AssertOperationErrorAsync(
+            () => RunAsync(operations, grantA, TaskOperation.SubjectiveCreate, new { captureId = uploadCaptureId }),
+            "SUBJECTIVE_TEMPLATE_REQUIRED");
+        await AssertOperationErrorAsync(
+            () => RunAsync(operations, grantA, TaskOperation.SubjectiveCreate, new
+            {
+                captureId = subjectiveCaptureId,
+                questions = new[] { new { questionId = Guid.NewGuid(), questionNumber = 1, maxScore = 5m, region = new { x = 0, y = 0, width = 1, height = 1 } } }
+            }),
+            "INVALID_PARAMETERS");
+
         var webReviewId = await VerifySubjectiveReviewWorkflowAsync(
             operations,
             grantA,
             grantB,
-            uploadCaptureId,
+            subjectiveCaptureId,
             rootDirectory);
 
         await VerifyLocalSubjectiveReviewServiceAsync(
             operations,
             grantA,
             grantB,
+            subjectiveCaptureId,
             uploadCaptureId,
             webReviewId,
             rootDirectory);
@@ -455,60 +511,28 @@ static async Task<Guid> VerifySubjectiveReviewWorkflowAsync(
     string captureId,
     string storageRoot)
 {
-    var firstQuestionId = Guid.NewGuid();
-    var secondQuestionId = Guid.NewGuid();
-    await AssertOperationErrorAsync(
-        () => RunAsync(
-            operations,
-            ownerGrant,
-            TaskOperation.SubjectiveCreate,
-            new
-            {
-                captureId,
-                questions = new[]
-                {
-                    new
-                    {
-                        questionId = Guid.NewGuid(),
-                        questionNumber = 1,
-                        maxScore = 10m,
-                        region = new { x = -1, y = 0, width = 8, height = 8 }
-                    }
-                }
-            }),
-        "INVALID_SUBJECTIVE_REVIEW");
-
     var created = await RunAsync(
         operations,
         ownerGrant,
         TaskOperation.SubjectiveCreate,
-        new
-        {
-            captureId,
-            questions = new[]
-            {
-                new
-                {
-                    questionId = firstQuestionId,
-                    questionNumber = 1,
-                    maxScore = 10m,
-                    region = new { x = 0, y = 0, width = 8, height = 8 }
-                },
-                new
-                {
-                    questionId = secondQuestionId,
-                    questionNumber = 2,
-                    maxScore = 5m,
-                    region = new { x = 20, y = 10, width = 10, height = 6 }
-                }
-            }
-        });
+        new { captureId });
     var reviewIdText = created.GetProperty("reviewId").GetString()
         ?? throw new InvalidOperationException("subjective create omitted reviewId");
     var reviewId = Guid.Parse(reviewIdText);
+    var firstQuestionId = created.GetProperty("questions")[0].GetProperty("questionId").GetGuid();
+    var secondQuestionId = created.GetProperty("questions")[1].GetProperty("questionId").GetGuid();
+    var expectedLayout = CreateMixedSubjectiveLayout();
+    var storedRecord = new SubjectiveReviewStore(storageRoot).LoadTrusted(reviewId)
+        ?? throw new InvalidOperationException("template-derived subjective document should be persisted");
+    var firstMappedRegion = storedRecord.TemplateMapping?.Regions.Single(region => region.QuestionId == firstQuestionId)
+        ?? throw new InvalidOperationException("new subjective record must persist its template mapping provenance");
+    var expectedFirstRegion = firstMappedRegion.ToMapped(storedRecord.Snapshot.ImageWidth, storedRecord.Snapshot.ImageHeight);
     AssertEqual(captureId, created.GetProperty("captureId").GetString(), "subjective document must bind to the authorized capture");
     AssertEqual(1L, created.GetProperty("version").GetInt64(), "subjective document must begin at version one");
-    AssertEqual(2, created.GetProperty("questions").GetArrayLength(), "subjective document should preserve both reviewer-defined regions");
+    AssertEqual(expectedLayout.SubjectiveRegions.Count, created.GetProperty("questions").GetArrayLength(), "subjective document should derive all regions from the capture's template");
+    AssertEqual(expectedLayout.SubjectiveRegions[0].QuestionId, firstQuestionId, "subjective question IDs should originate from the template");
+    AssertEqual(expectedLayout.SubjectiveRegions[0].QuestionNumber, created.GetProperty("questions")[0].GetProperty("questionNumber").GetInt32(), "subjective question numbers should match the template");
+    AssertEqual(expectedLayout.SubjectiveRegions[0].MaximumScore, created.GetProperty("questions")[0].GetProperty("maxScore").GetDecimal(), "subjective maximum score should match the template");
     AssertEqual("ungraded", created.GetProperty("questions")[0].GetProperty("status").GetString(), "new questions begin ungraded");
     AssertTrue(!created.TryGetProperty("totalScore", out _), "subjective documents must not invent a mixed OMR score");
 
@@ -520,9 +544,9 @@ static async Task<Guid> VerifySubjectiveReviewWorkflowAsync(
     using (var decodedCrop = SKBitmap.Decode(image.Bytes))
     {
         AssertTrue(decodedCrop is not null, "subjective image endpoint should return a decodable PNG");
-        AssertEqual(8, decodedCrop!.Width, "subjective image width should match the selected pixel region");
-        AssertEqual(8, decodedCrop.Height, "subjective image height should match the selected pixel region");
-        AssertEqual(new SKColor(0, 0, 0, 255), decodedCrop.GetPixel(0, 0), "crop origin must preserve the source pixel at the selected x/y");
+        AssertEqual(expectedFirstRegion.OutputWidth, decodedCrop!.Width, "subjective image width should match the projectively corrected region");
+        AssertEqual(expectedFirstRegion.OutputHeight, decodedCrop.Height, "subjective image height should match the projectively corrected region");
+        AssertEqual(new SKColor(205, 220, 235, 255), decodedCrop.GetPixel(decodedCrop.Width / 2, decodedCrop.Height / 2), "projective crop should preserve the original region's synthetic center color");
     }
 
     await AssertOperationErrorAsync(
@@ -649,6 +673,7 @@ static async Task VerifyLocalSubjectiveReviewServiceAsync(
     string ownerGrant,
     string otherGrant,
     string captureId,
+    string legacyCaptureId,
     Guid webReviewId,
     string storageRoot)
 {
@@ -673,8 +698,11 @@ static async Task VerifyLocalSubjectiveReviewServiceAsync(
     }
     while (captureCursor is not null);
 
-    AssertTrue(capturePages.Any(item => item.CaptureId == captureId), "capture paging should return the uploaded capture");
-    AssertTrue(capturePages.All(item => item.PixelWidth == 40 && item.PixelHeight == 40), "capture summaries should contain manifest-validated dimensions");
+    var mixedCaptureSummary = capturePages.SingleOrDefault(item => item.CaptureId == captureId)
+        ?? throw new InvalidOperationException("capture paging should return the uploaded mixed-template capture");
+    AssertEqual(AnswerSheetLayout.MixedTemplateSchemaVersion, mixedCaptureSummary.TemplateSchemaVersion, "capture summary should report its actual mixed-template version");
+    AssertEqual(2, mixedCaptureSummary.SubjectiveQuestionCount, "capture summary should report template-defined subjective regions");
+    AssertTrue(capturePages.Any(item => item.CaptureId == legacyCaptureId && item.PixelWidth == 40 && item.PixelHeight == 40), "legacy capture summary should preserve validated dimensions");
     AssertTrue(!JsonSerializer.Serialize(capturePages).Contains(storageRoot, StringComparison.Ordinal), "capture summaries must not expose local paths");
     AssertEqual("INVALID_CAPTURE_CURSOR", await GetServiceErrorCodeAsync(() => service.ListCapturesAsync(cursor: "../../outside")), "capture cursors must not accept paths");
     AssertEqual("INVALID_CAPTURE_ID", await GetServiceErrorCodeAsync(() => service.ReadCaptureImageAsync("../../outside")), "raw image access must validate capture IDs instead of accepting paths");
@@ -689,21 +717,54 @@ static async Task VerifyLocalSubjectiveReviewServiceAsync(
         AssertTrue(header.SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }), "raw capture stream must come from the validated PNG");
     }
 
-    var localQuestionId = Guid.NewGuid();
-    var localRegion = SubjectiveRegionDefinition.Create(
-        localQuestionId,
+    var captureRecord = captureStore.LoadById(captureId)
+        ?? throw new InvalidOperationException("mixed capture should remain available for trusted creation");
+    var localQuestionId = captureRecord.TemplateLayout!.SubjectiveRegions[0].QuestionId;
+    var localSecondQuestionId = captureRecord.TemplateLayout.SubjectiveRegions[1].QuestionId;
+    var localReview = await service.CreateAsync(captureId);
+    AssertEqual(1L, localReview.Snapshot.Version, "trusted local reviews should begin at version one");
+    AssertEqual(SubjectiveReviewStore.DesktopLocalOwner, trustedStore.LoadTrusted(localReview.ReviewId)?.OwnerGrantId, "new local reviews should have the reserved local owner");
+    AssertTrue(trustedStore.LoadTrusted(localReview.ReviewId)?.TemplateMapping is not null, "local reviews should persist template mapping provenance");
+    AssertTrue(trustedStore.LoadForGrant(localReview.ReviewId, ownerGrant) is null, "a web grant must not take over a local review");
+    await AssertOperationErrorAsync(
+        () => RunAsync(operations, ownerGrant, TaskOperation.SubjectiveRead, new { reviewId = localReview.ReviewId }),
+        "SUBJECTIVE_REVIEW_NOT_FOUND");
+
+    var legacyCapture = captureStore.LoadById(legacyCaptureId)
+        ?? throw new InvalidOperationException("legacy pixel crop fixture should exist");
+    var legacyQuestionId = Guid.NewGuid();
+    var legacyDefinition = SubjectiveRegionDefinition.Create(
+        legacyQuestionId,
         questionNumber: 1,
         SubjectivePixelRectangle.Create(0, 0, 8, 8, 40, 40),
         maximumPoints: 5m,
         imageWidth: 40,
         imageHeight: 40);
-    var localReview = await service.CreateAsync(captureId, [localRegion]);
-    AssertEqual(1L, localReview.Snapshot.Version, "trusted local reviews should begin at version one");
-    AssertEqual(SubjectiveReviewStore.DesktopLocalOwner, trustedStore.LoadTrusted(localReview.ReviewId)?.OwnerGrantId, "new local reviews should have the reserved local owner");
-    AssertTrue(trustedStore.LoadForGrant(localReview.ReviewId, ownerGrant) is null, "a web grant must not take over a local review");
-    await AssertOperationErrorAsync(
-        () => RunAsync(operations, ownerGrant, TaskOperation.SubjectiveRead, new { reviewId = localReview.ReviewId }),
-        "SUBJECTIVE_REVIEW_NOT_FOUND");
+    var legacySnapshot = SubjectiveGradingSnapshot.Start(legacyCaptureId, 40, 40, [legacyDefinition]);
+    var legacyReviewId = Guid.NewGuid();
+    await trustedStore.CreateAsync(
+        legacyReviewId,
+        SubjectiveReviewStore.DesktopLocalOwner,
+        legacySnapshot);
+    var legacyRead = await service.ReadAsync(legacyReviewId);
+    AssertEqual(1L, legacyRead.Snapshot.Version, "legacy pixel review should remain readable after the template mapping change");
+    AssertTrue(trustedStore.LoadTrusted(legacyReviewId)?.TemplateMapping is null, "legacy pixel review should not invent mm template provenance");
+    var legacyImage = await service.ReadQuestionImageAsync(legacyReviewId, legacyQuestionId);
+    using (var decodedLegacyCrop = SKBitmap.Decode(legacyImage.Bytes))
+    {
+        AssertTrue(decodedLegacyCrop is not null, "legacy pixel review should retain its original crop behavior");
+        AssertEqual(8, decodedLegacyCrop!.Width, "legacy crop width should remain pixel-defined");
+        AssertEqual(8, decodedLegacyCrop.Height, "legacy crop height should remain pixel-defined");
+        AssertEqual(new SKColor(0, 0, 0, 255), decodedLegacyCrop.GetPixel(0, 0), "legacy crop should preserve its original source pixel");
+    }
+
+    var legacyDraft = await service.ApplyEditsAsync(
+        legacyReviewId,
+        1,
+        "legacy local teacher",
+        [new SubjectiveGradeEdit(legacyQuestionId, SubjectiveReviewStatus.Draft, 4m, "legacy retained")]);
+    AssertEqual(2L, legacyDraft.Snapshot.Version, "trusted local grading should continue on a legacy pixel review");
+    AssertTrue((await service.ExportAsync(legacyReviewId, "json")).Content.Contains("legacy retained", StringComparison.Ordinal), "legacy review export should retain its grading history");
 
     var localDocumentPath = Path.Combine(storageRoot, "subjective-reviews", $"{localReview.ReviewId:N}.json");
     using (File.Open(localDocumentPath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -741,25 +802,37 @@ static async Task VerifyLocalSubjectiveReviewServiceAsync(
         localReview.ReviewId,
         1,
         "local teacher",
-        [new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Draft, 4m, "saved draft")]);
+        [
+            new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Draft, 4m, "saved draft"),
+            new SubjectiveGradeEdit(localSecondQuestionId, SubjectiveReviewStatus.Draft, 2m, "second saved draft")
+        ]);
     var localFinal = await service.ApplyEditsAsync(
         localReview.ReviewId,
         2,
         "local teacher",
-        [new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Confirmed, 4m, "saved draft")]);
+        [
+            new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Confirmed, 4m, "saved draft"),
+            new SubjectiveGradeEdit(localSecondQuestionId, SubjectiveReviewStatus.Confirmed, 2m, "second saved draft")
+        ]);
     AssertEqual(2L, localDraft.Snapshot.Version, "one local batch should advance one version");
     AssertEqual(3L, localFinal.Snapshot.Version, "confirmation should be a separate atomic local batch");
-    AssertEqual(4m, localFinal.Snapshot.FinalSubtotal, "local final subtotal should sum only the subjective region scores");
+    AssertEqual(6m, localFinal.Snapshot.FinalSubtotal, "local final subtotal should sum only the template-defined subjective region scores");
 
     var restartedService = new LocalSubjectiveReviewService(new CaptureStore(storageRoot), new SubjectiveReviewStore(storageRoot));
     var reopened = await restartedService.ReadAsync(localReview.ReviewId);
     AssertEqual(3L, reopened.Snapshot.Version, "a new local service instance should restore the latest version");
     AssertEqual(2, reopened.Snapshot.History.Count, "a new local service instance should restore audit history");
     var reopenedCrop = await restartedService.ReadQuestionImageAsync(localReview.ReviewId, localQuestionId);
+    var reopenedRecord = trustedStore.LoadTrusted(localReview.ReviewId)
+        ?? throw new InvalidOperationException("local record should remain available after service restart");
+    var expectedReopenedRegion = reopenedRecord.TemplateMapping!.Regions.Single(region => region.QuestionId == localQuestionId)
+        .ToMapped(reopenedRecord.Snapshot.ImageWidth, reopenedRecord.Snapshot.ImageHeight);
     using (var decodedCrop = SKBitmap.Decode(reopenedCrop.Bytes))
     {
         AssertTrue(decodedCrop is not null, "crop recovery after service restart should decode");
-        AssertEqual(new SKColor(0, 0, 0, 255), decodedCrop!.GetPixel(0, 0), "recovered crop should preserve the original selected pixels");
+        AssertEqual(expectedReopenedRegion.OutputWidth, decodedCrop!.Width, "recovered crop should restore corrected region width");
+        AssertEqual(expectedReopenedRegion.OutputHeight, decodedCrop.Height, "recovered crop should restore corrected region height");
+        AssertEqual(new SKColor(205, 220, 235, 255), decodedCrop.GetPixel(decodedCrop.Width / 2, decodedCrop.Height / 2), "recovered crop should preserve the template region source pixels");
     }
 
     var existingWebReview = await service.ReadAsync(webReviewId);
@@ -776,20 +849,7 @@ static async Task VerifyLocalSubjectiveReviewServiceAsync(
         operations,
         ownerGrant,
         TaskOperation.SubjectiveCreate,
-        new
-        {
-            captureId,
-            questions = new[]
-            {
-                new
-                {
-                    questionId = Guid.NewGuid(),
-                    questionNumber = 1,
-                    maxScore = 5m,
-                    region = new { x = 10, y = 10, width = 8, height = 8 }
-                }
-            }
-        });
+        new { captureId });
     var concurrencyReviewId = Guid.Parse(concurrencyReview.GetProperty("reviewId").GetString()!);
     var concurrencyQuestionId = concurrencyReview.GetProperty("questions")[0].GetProperty("questionId").GetGuid();
     var localAttempt = CaptureLocalApplyOutcomeAsync(
@@ -1063,6 +1123,86 @@ static byte[] CreateSyntheticPng(int width, int height)
     return EncodePng(width, height, pixels);
 }
 
+static AnswerSheetLayout CreateMixedSubjectiveLayout(string title = "M3 合成主客观模板")
+{
+    return AnswerSheetLayout.Create(
+        title,
+        10,
+        4,
+        [
+            TemplateSubjectiveRegion.Create(11, 20m, new RectMm(110, 60, 80, 55)),
+            TemplateSubjectiveRegion.Create(12, 10m, new RectMm(110, 125, 80, 50))
+        ]);
+}
+
+static byte[] CreateLocatedTemplatePng(AnswerSheetLayout layout)
+{
+    const double pixelsPerMillimetre = 2;
+    var width = checked((int)(AnswerSheetLayout.PageWidthMm * pixelsPerMillimetre));
+    var height = checked((int)(AnswerSheetLayout.PageHeightMm * pixelsPerMillimetre));
+    var rgba = new byte[checked(width * height * 4)];
+    for (var y = 0; y < height; y++)
+    {
+        var pageY = (y + 0.5) / pixelsPerMillimetre;
+        for (var x = 0; x < width; x++)
+        {
+            var pageX = (x + 0.5) / pixelsPerMillimetre;
+            byte red = 255;
+            byte green = 255;
+            byte blue = 255;
+
+            if (layout.RegistrationMarks.Any(mark =>
+                    IsInside(pageX, pageY, mark.TopLeft.X, mark.TopLeft.Y, mark.SizeMm, mark.SizeMm)))
+            {
+                red = green = blue = 0;
+            }
+
+            var marker = layout.OrientationMarker;
+            if (IsInside(pageX, pageY, marker.TopLeft.X, marker.TopLeft.Y, marker.WidthMm, marker.HeightMm))
+            {
+                red = green = blue = 0;
+            }
+
+            for (var index = 0; index < layout.SubjectiveRegions.Count; index++)
+            {
+                var region = layout.SubjectiveRegions[index].Rectangle;
+                if (!IsInside(pageX, pageY, region.X, region.Y, region.Width, region.Height))
+                {
+                    continue;
+                }
+
+                const double borderWidthMm = 0.5;
+                if (pageX - region.X < borderWidthMm
+                    || region.X + region.Width - pageX < borderWidthMm
+                    || pageY - region.Y < borderWidthMm
+                    || region.Y + region.Height - pageY < borderWidthMm)
+                {
+                    red = green = blue = 0;
+                }
+                else if (index == 0)
+                {
+                    (red, green, blue) = (205, 220, 235);
+                }
+                else
+                {
+                    (red, green, blue) = (235, 210, 205);
+                }
+            }
+
+            var offset = checked((y * width + x) * 4);
+            rgba[offset] = red;
+            rgba[offset + 1] = green;
+            rgba[offset + 2] = blue;
+            rgba[offset + 3] = 255;
+        }
+    }
+
+    return EncodePng(width, height, rgba);
+
+    static bool IsInside(double x, double y, double left, double top, double rectangleWidth, double rectangleHeight)
+        => x >= left && x <= left + rectangleWidth && y >= top && y <= top + rectangleHeight;
+}
+
 static byte[] EncodePng(int width, int height, byte[] rgba)
 {
     using var png = new MemoryStream();
@@ -1126,7 +1266,7 @@ static async Task<int> RunHttpHarnessAsync()
 {
     var rootDirectory = Path.Combine(Path.GetTempPath(), $"omrina-m3-http-{Guid.NewGuid():N}");
     Directory.CreateDirectory(rootDirectory);
-    var imageBytes = CreateSyntheticPng(40, 40);
+    var imageBytes = CreateLocatedTemplatePng(CreateMixedSubjectiveLayout("M5 synthetic page"));
     var fixturePath = Path.Combine(rootDirectory, "synthetic-answer-sheet.png");
     await File.WriteAllBytesAsync(fixturePath, imageBytes);
 

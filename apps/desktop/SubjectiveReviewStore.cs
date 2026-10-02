@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Collections.Concurrent;
 using Omrina.Core;
+using Omrina.Platform;
 
 namespace Omrina.Desktop;
 
@@ -10,7 +11,8 @@ namespace Omrina.Desktop;
 public sealed record SubjectiveReviewRecord(
     Guid ReviewId,
     string OwnerGrantId,
-    SubjectiveGradingSnapshot Snapshot);
+    SubjectiveGradingSnapshot Snapshot,
+    SubjectiveReviewTemplateMapping? TemplateMapping = null);
 
 public sealed class SubjectiveReviewStoreException : Exception
 {
@@ -82,7 +84,8 @@ public sealed class SubjectiveReviewStore
         Guid reviewId,
         string ownerGrantId,
         SubjectiveGradingSnapshot snapshot,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        SubjectiveReviewTemplateMapping? templateMapping = null)
     {
         ValidateReviewId(reviewId);
         ValidateGrantId(ownerGrantId);
@@ -98,9 +101,10 @@ public sealed class SubjectiveReviewStore
                     "批阅记录 ID 已存在，请重试。");
             }
 
-            await SaveCoreAsync(reviewId, ownerGrantId, snapshot, overwrite: false, cancellationToken)
+            var validatedMapping = ValidateTemplateMapping(templateMapping, snapshot);
+            await SaveCoreAsync(reviewId, ownerGrantId, snapshot, validatedMapping, overwrite: false, cancellationToken)
                 .ConfigureAwait(false);
-            return new SubjectiveReviewRecord(reviewId, ownerGrantId, snapshot);
+            return new SubjectiveReviewRecord(reviewId, ownerGrantId, snapshot, validatedMapping);
         }
         finally
         {
@@ -264,7 +268,13 @@ public sealed class SubjectiveReviewStore
                 ?? throw new InvalidOperationException("A subjective update must return a snapshot.");
             ValidateTransition(current, nextSnapshot, expectedVersion);
             cancellationToken.ThrowIfCancellationRequested();
-            await SaveCoreAsync(reviewId, current.OwnerGrantId, nextSnapshot, overwrite: true, cancellationToken)
+            await SaveCoreAsync(
+                reviewId,
+                current.OwnerGrantId,
+                nextSnapshot,
+                current.TemplateMapping,
+                overwrite: true,
+                cancellationToken)
                 .ConfigureAwait(false);
             return current with { Snapshot = nextSnapshot };
         }
@@ -278,15 +288,18 @@ public sealed class SubjectiveReviewStore
         Guid reviewId,
         string ownerGrantId,
         SubjectiveGradingSnapshot snapshot,
+        SubjectiveReviewTemplateMapping? templateMapping,
         bool overwrite,
         CancellationToken cancellationToken)
     {
+        templateMapping = ValidateTemplateMapping(templateMapping, snapshot);
         var document = new StoredDocument
         {
             SchemaVersion = CurrentSchemaVersion,
             ReviewId = reviewId,
             OwnerGrantId = ownerGrantId,
-            SnapshotJson = snapshot.ToJson()
+            SnapshotJson = snapshot.ToJson(),
+            TemplateMapping = templateMapping
         };
         var bytes = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
         if (bytes.Length > MaximumStoredDocumentBytes)
@@ -386,7 +399,8 @@ public sealed class SubjectiveReviewStore
 
             ValidateGrantId(document.OwnerGrantId);
             var snapshot = SubjectiveGradingSnapshot.FromJson(document.SnapshotJson);
-            return new SubjectiveReviewRecord(reviewId, document.OwnerGrantId, snapshot);
+            var templateMapping = ValidateTemplateMapping(document.TemplateMapping, snapshot);
+            return new SubjectiveReviewRecord(reviewId, document.OwnerGrantId, snapshot, templateMapping);
         }
         catch (SubjectiveReviewStoreException)
         {
@@ -552,6 +566,224 @@ public sealed class SubjectiveReviewStore
         }
     }
 
+    private static SubjectiveReviewTemplateMapping? ValidateTemplateMapping(
+        SubjectiveReviewTemplateMapping? templateMapping,
+        SubjectiveGradingSnapshot snapshot)
+    {
+        if (templateMapping is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(templateMapping.TemplateJson)
+            || templateMapping.Regions is null
+            || templateMapping.Regions.Count is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount)
+        {
+            throw InvalidDocument();
+        }
+
+        AnswerSheetLayout layout;
+        try
+        {
+            layout = AnswerSheetLayout.FromJson(templateMapping.TemplateJson);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new SubjectiveReviewStoreException(
+                "SUBJECTIVE_REVIEW_INVALID",
+                "批阅记录的模板映射已损坏或不受支持。",
+                exception);
+        }
+        if (layout.SchemaVersion != AnswerSheetLayout.MixedTemplateSchemaVersion
+            || layout.SubjectiveRegions.Count != snapshot.Questions.Count
+            || templateMapping.Regions.Count != snapshot.Questions.Count)
+        {
+            throw InvalidDocument();
+        }
+
+        ValidateTransform(templateMapping.PageTransform);
+        var mappedRegionsById = new Dictionary<Guid, SubjectiveMappedRegionProvenance>();
+        foreach (var mapped in templateMapping.Regions)
+        {
+            if (mapped is null || mapped.QuestionId == Guid.Empty
+                || !mappedRegionsById.TryAdd(mapped.QuestionId, mapped))
+            {
+                throw InvalidDocument();
+            }
+        }
+
+        var templateRegions = layout.SubjectiveRegions.ToDictionary(region => region.QuestionId);
+        var questions = snapshot.Questions.ToDictionary(question => question.QuestionId);
+        if (templateRegions.Count != mappedRegionsById.Count || questions.Count != mappedRegionsById.Count)
+        {
+            throw InvalidDocument();
+        }
+
+        foreach (var templateRegion in layout.SubjectiveRegions)
+        {
+            if (!mappedRegionsById.TryGetValue(templateRegion.QuestionId, out var provenance)
+                || !questions.TryGetValue(templateRegion.QuestionId, out var question)
+                || provenance.QuestionNumber != templateRegion.QuestionNumber
+                || provenance.MaximumScore != templateRegion.MaximumScore
+                || provenance.RectangleMm != templateRegion.Rectangle
+                || question.QuestionNumber != provenance.QuestionNumber
+                || question.MaximumScore != provenance.MaximumScore)
+            {
+                throw InvalidDocument();
+            }
+
+            var mapped = ValidateMappedRegion(
+                provenance,
+                templateMapping.PageTransform,
+                snapshot.ImageWidth,
+                snapshot.ImageHeight);
+            if (question.Region != mapped.BoundingRectangle)
+            {
+                throw InvalidDocument();
+            }
+        }
+
+        return templateMapping with
+        {
+            TemplateJson = layout.ToJson(),
+            Regions = Array.AsReadOnly(templateMapping.Regions.ToArray())
+        };
+    }
+
+    private static void ValidateTransform(PageTransform transform)
+    {
+        var coefficients = new[]
+        {
+            transform.M11, transform.M12, transform.M13,
+            transform.M21, transform.M22, transform.M23,
+            transform.M31, transform.M32, transform.M33
+        };
+        if (coefficients.Any(value => !double.IsFinite(value)))
+        {
+            throw InvalidDocument();
+        }
+
+        var determinant = transform.M11 * (transform.M22 * transform.M33 - transform.M23 * transform.M32)
+            - transform.M12 * (transform.M21 * transform.M33 - transform.M23 * transform.M31)
+            + transform.M13 * (transform.M21 * transform.M32 - transform.M22 * transform.M31);
+        if (!double.IsFinite(determinant) || Math.Abs(determinant) < 1e-12)
+        {
+            throw InvalidDocument();
+        }
+    }
+
+    private static MappedSubjectiveRegion ValidateMappedRegion(
+        SubjectiveMappedRegionProvenance provenance,
+        PageTransform transform,
+        int imageWidth,
+        int imageHeight)
+    {
+        MappedSubjectiveRegion mapped;
+        try
+        {
+            mapped = provenance.ToMapped(imageWidth, imageHeight);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new SubjectiveReviewStoreException(
+                "SUBJECTIVE_REVIEW_INVALID",
+                "批阅记录的像素区域已损坏或超出原图。",
+                exception);
+        }
+
+        var rectangle = mapped.RectangleMm;
+        var layoutCorners = new[]
+        {
+            new PointMm(rectangle.X, rectangle.Y),
+            new PointMm(rectangle.X + rectangle.Width, rectangle.Y),
+            new PointMm(rectangle.X + rectangle.Width, rectangle.Y + rectangle.Height),
+            new PointMm(rectangle.X, rectangle.Y + rectangle.Height)
+        };
+        var sourceCorners = new[]
+        {
+            mapped.SourceQuadrilateral.TopLeft,
+            mapped.SourceQuadrilateral.TopRight,
+            mapped.SourceQuadrilateral.BottomRight,
+            mapped.SourceQuadrilateral.BottomLeft
+        };
+        var denominatorSign = 0;
+        var crossProducts = new double[4];
+        for (var index = 0; index < layoutCorners.Length; index++)
+        {
+            var point = layoutCorners[index];
+            var denominator = transform.M31 * point.X + transform.M32 * point.Y + transform.M33;
+            var expected = transform.Map(layoutCorners[index]);
+            var actual = sourceCorners[index];
+            if (!double.IsFinite(denominator) || Math.Abs(denominator) < 1e-12
+                || !double.IsFinite(expected.X) || !double.IsFinite(expected.Y)
+                || !double.IsFinite(actual.X) || !double.IsFinite(actual.Y)
+                || actual.X < 0 || actual.Y < 0 || actual.X > imageWidth || actual.Y > imageHeight
+                || Math.Abs(actual.X - expected.X) > 0.01 || Math.Abs(actual.Y - expected.Y) > 0.01)
+            {
+                throw InvalidDocument();
+            }
+
+            var currentSign = Math.Sign(denominator);
+            if (denominatorSign != 0 && denominatorSign != currentSign)
+            {
+                throw InvalidDocument();
+            }
+
+            denominatorSign = currentSign;
+            var first = sourceCorners[index];
+            var second = sourceCorners[(index + 1) % sourceCorners.Length];
+            var third = sourceCorners[(index + 2) % sourceCorners.Length];
+            crossProducts[index] = (second.X - first.X) * (third.Y - second.Y)
+                - (second.Y - first.Y) * (third.X - second.X);
+        }
+
+        if (crossProducts.Any(value => !double.IsFinite(value)
+            || Math.Abs(value) < 1e-8
+            || Math.Sign(value) != Math.Sign(crossProducts[0])))
+        {
+            throw InvalidDocument();
+        }
+
+        var left = (int)Math.Floor(sourceCorners.Min(point => point.X));
+        var top = (int)Math.Floor(sourceCorners.Min(point => point.Y));
+        var right = (int)Math.Ceiling(sourceCorners.Max(point => point.X));
+        var bottom = (int)Math.Ceiling(sourceCorners.Max(point => point.Y));
+        SubjectivePixelRectangle expectedBounds;
+        try
+        {
+            expectedBounds = SubjectivePixelRectangle.Create(left, top, right - left, bottom - top, imageWidth, imageHeight);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new SubjectiveReviewStoreException(
+                "SUBJECTIVE_REVIEW_INVALID",
+                "批阅记录已损坏或不受支持，无法读取。",
+                exception);
+        }
+
+        var expectedWidth = Math.Ceiling((Distance(sourceCorners[0], sourceCorners[1])
+                + Distance(sourceCorners[3], sourceCorners[2])) / 2);
+        var expectedHeight = Math.Ceiling((Distance(sourceCorners[0], sourceCorners[3])
+                + Distance(sourceCorners[1], sourceCorners[2])) / 2);
+        if (mapped.BoundingRectangle != expectedBounds
+            || mapped.OutputWidth != expectedWidth || mapped.OutputHeight != expectedHeight
+            || mapped.OutputWidth <= 0 || mapped.OutputHeight <= 0
+            || mapped.OutputWidth > 16_000 || mapped.OutputHeight > 16_000
+            || (ulong)mapped.OutputWidth * (uint)mapped.OutputHeight > SubjectiveImageCropper.MaximumRegionPixelCount)
+        {
+            throw InvalidDocument();
+        }
+
+        return mapped;
+    }
+
+    private static double Distance(PointPx left, PointPx right)
+    {
+        var deltaX = left.X - right.X;
+        var deltaY = left.Y - right.Y;
+        return Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
+    }
+
     private static byte[] ReadDocumentBytes(string path)
     {
         using var stream = new FileStream(
@@ -661,5 +893,7 @@ public sealed class SubjectiveReviewStore
         public string OwnerGrantId { get; init; } = string.Empty;
 
         public string SnapshotJson { get; init; } = string.Empty;
+
+        public SubjectiveReviewTemplateMapping? TemplateMapping { get; init; }
     }
 }

@@ -187,10 +187,13 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         var title = ReadString(parameters, "title");
         var questionCount = ReadPositiveInt(parameters, "questionCount");
         var optionsPerQuestion = ReadPositiveInt(parameters, "optionsPerQuestion");
+        var subjectiveRegions = ReadTemplateSubjectiveRegions(parameters);
         AnswerSheetLayout layout;
         try
         {
-            layout = AnswerSheetLayout.Create(title, questionCount, optionsPerQuestion);
+            layout = subjectiveRegions.Length == 0
+                ? AnswerSheetLayout.Create(title, questionCount, optionsPerQuestion)
+                : AnswerSheetLayout.Create(title, questionCount, optionsPerQuestion, subjectiveRegions);
         }
         catch (Exception exception)
         {
@@ -441,7 +444,49 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             var captureRecord = capture.Record;
             var imageWidth = checked((int)captureRecord.Manifest.PixelWidth);
             var imageHeight = checked((int)captureRecord.Manifest.PixelHeight);
-            var definitions = ReadSubjectiveQuestionDefinitions(parameters, imageWidth, imageHeight);
+            var layout = captureRecord.TemplateLayout;
+            if (layout is null
+                || !string.Equals(layout.TemplateId, captureRecord.Manifest.TemplateId, StringComparison.Ordinal)
+                || layout.SchemaVersion != captureRecord.Manifest.TemplateSchemaVersion
+                || !string.Equals(capture.Layout.TemplateId, layout.TemplateId, StringComparison.Ordinal))
+            {
+                throw new LocalOperationException(
+                    "CAPTURE_TEMPLATE_INVALID",
+                    "采集记录缺少有效的关联模板，无法创建主观题批阅记录。");
+            }
+
+            SubjectiveReviewTemplateMapping templateMapping;
+            try
+            {
+                templateMapping = await SubjectiveCaptureTemplateMapper.LocateAndMapAsync(
+                    layout,
+                    new LocalInputImageFile(captureRecord.ImageFilePath),
+                    imageWidth,
+                    imageHeight,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (SubjectiveCaptureMappingException exception)
+            {
+                throw new LocalOperationException(exception.Code, exception.Message);
+            }
+            catch (ImageDecodeException)
+            {
+                throw new LocalOperationException(
+                    "SUBJECTIVE_IMAGE_INVALID",
+                    "原始采集图像无法读取，未创建批阅记录。");
+            }
+
+            var definitions = templateMapping.Regions.Select(region =>
+            {
+                var mapped = region.ToMapped(imageWidth, imageHeight);
+                return SubjectiveRegionDefinition.Create(
+                    mapped.QuestionId,
+                    mapped.QuestionNumber,
+                    mapped.BoundingRectangle,
+                    mapped.MaximumScore,
+                    imageWidth,
+                    imageHeight);
+            }).ToArray();
 
             SubjectiveGradingSnapshot snapshot;
             try
@@ -459,7 +504,12 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
             var reviewId = Guid.NewGuid();
             var response = CreateCheckedSubjectiveDocument(reviewId, snapshot);
-            await SaveNewSubjectiveReviewAsync(reviewId, grantId, snapshot, cancellationToken).ConfigureAwait(false);
+            await SaveNewSubjectiveReviewAsync(
+                reviewId,
+                grantId,
+                snapshot,
+                templateMapping,
+                cancellationToken).ConfigureAwait(false);
             return response;
         }
         finally
@@ -600,12 +650,14 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         var operationCancellationToken = linkedCancellation.Token;
         CaptureRecord captureRecord;
         SubjectiveGradingQuestion question;
+        SubjectiveReviewTemplateMapping? templateMapping;
 
         await grantResources.SubjectiveGate.WaitAsync(operationCancellationToken).ConfigureAwait(false);
         try
         {
             operationCancellationToken.ThrowIfCancellationRequested();
             var record = FindSubjectiveReview(grantResources, reviewId, grantId);
+            templateMapping = record.TemplateMapping;
             question = record.Snapshot.Questions.FirstOrDefault(candidate => candidate.QuestionId == questionId)
                 ?? throw new LocalOperationException("SUBJECTIVE_QUESTION_NOT_FOUND", "找不到此授权下的答题区域。");
             if (!grantResources.TryGetCapture(record.Snapshot.CaptureId, out var capture))
@@ -623,12 +675,41 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         try
         {
             var file = new LocalInputImageFile(captureRecord.ImageFilePath);
-            var png = await SubjectiveImageCropper.CropToPngAsync(
-                file,
-                question.Region,
-                checked((int)captureRecord.Manifest.PixelWidth),
-                checked((int)captureRecord.Manifest.PixelHeight),
-                operationCancellationToken).ConfigureAwait(false);
+            byte[] png;
+            if (templateMapping is { } mapping)
+            {
+                if (captureRecord.TemplateLayout is null
+                    || !string.Equals(captureRecord.TemplateLayout.ToJson(), mapping.TemplateJson, StringComparison.Ordinal))
+                {
+                    throw new LocalOperationException(
+                        "CAPTURE_TEMPLATE_MISMATCH",
+                        "原图关联的模板与批阅记录不一致，无法读取题目区域。");
+                }
+
+                var regionProvenance = mapping.Regions.FirstOrDefault(region => region.QuestionId == question.QuestionId)
+                    ?? throw new LocalOperationException(
+                        "SUBJECTIVE_IMAGE_INVALID",
+                        "批阅记录缺少该题的模板区域映射。");
+                png = await SubjectiveImageCropper.RectifyToPngAsync(
+                    file,
+                    regionProvenance.ToMapped(
+                        checked((int)captureRecord.Manifest.PixelWidth),
+                        checked((int)captureRecord.Manifest.PixelHeight)),
+                    checked((int)captureRecord.Manifest.PixelWidth),
+                    checked((int)captureRecord.Manifest.PixelHeight),
+                    operationCancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Keep image access for already-saved pixel-defined documents.
+                png = await SubjectiveImageCropper.CropToPngAsync(
+                    file,
+                    question.Region,
+                    checked((int)captureRecord.Manifest.PixelWidth),
+                    checked((int)captureRecord.Manifest.PixelHeight),
+                    operationCancellationToken).ConfigureAwait(false);
+            }
+
             operationCancellationToken.ThrowIfCancellationRequested();
             return new LocalSubjectiveImage(png);
         }
@@ -660,11 +741,17 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         Guid reviewId,
         string grantId,
         SubjectiveGradingSnapshot snapshot,
+        SubjectiveReviewTemplateMapping? templateMapping,
         CancellationToken cancellationToken)
     {
         try
         {
-            await _subjectiveReviewStore.CreateAsync(reviewId, grantId, snapshot, cancellationToken)
+            await _subjectiveReviewStore.CreateAsync(
+                    reviewId,
+                    grantId,
+                    snapshot,
+                    cancellationToken,
+                    templateMapping)
                 .ConfigureAwait(false);
         }
         catch (SubjectiveReviewStoreException exception)
@@ -832,11 +919,24 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
     private static object ToTemplateSummary(AnswerSheetLayout layout) => new
     {
         templateId = layout.TemplateId,
-        schemaVersion = AnswerSheetLayout.TemplateSchemaVersion,
+        schemaVersion = layout.SchemaVersion,
         title = layout.Title,
         questionCount = layout.QuestionCount,
         optionsPerQuestion = layout.OptionsPerQuestion,
         templateNumber = layout.TemplateNumber,
+        subjectiveRegions = layout.SubjectiveRegions.Select(region => new
+        {
+            questionId = region.QuestionId,
+            questionNumber = region.QuestionNumber,
+            maxScore = region.MaximumScore,
+            rectangleMm = new
+            {
+                x = region.Rectangle.X,
+                y = region.Rectangle.Y,
+                width = region.Rectangle.Width,
+                height = region.Rectangle.Height
+            }
+        }).ToArray(),
         svg = layout.ToSvg()
     };
 
@@ -868,14 +968,14 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
     {
         return operation switch
         {
-            TaskOperation.Template => Names("title", "questionCount", "optionsPerQuestion"),
+            TaskOperation.Template => Names("title", "questionCount", "optionsPerQuestion", "subjectiveRegions"),
             TaskOperation.Upload => Names("templateId", "fileName"),
             TaskOperation.Scan => Names("templateId", "deviceId", "dpi"),
             TaskOperation.Recognize => Names("captureId"),
             TaskOperation.Score => Names("resultId", "answerKey", "pointsPerQuestion"),
             TaskOperation.Review => Names("resultId", "expectedVersion", "reviewer", "edits", "answerKey"),
             TaskOperation.Export => Names("resultId", "format"),
-            TaskOperation.SubjectiveCreate => Names("captureId", "questions"),
+            TaskOperation.SubjectiveCreate => Names("captureId"),
             TaskOperation.SubjectiveRead => Names("reviewId"),
             TaskOperation.SubjectiveGrade => Names("reviewId", "expectedVersion", "reviewer", "edits"),
             TaskOperation.SubjectiveExport => Names("reviewId", "format"),
@@ -1052,60 +1152,60 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         return parsed;
     }
 
-    private static SubjectiveRegionDefinition[] ReadSubjectiveQuestionDefinitions(
-        JsonElement parameters,
-        int imageWidth,
-        int imageHeight)
+    private static TemplateSubjectiveRegion[] ReadTemplateSubjectiveRegions(JsonElement parameters)
     {
-        if (!parameters.TryGetProperty("questions", out var questions)
-            || questions.ValueKind != JsonValueKind.Array
-            || questions.GetArrayLength() is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount)
+        if (!parameters.TryGetProperty("subjectiveRegions", out var regions))
         {
-            throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "请提供 1 到 64 道有效的题目区域。");
+            return [];
         }
 
-        var definitions = new List<SubjectiveRegionDefinition>(questions.GetArrayLength());
-        foreach (var question in questions.EnumerateArray())
+        if (regions.ValueKind != JsonValueKind.Array
+            || regions.GetArrayLength() > SubjectiveGradingSnapshot.MaximumQuestionCount)
         {
-            RequireExactProperties(question, "questionId", "questionNumber", "maxScore", "region");
-            var questionIdText = ReadRequiredString(question, "questionId");
-            if (!Guid.TryParse(questionIdText, out var questionId) || questionId == Guid.Empty)
+            throw new LocalOperationException("INVALID_TEMPLATE", "主观题区域最多可定义 64 道，请检查模板参数。");
+        }
+
+        var definitions = new List<TemplateSubjectiveRegion>(regions.GetArrayLength());
+        foreach (var region in regions.EnumerateArray())
+        {
+            RequireExactProperties(region, "questionNumber", "maxScore", "rectangleMm");
+            if (!region.TryGetProperty("rectangleMm", out var rectangle))
             {
-                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题目区域 ID 无效。");
+                throw new LocalOperationException("INVALID_TEMPLATE", "主观题区域缺少毫米坐标。");
             }
 
-            var questionNumber = ReadRequiredInt32(question, "questionNumber");
-            var maxScore = ReadRequiredDecimal(question, "maxScore");
-            if (!question.TryGetProperty("region", out var region))
-            {
-                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题目区域缺少像素坐标。");
-            }
-
-            RequireExactProperties(region, "x", "y", "width", "height");
+            RequireExactProperties(rectangle, "x", "y", "width", "height");
             try
             {
-                var rectangle = SubjectivePixelRectangle.Create(
-                    ReadRequiredInt32(region, "x"),
-                    ReadRequiredInt32(region, "y"),
-                    ReadRequiredInt32(region, "width"),
-                    ReadRequiredInt32(region, "height"),
-                    imageWidth,
-                    imageHeight);
-                definitions.Add(SubjectiveRegionDefinition.Create(
-                    questionId,
-                    questionNumber,
-                    rectangle,
-                    maxScore,
-                    imageWidth,
-                    imageHeight));
+                definitions.Add(TemplateSubjectiveRegion.Create(
+                    ReadRequiredInt32(region, "questionNumber"),
+                    ReadRequiredDecimal(region, "maxScore"),
+                    new RectMm(
+                        ReadRequiredFiniteDouble(rectangle, "x"),
+                        ReadRequiredFiniteDouble(rectangle, "y"),
+                        ReadRequiredFiniteDouble(rectangle, "width"),
+                        ReadRequiredFiniteDouble(rectangle, "height"))));
             }
             catch (ArgumentException)
             {
-                throw new LocalOperationException("INVALID_SUBJECTIVE_REVIEW", "题号、像素区域或满分超出允许范围。");
+                throw new LocalOperationException("INVALID_TEMPLATE", "主观题题号、毫米区域或满分超出允许范围。");
             }
         }
 
         return definitions.ToArray();
+    }
+
+    private static double ReadRequiredFiniteDouble(JsonElement value, string name)
+    {
+        if (!value.TryGetProperty(name, out var property)
+            || property.ValueKind != JsonValueKind.Number
+            || !property.TryGetDouble(out var parsed)
+            || !double.IsFinite(parsed))
+        {
+            throw new LocalOperationException("INVALID_TEMPLATE", $"参数 {name} 必须是有限的毫米数。");
+        }
+
+        return parsed;
     }
 
     private static SubjectiveGradeEdit[] ReadSubjectiveGradeEdits(JsonElement parameters)

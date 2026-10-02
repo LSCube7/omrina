@@ -18,8 +18,11 @@ public sealed record CaptureTemplateReference(
     int SchemaVersion,
     string Title,
     int QuestionCount,
-    int OptionsPerQuestion)
+    int OptionsPerQuestion,
+    string? TemplateJson = null,
+    AnswerSheetLayout? Layout = null)
 {
+    // Schema 1 is retained for captures created before mixed answer sheets.
     public const int CurrentSchemaVersion = AnswerSheetLayout.TemplateSchemaVersion;
 
     public static CaptureTemplateReference FromLayout(AnswerSheetLayout layout)
@@ -28,10 +31,12 @@ public sealed record CaptureTemplateReference(
 
         return new CaptureTemplateReference(
             layout.TemplateId,
-            CurrentSchemaVersion,
+            layout.SchemaVersion,
             layout.Title,
             layout.QuestionCount,
-            layout.OptionsPerQuestion);
+            layout.OptionsPerQuestion,
+            layout.SchemaVersion == AnswerSheetLayout.MixedTemplateSchemaVersion ? layout.ToJson() : null,
+            layout);
     }
 }
 
@@ -58,7 +63,11 @@ public sealed record CaptureRecord(
     CaptureManifest Manifest,
     string CaptureDirectory,
     string ImageFilePath,
-    string ManifestFilePath);
+    string ManifestFilePath)
+{
+    /// <summary>The verified template layout, reconstructed for legacy records or loaded from its sidecar.</summary>
+    public AnswerSheetLayout? TemplateLayout { get; init; }
+}
 
 public sealed record CaptureStoreDiagnostic(string ResourceId, string Code, string Message);
 
@@ -103,6 +112,7 @@ public sealed class CaptureStore
 {
     public const int ManifestSchemaVersion = 1;
     private const int MaximumManifestBytes = 64 * 1024;
+    private const int MaximumTemplateSnapshotBytes = 64 * 1024;
     private const int MaximumPageSize = 50;
     public const ulong MaximumFileSizeBytes = 100UL * 1024 * 1024;
     public const uint MaximumImageWidth = 16_000;
@@ -363,9 +373,10 @@ public sealed class CaptureStore
                     null);
             }
 
-            if (manifest.TemplateSchemaVersion != AnswerSheetLayout.TemplateSchemaVersion)
+            if (manifest.TemplateSchemaVersion is not (AnswerSheetLayout.TemplateSchemaVersion or AnswerSheetLayout.MixedTemplateSchemaVersion))
             {
-                throw InvalidHistory(
+                throw new CaptureStorageException(
+                    "CAPTURE_TEMPLATE_UNSUPPORTED",
                     $"最近采集记录的模板 schema {manifest.TemplateSchemaVersion} 不受当前版本支持。",
                     null);
             }
@@ -405,12 +416,16 @@ public sealed class CaptureStore
             RejectReparsePoint(imagePath, isDirectory: false);
 
             ValidateHistoryManifest(manifest, captureDirectory, imagePath);
+            var templateLayout = ReadAssociatedTemplate(manifest, captureDirectory);
 
             return new CaptureRecord(
                 manifest,
                 captureDirectory.FullName,
                 imagePath,
-                manifestFilePath);
+                manifestFilePath)
+            {
+                TemplateLayout = templateLayout
+            };
         }
         catch (CaptureStorageException)
         {
@@ -450,6 +465,66 @@ public sealed class CaptureStore
         }
     }
 
+    private static AnswerSheetLayout ReadAssociatedTemplate(CaptureManifest manifest, DirectoryInfo captureDirectory)
+    {
+        if (manifest.TemplateSchemaVersion == AnswerSheetLayout.TemplateSchemaVersion)
+        {
+            var legacyLayout = AnswerSheetLayout.Create(
+                manifest.TemplateTitle,
+                manifest.QuestionCount,
+                manifest.OptionsPerQuestion);
+            if (legacyLayout.TemplateId != manifest.TemplateId)
+            {
+                throw new CaptureStorageException(
+                    "CAPTURE_TEMPLATE_MISMATCH",
+                    "采集记录中的旧版模板身份与模板参数不一致。");
+            }
+
+            return legacyLayout;
+        }
+
+        var templatePath = Path.Combine(captureDirectory.FullName, "template.json");
+        if (!File.Exists(templatePath))
+        {
+            throw new CaptureStorageException(
+                "CAPTURE_TEMPLATE_MISSING",
+                "采集记录缺少混合答题纸模板快照，无法定位主观题区域。");
+        }
+
+        RejectReparsePoint(templatePath, isDirectory: false);
+        AnswerSheetLayout layout;
+        try
+        {
+            layout = AnswerSheetLayout.FromJson(ReadTemplateSnapshotJson(templatePath));
+        }
+        catch (CaptureStorageException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
+        {
+            throw new CaptureStorageException(
+                "CAPTURE_TEMPLATE_INVALID",
+                "采集记录中的混合答题纸模板快照无效。",
+                exception);
+        }
+
+        if (layout.SchemaVersion != manifest.TemplateSchemaVersion
+            || layout.SchemaVersion != AnswerSheetLayout.MixedTemplateSchemaVersion
+            || layout.SubjectiveRegions.Count == 0
+            || layout.TemplateId != manifest.TemplateId
+            || layout.Title != manifest.TemplateTitle
+            || layout.QuestionCount != manifest.QuestionCount
+            || layout.OptionsPerQuestion != manifest.OptionsPerQuestion)
+        {
+            throw new CaptureStorageException(
+                "CAPTURE_TEMPLATE_MISMATCH",
+                "采集记录的模板快照与模板身份不一致。");
+        }
+
+        return layout;
+    }
+
     private static bool PathsEqual(string left, string right)
     {
         return string.Equals(
@@ -465,7 +540,17 @@ public sealed class CaptureStore
         return new CaptureStorageException("CAPTURE_HISTORY_INVALID", message, innerException);
     }
 
-    private static string ReadManifestJson(string path)
+    private static string ReadManifestJson(string path) => ReadBoundedUtf8Json(
+        path,
+        MaximumManifestBytes,
+        InvalidHistory("最近采集记录的模板关联信息大小无效。", null));
+
+    private static string ReadTemplateSnapshotJson(string path) => ReadBoundedUtf8Json(
+        path,
+        MaximumTemplateSnapshotBytes,
+        new CaptureStorageException("CAPTURE_TEMPLATE_INVALID", "混合答题纸模板快照大小无效。"));
+
+    private static string ReadBoundedUtf8Json(string path, int maximumBytes, CaptureStorageException sizeError)
     {
         using var stream = new FileStream(
             path,
@@ -474,12 +559,12 @@ public sealed class CaptureStore
             FileShare.Read,
             bufferSize: 16 * 1024,
             options: FileOptions.SequentialScan);
-        if (stream.Length <= 0 || stream.Length > MaximumManifestBytes)
+        if (stream.Length <= 0 || stream.Length > maximumBytes)
         {
-            throw InvalidHistory("最近采集记录的模板关联信息大小无效。", null);
+            throw sizeError;
         }
 
-        var buffer = new byte[MaximumManifestBytes + 1];
+        var buffer = new byte[maximumBytes + 1];
         var offset = 0;
         while (offset < buffer.Length)
         {
@@ -492,9 +577,9 @@ public sealed class CaptureStore
             offset += read;
         }
 
-        if (offset > MaximumManifestBytes || stream.ReadByte() != -1)
+        if (offset > maximumBytes || stream.ReadByte() != -1)
         {
-            throw InvalidHistory("最近采集记录的模板关联信息大小无效。", null);
+            throw sizeError;
         }
 
         var hasUtf8Bom = offset >= 3
@@ -717,6 +802,8 @@ public sealed class CaptureStore
         var imageFilePath = Path.Combine(stagingDirectory, imageName);
         var manifestFilePath = Path.Combine(stagingDirectory, "manifest.json");
         var manifestTempPath = Path.Combine(stagingDirectory, ".manifest.json.tmp");
+        var templateSnapshotPath = Path.Combine(stagingDirectory, "template.json");
+        var templateSnapshotTempPath = Path.Combine(stagingDirectory, ".template.json.tmp");
         var relativeImagePath = ToManifestPath(Path.Combine("captures", captureId, imageName));
         var committed = false;
 
@@ -724,6 +811,32 @@ public sealed class CaptureStore
         {
             Directory.CreateDirectory(stagingDirectory);
             await CopyOriginalAsync(sourceFile, image, imageFilePath, cancellationToken);
+
+            if (template.SchemaVersion == AnswerSheetLayout.MixedTemplateSchemaVersion)
+            {
+                if (template.TemplateJson is null
+                    || template.Layout is null
+                    || template.Layout.SchemaVersion != template.SchemaVersion
+                    || template.Layout.TemplateId != template.TemplateId
+                    || template.Layout.SubjectiveRegions.Count == 0)
+                {
+                    throw new CaptureValidationException(
+                        "CAPTURE_TEMPLATE_INVALID",
+                        "混合答题纸缺少经过验证的模板快照。");
+                }
+
+                await WriteTemplateSnapshotAsync(
+                    template.TemplateJson,
+                    templateSnapshotTempPath,
+                    templateSnapshotPath,
+                    cancellationToken);
+            }
+            else if (template.SchemaVersion != AnswerSheetLayout.TemplateSchemaVersion)
+            {
+                throw new CaptureValidationException(
+                    "CAPTURE_TEMPLATE_UNSUPPORTED",
+                    "答题纸模板版本不受支持。");
+            }
 
             var manifest = new CaptureManifest(
                 ManifestSchemaVersion,
@@ -754,7 +867,10 @@ public sealed class CaptureStore
                 manifest,
                 captureDirectory,
                 Path.Combine(captureDirectory, imageName),
-                Path.Combine(captureDirectory, "manifest.json"));
+                Path.Combine(captureDirectory, "manifest.json"))
+            {
+                TemplateLayout = template.Layout
+            };
         }
         catch (OperationCanceledException)
         {
@@ -864,6 +980,42 @@ public sealed class CaptureStore
             throw new CaptureStorageException(
                 "MANIFEST_WRITE_FAILED",
                 "图像记录保存失败，请重试。",
+                exception);
+        }
+    }
+
+    private static async Task WriteTemplateSnapshotAsync(
+        string templateJson,
+        string temporaryPath,
+        string finalPath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (Encoding.UTF8.GetByteCount(templateJson) is <= 0 or > MaximumTemplateSnapshotBytes)
+            {
+                throw new CaptureValidationException(
+                    "CAPTURE_TEMPLATE_INVALID",
+                    "混合答题纸模板快照大小无效。");
+            }
+
+            await File.WriteAllTextAsync(temporaryPath, templateJson, new UTF8Encoding(false), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporaryPath, finalPath);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (CaptureException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new CaptureStorageException(
+                "CAPTURE_TEMPLATE_WRITE_FAILED",
+                "混合答题纸模板快照保存失败。",
                 exception);
         }
     }
