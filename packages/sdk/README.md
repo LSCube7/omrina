@@ -81,11 +81,11 @@ await client.revokeGrant();
 - `getTemplates()` 返回 `TemplateSummary[]`，包含可用于预览或保存的 `svg` 字符串；`getDevices()` 返回 `DeviceDescriptor[]`。
 - `watchEvents()` 使用固定 WebSocket 路径并首先发送内存令牌。连接恢复时只读取 `GET /v1/tasks`，不会重建任务。用 `AbortSignal` 停止订阅。
 
-## 主观题人工批阅（M5-A）
+## 主观题模板与人工批阅
 
-主观题批阅针对当前授权上传或扫描的原图，由调用方人工指定整数像素区域。坐标以原图左上角为原点，不能直接使用预览缩放后的坐标。
+主观题区域在生成答题纸时定义。`createTemplateTask()` 的 `subjectiveRegions` 接收题号、满分和纸面毫米矩形 `rectangleMm`；题目 ID 由模板定义稳定生成。预览、打印和采集关联使用同一模板。批阅时依据采集保存的模板和页面定位提取题图，不再提交原图像素区域。
 
-- `createSubjectiveReviewTask()` 创建批阅文档，参数包含 `captureId` 和题目 ID、题号、满分、区域列表。
+- `createSubjectiveReviewTask()` 创建批阅文档，参数只有 `captureId`；题目、分值和区域取自该采集的模板。缺少主观题模板或定位失败会明确拒绝。
 - `createSubjectiveReadTask()` 读取批阅文档及当前版本。
 - `createSubjectiveGradeTask()` 提交草稿、确认或重置；包含 `reviewId`、`expectedVersion`、`reviewer` 和 `edits`，整批成功或整批失败。
 - `createSubjectiveExportTask()` 导出 JSON 或 CSV。
@@ -93,11 +93,30 @@ await client.revokeGrant();
 
 先保存草稿，再确认相同的分数和评语。修改已确认题目时，显式提交 `status: "draft"`；`status: "ungraded"` 重置评分。未全部确认时，最终主观题小计为 `null`。任务结果沿用 `TaskSnapshot.result` 的 `unknown` 边界，由宿主按具体操作核对。
 
-创建任务仍需提供幂等键。版本冲突后先重新读取并核对，SDK 不自动覆盖。批阅记录保存于本机，但新授权不会继承旧授权的记录。模板样式、自动定位、批阅界面及 OCR/AI 接入尚未交付，详细限制见 [M5 架构](../../docs/architecture/m5.md)。
+创建任务仍需提供幂等键。版本冲突后先重新读取并核对，SDK 不自动覆盖。批阅记录保存于本机，但新授权不会继承旧授权的记录。尚未发布的旧像素题区创建参数已移除；已有本地评分记录仍可重新打开。后续纸面样式、多页、真实纸张与界面验收及 OCR/AI 接入仍待推进，详细限制见 [M5 架构](../../docs/architecture/m5.md)。
+
+模板区域参数示例（选择题 4 道、主观题第 5 题）：
+
+```ts
+const task = await client.createTemplateTask({
+  idempotencyKey: "mixed-template-1",
+  parameters: {
+    title: "练习答题纸",
+    questionCount: 4,
+    optionsPerQuestion: 4,
+    subjectiveRegions: [{
+      questionNumber: 5,
+      maxScore: 10,
+      rectangleMm: { x: 14, y: 100, width: 180, height: 50 },
+    }],
+  },
+});
+// 上传或扫描该模板后，使用任务返回的 captureId 创建批阅记录。
+```
 
 ### 自动回环验证
 
-M5-A 的自动回环验证使用已编译的实际 Desktop 测试适配器：
+自动回环验证使用已编译的实际 Desktop 测试适配器：
 
 ```powershell
 dotnet build .\tests\m3-desktop\Omrina.M3.Desktop.Tests.csproj --no-restore

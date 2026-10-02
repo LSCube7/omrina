@@ -232,6 +232,24 @@ Windows 开发包尚未通过隐私检查，正式 Release、干净机器安装�
 - 最终 `git diff --check` 通过，仅 Git 行尾转换提示；UI 源码的本机路径与凭据检查未发现问题。
 - 本轮只使用临时合成数据和缓存依赖，未读取默认用户数据目录、扫描设备或用户 `design.png`；没有重新打包或上传二进制。真实 UI 操作、系统缩放和三平台实机测试不计为通过。
 
+## 2026-10-03 M5-C 生成时定义题区
+
+本阶段按用户要求把区域定义移到答题纸生成流程：纸面毫米题区参与模板身份，批阅创建仅引用采集记录。保持旧选择题 schema1 的身份和读取路径，新增混合模板 schema2；不修改真实采集或已有评分数据。
+
+- `dotnet build src/Omrina.Core/Omrina.Core.csproj --no-restore`：0 警告、0 错误。
+- `dotnet run --project tests/core/Omrina.Core.Tests.csproj --no-restore`：最终 12 组通过。新增覆盖旧 schema1 身份与 SVG 保持、schema2 严格 JSON 往返和篡改拒绝、题号与区域冲突、描边相碰、四方向及透视映射、选择题需复核但页面定位独立合格、缺失定位块拒绝、取消，以及定位结果与原图尺寸绑定。
+- SDK 首轮 `typecheck` 与 `node --test tests/sdk/m3.test.mjs`：9/9 通过；模板题区使用 `rectangleMm`，题号范围与 Core 的 Int32 一致，批阅创建拒绝旧像素题区参数。最终产物与端到端结果见下文。
+- `dotnet build src/Omrina.Platform/Omrina.Platform.csproj --no-restore`：四角透视裁图最终构建 0 警告、0 错误。`SubjectivePerspectiveRegression.RunAsync()` 已挂接并在 M3 runner 中通过，覆盖 PNG/JPEG 四方向透视像素、非法区域、取消和解码槽释放。
+- 跨模块只读审查确认模板与原图同 staging 提交、旧 schema1 身份兼容和评分关联不可变；发现映射重读需要拒绝非有限变换角点，并核对校正尺寸与原四角推导一致。已补充有限值、投影分母同号且非零、凸性、边界框与 Core 推导尺寸校验，窄复查通过。创建先定位和映射再保存，定位失败不创建记录；本地和网页新题图均使用四角校正，旧无映射文档保留像素裁图路径。
+- 首次整链 M3 编译因测试项目未链接新增 `SubjectiveCaptureTemplateMapper.cs` 出现 8 个错误、0 警告；补充链接后 `dotnet build --no-restore tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj` 0 警告、0 错误，`dotnet run --project tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj --no-restore` 通过，覆盖 schema2 采集快照、页面定位映射、旧像素评分记录读/改/导出、本地与网页授权归属、版本竞争、持久化及 UI 输入解析。没有删除功能或放宽类型检查。
+- Windows `net10.0-windows10.0.26100.0` / `win-x64` 与 Uno `net10.0-desktop` 的离线隔离构建均退出码 0、0 错误，各有 2 条 `NU1900`。使用缓存资产和每项目独立 intermediate/output，产物在忽略目录 `artifacts/m5b-ui-final-5aeb1f8aaef94a1987567ae52fa8ee40/output/Omrina.Desktop/`；没有启动应用。该警告不计为漏洞审计通过，真实 UI、高 DPI、打印与设备测试仍未运行。
+- SDK `npm --prefix packages/sdk run typecheck`、`build` 与 `node --test tests/sdk/*.test.mjs` 最终通过，17/17。
+- `node tests/integration/m5-sdk-e2e.mjs tests/m3-desktop/bin/Debug/net10.0/Omrina.M3.Desktop.Tests.dll` 完整通过。使用 schema2 第 11/12 题区域和 420×594 合成定位页，经真实 HTTP 验证模板生成、上传、仅传 `captureId` 创建、区域坐标与校正 PNG 尺寸、草稿/确认/版本冲突/修订后重确认、JSON/CSV、跨授权题图 404 与批阅读取/改分拒绝、撤销后 401。首跑脚本遗漏数组校验 helper，随后错误要求稳定 Guid 的 RFC 版本位；已补 helper 并按 Core 的普通 Guid D 格式验证后通过，没有放宽授权与评分断言。
+- 最后 UI 窄审发现创建期间可重新读取旧记录，以及采集参数变更会清空主观区域来源。已补创建/重读互斥，并保留最后模板布局、只标记参数过期；重新确认前仍禁止导入/扫描。修复后仅重跑受影响桌面构建。
+- 上述两处 UI 修复窄复查通过。最终 Windows/Uno 构建在第二个唯一目录 `artifacts/m5b-ui-final-90fce54292384377a4bc4327d7af05e7/` 再次退出码 0、0 错误，仍各有 2 条 `NU1900`；未重复与纯 UI 状态修复无关的后端测试。
+- `node tests/sdk-package/consumer-smoke.mjs` 通过：实际 npm tarball 文件清单、严格 TypeScript 声明消费和 Node 实际导入均通过；产物在忽略目录 `artifacts/sdk-package-consumer-H7lG1O/`。未联网安装或发布包。
+- M3 回归明确拒绝旧无主观题模板采集的新建请求（`SUBJECTIVE_TEMPLATE_REQUIRED`）和客户端自带像素题区（`INVALID_PARAMETERS`）；已有像素评分文档仍可读、改、导出。此轮只使用合成图和临时数据，没有操作真实采集或用户 `design.png`，未重新打包桌面分发产物。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
