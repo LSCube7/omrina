@@ -186,6 +186,19 @@ Windows 开发包尚未通过隐私检查，正式 Release、干净机器安装�
 
 `scripts/package-windows-dev.ps1` 已通过 PowerShell 语法解析和只读审查。`-TestPrivacyScanner` 合成自测通过，覆盖隐藏目录路径命中、无路径时空结果与本次暂存清理；对已有本轮发布探测目录的实际审计返回退出码 1，错误为 `PRIVACY_PATH_EMBEDDED:Omrina.Desktop.dll`，未输出绝对路径、未创建最终包，暂存残留为 0。探测产物的 16 项关键运行文件齐全，runtimeconfig 要求 `Microsoft.NETCore.App` 与 `Microsoft.AspNetCore.App` 10.0.0。脚本默认整包发布到成功产物的完整路径尚未运行验证；以上只证明扫描门禁和清理行为，不能算 Windows 包验收通过。
 
+## 2026-10-02 M4 Release 开发包后续验证
+
+本节是上述初次分发准备之后的结果。Windows Release 构建与产物路径残留阻塞已解除；M4 的安装、签名及实机验收仍未完成。
+
+- 确认 `UNOB0019` 根因是 Release 发布使用了 Debug 依赖图。Uno SDK 已按优化配置排除开发资产，修复不关闭优化、不修改缓存库或项目依赖。
+- 脚本现在以 `CustomAfterDirectoryBuildProps` 为各项目隔离资产、中间文件和输出，用唯一的空本地源与已有 `.tools/nuget-packages` 缓存恢复 Release，再以同配置 `--no-restore` 发布。六项目资产的归属和来源、合法框架/运行标识以及开发组件导入排除检查通过；标准 Desktop `obj` 仍保留原 Debug DevServer 导入，未覆盖默认开发输出。
+- 首轮检查曾错误要求库项目具有桌面运行目标、以及桌面恢复图只能包含单个目标，已按各项目实际声明修正。安全诊断随后发现恢复命令的全局 Windows `TargetFramework` 覆盖了库自身的 `net10.0`；移除该恢复参数后框架错配检查通过。发布仍明确选择 Windows 目标与 `win-x64`。这些失败均在发布前停止并清理暂存，未算为通过。
+- 实际编译曾报 `WMC9999`。脱敏错误说明及只读 MSBuild item 检查确认，旧 `tmp/m2-final-check` 构建中的主题 XAML 和生成 C# 被当成 `Page`/`Compile` 输入。临时构建配置排除生成目录后，四类项目条目不再含该旧输出；没有删除或读取用户扫描数据，也没有删除旧目录。
+- `pwsh -NoProfile -File scripts/package-windows-dev.ps1` 完整执行退出码 0，优化 Release 的恢复、发布、关键文件、运行框架、相对路径清单及完整产物隐私扫描全部通过。唯一包位于忽略目录 `artifacts/windows-dev/omrina-windows-x64-dev-release-87c241feccce4d27a91a804692824458/`，未上传二进制或发布版本。成功构建日志随暂存清理，无法还原警告数量，因此不声称 0 警告。
+- 包内 README 的框架列表曾因数组拼接显示 `System.Object[]`；已修正生成逻辑，仅重写本轮包的说明与清单，未重复编译。最终为 418 个文件、197,790,457 字节，417 项 SHA-256 全部匹配，0 PDB、0 暂存残留。修正后的说明内容与本机路径检查通过。
+- 包内 `app/Omrina.Desktop.runtimeconfig.json` 请求 `Microsoft.NETCore.App 10.0.0` 与 `Microsoft.AspNetCore.App 10.0.0`；Windows App SDK payload 随包提供，.NET 仍依赖目标机提供兼容共享框架。
+- PowerShell 解析、隐私扫描合成自测、诊断脱敏合成自测和 diff 检查通过。最终追加的 `WMC9999` 回归确认有用说明保留，工作区、drive/UNC 路径及多种敏感字段的假值被遮蔽；仅重跑解析与该自测，未重复发布。没有改动业务代码，因此没有重复运行已通过的 Core、SDK 和 HTTP/WebSocket 回归。未启动该新包进行 UI/运行验收，未扫描或打印。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。

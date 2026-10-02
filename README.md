@@ -85,7 +85,7 @@ SDK 可以生成模板、上传关联的 PNG/JPEG、选择设备扫描，并通�
 
 ## M4：分发准备
 
-已加入实际 npm tarball 的消费者检查，验证包入口的 JavaScript 导入和严格 TypeScript 声明消费。Windows 分发先准备离线开发验证包；正式 Release 配置、安装器、签名和干净机器验收尚未完成。范围与验收矩阵见 [M4 计划](docs/architecture/m4.md)，实际通过项与阻塞见 [验证记录](docs/development/validation.md)。
+已加入实际 npm tarball 的消费者检查，验证包入口的 JavaScript 导入和严格 TypeScript 声明消费。Windows x64 的优化 Release 开发验证包已通过离线恢复、发布、运行文件、隐私及哈希检查；安装器、签名和干净机器运行尚未验收。范围与验收矩阵见 [M4 计划](docs/architecture/m4.md)，实际通过项与剩余限制见 [验证记录](docs/development/validation.md)。
 
 ```powershell
 node .\tests\sdk-package\consumer-smoke.mjs
