@@ -9,7 +9,8 @@ namespace Omrina.Desktop;
 
 public sealed partial class MainWindow : Window
 {
-    private readonly LoopbackHealthServer _healthServer = new();
+    private readonly LoopbackHealthServer _healthServer;
+    private readonly DesktopLocalAgentOperations _agentOperations;
     private readonly CaptureStore _captureStore = new();
     private readonly IScannerService _scannerService;
     private readonly IAnswerSheetRecognitionService _recognitionService;
@@ -30,11 +31,19 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
 
         _statusPage = new StatusPage();
-        _settingsPage = new SettingsPage();
         _aboutPage = new AboutPage();
         _fileDialogService = DesktopPlatformFactory.CreateFileDialogs(this);
-        _scannerService = DesktopPlatformFactory.CreateScanner(_captureStore.RootDirectory);
+        _scannerService = new SerializedScannerService(
+            DesktopPlatformFactory.CreateScanner(_captureStore.RootDirectory));
         _recognitionService = new SkiaAnswerSheetRecognitionService();
+        _agentOperations = new DesktopLocalAgentOperations(
+            _captureStore,
+            _scannerService,
+            _recognitionService,
+            DesktopPlatformFactory.DeleteTemporaryScanFile);
+        _healthServer = new LoopbackHealthServer(_agentOperations);
+        _healthServer.GrantRevoked += _agentOperations.ForgetGrant;
+        _settingsPage = new SettingsPage(_healthServer, DispatcherQueue);
         _printController = CreatePrintController();
         _templatePage = new TemplatePage(
             SaveSvgAsync,
@@ -417,6 +426,7 @@ public sealed partial class MainWindow : Window
         finally
         {
             _printController?.Dispose();
+            _healthServer.GrantRevoked -= _agentOperations.ForgetGrant;
             await _scannerService.DisposeAsync();
         }
     }

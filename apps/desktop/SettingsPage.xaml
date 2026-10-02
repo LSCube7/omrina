@@ -6,19 +6,37 @@
         <StackPanel Padding="24" Spacing="16">
             <StackPanel Spacing="4">
                 <TextBlock Text="设置" Style="{StaticResource TitleTextBlockStyle}" />
-                <TextBlock Text="查看当前应用范围和本地数据策略。" TextWrapping="Wrap" />
+                <TextBlock Text="管理网站授权、设备访问和本地数据。" TextWrapping="Wrap" />
             </StackPanel>
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="12">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="网站接入" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="网站只能提出配对申请。你在此允许后，才会显示一次性配对码；允许会开放下列本地功能。" TextWrapping="Wrap" />
+                        <TextBlock Text="申请功能：生成模板、上传或扫描答题纸、识别、评分、人工复核，以及导出 JSON / CSV。" TextWrapping="Wrap" />
+                        <TextBlock x:Name="AuthorizationStatusText" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="待处理的网站申请" FontWeight="SemiBold" />
+                        <StackPanel x:Name="PairingListPanel" Spacing="8" />
+                    </StackPanel>
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="当前授权" FontWeight="SemiBold" />
+                        <StackPanel x:Name="GrantListPanel" Spacing="8" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
             <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="本地数据" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock Text="采集原图和 manifest 保存在应用本地数据目录，并按每次采集建立独立记录。" TextWrapping="Wrap" />
+                    <TextBlock Text="采集原图和模板关联信息保存在应用本地数据目录，并按每次采集建立独立记录。" TextWrapping="Wrap" />
                     <TextBlock Text="文件选择器取消时不会创建采集记录。" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
             <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="设备访问" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock Text="只有在采集页明确刷新设备并发起操作时，才会访问扫描设备。" TextWrapping="Wrap" />
+                    <TextBlock Text="你可以在采集页或已获授权的网站发起扫描；扫描将使用连接到此设备的扫描仪。" TextWrapping="Wrap" />
                     <TextBlock Text="当前扫描流程固定为平板、A4 和单页。" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
