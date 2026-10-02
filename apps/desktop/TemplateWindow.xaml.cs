@@ -24,6 +24,7 @@ public sealed partial class TemplatePage : Page
     private AnswerSheetLayout? _layout;
     private bool _previewMatchesInputs;
     private bool _printUiLocked;
+    private bool _isInitializing = true;
 
     public TemplatePage()
         : this(null, null, null)
@@ -36,6 +37,7 @@ public sealed partial class TemplatePage : Page
         Func<bool>? isPrintBusy)
     {
         InitializeComponent();
+        _isInitializing = false;
         _saveSvgAsync = saveSvgAsync;
         _printAsync = printAsync;
         _isPrintBusy = isPrintBusy;
@@ -71,6 +73,11 @@ public sealed partial class TemplatePage : Page
 
     private void NumberBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
+        if (_isInitializing)
+        {
+            return;
+        }
+
         if (sender == QuestionCountBox && _subjectiveRegions.Count == 0)
         {
             SubjectiveQuestionNumberBox.Text = GetSuggestedQuestionNumber();

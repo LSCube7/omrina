@@ -270,3 +270,11 @@ SDK 单元测试使用模拟响应，只证明客户端行为；M3 的真实 HTT
 执行 `node --test tests/sdk/*.test.mjs`，7 项通过。覆盖回环端点限制、固定健康检查路径、重定向与凭据策略、请求超时、读取响应体超时、调用方取消、HTTP / 协议错误及定时器上限。
 
 当时使用 Node.js 直接擦除 TypeScript 类型运行测试，未执行 TypeScript 编译器类型检查或 npm 产物构建。M3 新增正式编译，结果按后续记录解释。
+
+## 2026-10-03 Windows 开发包启动修复
+
+- 用户报告的旧开发包启动后无窗口或闪退。对应的 Application Error 1000 记录指向 `Microsoft.UI.Xaml.dll` 3.2.3.0，异常码 `0xc000027b`；没有取得托管异常堆栈。代码检查发现两个 XAML 初始化期事件可能在后续控件连接前访问控件：主观题评分输入的 `TextChanged`，以及模板题数的 `ValueChanged`。
+- 在 `SubjectiveReviewPage` 与 `TemplateWindow` 中让初始化期事件处理器等待 `InitializeComponent()` 完成，再显式刷新状态。未吞掉异常，也未加入诊断日志。
+- `pwsh -NoProfile -File .\scripts\package-windows-dev.ps1` 退出码 0，生成 `artifacts/windows-dev/omrina-windows-x64-dev-release-fab3a81e2cc64a7ab72357f3242f75f2/`。启动其中的 `app/Omrina.Desktop.exe` 后，进程至少运行 13 秒并创建了窗口句柄，随后通过关闭主窗口正常退出；该次启动没有新的匹配崩溃事件，标准输出与错误输出均为空。这支持初始化重入修复方向，但未捕获旧异常的精确堆栈。
+- 对包内 `SHA256SUMS.txt` 的 417 项逐一重新计算并全部匹配；包共 418 个文件、无 PDB。runtimeconfig 要求 `Microsoft.NETCore.App` 和 `Microsoft.AspNetCore.App` 10.0.0，因此此包是 framework-dependent，需要安装相应 .NET 10 运行时；本机已有 10.0.12。打包脚本未保留本次构建日志，警告数量无法确认。
+- 这只是启动存活检查，不代表完整 UI 交互验收。未操作扫描、打印或网络功能，也未查看采集图像或采集内容。

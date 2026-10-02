@@ -104,6 +104,7 @@ public sealed partial class SubjectiveReviewPage : Page
     private bool _isMutatingReview;
     private bool _isReadingReview;
     private bool _isExporting;
+    private bool _isInitializing = true;
     private Task? _shutdownTask;
 
     public SubjectiveReviewPage()
@@ -123,6 +124,7 @@ public sealed partial class SubjectiveReviewPage : Page
         ReviewPicker.ItemsSource = _reviewItems;
         ReviewPicker.DisplayMemberPath = nameof(SubjectiveReviewPickerItem.DisplayText);
         SubjectiveQuestionList.ItemsSource = _questionItems;
+        _isInitializing = false;
         UpdateActionStates();
         if (_service is null)
         {
@@ -1090,6 +1092,11 @@ public sealed partial class SubjectiveReviewPage : Page
 
     private void UpdateGradeActions()
     {
+        if (_isInitializing)
+        {
+            return;
+        }
+
         var question = _selectedQuestion;
         var canEdit = _service is not null
             && !_isClosed
