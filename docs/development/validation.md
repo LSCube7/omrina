@@ -217,6 +217,21 @@ Windows 开发包尚未通过隐私检查，正式 Release、干净机器安装�
 - 本轮业务验证只使用本地合成测试与已有缓存，未新增依赖、调用扫描设备或读取真实采集图像。SDK 和桌面改动已做最终窄审查，修复后没有新增问题；未运行真实桌面交互、打印、扫描或三平台实机验收。
 - 随后收紧无效区域的错误映射并增加断言，仅重跑受影响的 `dotnet run --no-restore --project tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj`，最终通过；未重复已通过的其他检查。
 
+## 2026-10-03 M5-B 本地批阅与记录重开
+
+本阶段沿用现有 NavigationView / TitleBar，新增本地批阅页及可信本地服务，不变更选择题模板或 SDK 协议，不新增依赖。采集与批阅列表按资源 ID 分页，并非按时间排序；损坏记录占用每页额度且返回诊断，仍可继续加载下一页。
+
+- `dotnet build --no-restore tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj`：0 警告、0 错误。
+- `dotnet run --project tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj --no-restore`：通过。新增覆盖跨存储实例的本地/网页版本竞争只允许一方成功、保留原授权归属、本地归属与网页隔离、写入失败与提交前取消不改版本、重启恢复历史和裁图、缺失原图仍读取/导出评分、损坏记录有界分页与续页、非法游标及路径拒绝；同时运行输入解析回归。
+- `node tests/integration/m5-sdk-e2e.mjs tests/m3-desktop/bin/Debug/net10.0/Omrina.M3.Desktop.Tests.dll`：新 DLL 的 18 个阶段全部通过，覆盖配对、合成图上传、草稿/确认、版本冲突、PNG 尺寸、JSON/CSV、授权隔离和撤销。自动批准仅用于测试 harness，不增加生产自动授权入口。
+- 只读审查发现损坏记录未占分页额度，可能导致一次读取过多记录；已修复并补充临时目录内损坏采集清单与批阅记录回归。每页最多检查 50 条候选，纯诊断页也可返回续页游标。
+- 界面审查发现重新加载可能覆盖请求期间的新输入、保存与重新加载并发可能显示旧版本，以及关闭窗口取消各页的时机过晚；已分别改为应用响应时保留最新输入、读写互斥和同时取消各页，窄复查通过。复查还发现创建与评分共用取消源，已补充按钮和操作入口双向互斥，并确认评分入口检查创建状态。
+- 首次 Windows 隔离构建发现存储分页 DTO 与新 UI 页在同一命名空间重名；将内部 DTO 更名为 `SubjectiveReviewStorePage`，不改动 SDK 协议。更名后重新执行 M3 `build --no-restore`（0 警告、0 错误）和 `run --no-build`，回归通过；纯内部类型更名未重复网络 E2E。
+- Uno Desktop 首轮编译提示 `Uno0001`：`DataWriter.DetachStream()` 尚未实现。改为在 `BitmapImage.SetSourceAsync` 完成前保持写入器与内存流存活，并移除该调用；最终两个目标不再出现该警告。
+- Windows `net10.0-windows10.0.26100.0` / `win-x64` 与 Uno `net10.0-desktop` 的 Debug 隔离构建最终均退出码 0，分别 1 条 `NU1900`、0 错误。使用 `--no-restore`、独立输出、临时 `CustomAfterDirectoryBuildProps` 和 M4 已使用的 HotDesign/MCP 禁用参数，排除旧 `tmp` 生成文件，不修改默认资产或删除旧输出。产物位于忽略目录 `artifacts/m5b-ui-c48ab728c6e04b4fbddd5f598089850e/{windows,uno}`。`NU1900` 是缓存中的离线漏洞数据源警告，不计为漏洞审计通过；默认开发工具与热重载未验收。
+- 最终 `git diff --check` 通过，仅 Git 行尾转换提示；UI 源码的本机路径与凭据检查未发现问题。
+- 本轮只使用临时合成数据和缓存依赖，未读取默认用户数据目录、扫描设备或用户 `design.png`；没有重新打包或上传二进制。真实 UI 操作、系统缩放和三平台实机测试不计为通过。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
