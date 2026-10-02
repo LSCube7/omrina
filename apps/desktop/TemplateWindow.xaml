@@ -18,6 +18,87 @@
                 <NumberBox x:Name="OptionsPerQuestionBox" Header="每题选项数" Value="4" Minimum="2" Maximum="6" SpinButtonPlacementMode="Inline" ValueChanged="NumberBox_ValueChanged" automation:AutomationProperties.Name="每题选项数" />
             </StackPanel>
 
+            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="主观题区域（可选）" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock
+                        Text="在 A4 纸面上用毫米定义题目框。坐标原点在左上角；题号需排在选择题之后，区域不能重叠。生成预览后，保存和打印都使用同一版式。"
+                        TextWrapping="Wrap" />
+                    <Grid ColumnSpacing="12" RowSpacing="8" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto">
+                        <TextBox
+                            x:Name="SubjectiveQuestionNumberBox"
+                            Header="主观题题号"
+                            Text="21"
+                            MaxLength="10"
+                            TextChanged="SubjectiveRegionInput_TextChanged"
+                            automation:AutomationProperties.Name="主观题题号" />
+                        <TextBox
+                            x:Name="SubjectiveMaximumScoreBox"
+                            Grid.Column="1"
+                            Header="满分"
+                            Text="10"
+                            MaxLength="32"
+                            TextChanged="SubjectiveRegionInput_TextChanged"
+                            automation:AutomationProperties.Name="主观题满分" />
+                        <TextBox
+                            x:Name="SubjectiveRegionXBox"
+                            Grid.Row="1"
+                            Header="左上角 X（毫米）"
+                            PlaceholderText="例如 12.5"
+                            MaxLength="32"
+                            TextChanged="SubjectiveRegionInput_TextChanged"
+                            automation:AutomationProperties.Name="主观题区域左上角 X 毫米" />
+                        <TextBox
+                            x:Name="SubjectiveRegionYBox"
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            Header="左上角 Y（毫米）"
+                            PlaceholderText="例如 100"
+                            MaxLength="32"
+                            TextChanged="SubjectiveRegionInput_TextChanged"
+                            automation:AutomationProperties.Name="主观题区域左上角 Y 毫米" />
+                        <TextBox
+                            x:Name="SubjectiveRegionWidthBox"
+                            Grid.Row="2"
+                            Header="宽度（毫米）"
+                            PlaceholderText="至少 40"
+                            MaxLength="32"
+                            TextChanged="SubjectiveRegionInput_TextChanged"
+                            automation:AutomationProperties.Name="主观题区域宽度毫米" />
+                        <TextBox
+                            x:Name="SubjectiveRegionHeightBox"
+                            Grid.Row="2"
+                            Grid.Column="1"
+                            Header="高度（毫米）"
+                            PlaceholderText="至少 10"
+                            MaxLength="32"
+                            TextChanged="SubjectiveRegionInput_TextChanged"
+                            automation:AutomationProperties.Name="主观题区域高度毫米" />
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="AddSubjectiveRegionButton" Click="AddSubjectiveRegionButton_Click" automation:AutomationProperties.Name="添加主观题区域">
+                            <TextBlock Text="添加主观题区域" />
+                        </Button>
+                        <Button x:Name="RemoveSubjectiveRegionButton" Click="RemoveSubjectiveRegionButton_Click" IsEnabled="False" automation:AutomationProperties.Name="移除所选主观题区域">
+                            <TextBlock Text="移除所选区域" />
+                        </Button>
+                    </StackPanel>
+                    <ListView
+                        x:Name="SubjectiveRegionList"
+                        SelectionMode="Single"
+                        SelectionChanged="SubjectiveRegionList_SelectionChanged"
+                        MaxHeight="220"
+                        automation:AutomationProperties.Name="模板主观题区域列表">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock x:Name="SubjectiveRegionStatusText" Text="尚未添加主观题区域。" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button x:Name="GenerateButton" Click="GenerateButton_Click">
                     <TextBlock Text="生成预览" />

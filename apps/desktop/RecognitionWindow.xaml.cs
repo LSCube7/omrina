@@ -878,7 +878,7 @@ public sealed partial class RecognitionPage : Page
     {
         layout = null;
         var manifest = capture.Manifest;
-        if (manifest.TemplateSchemaVersion != AnswerSheetLayout.TemplateSchemaVersion)
+        if (manifest.TemplateSchemaVersion is not (AnswerSheetLayout.TemplateSchemaVersion or AnswerSheetLayout.MixedTemplateSchemaVersion))
         {
             message = "关联模板版本与当前支持版本不一致。";
             return false;
@@ -892,11 +892,13 @@ public sealed partial class RecognitionPage : Page
 
         try
         {
-            var resolved = AnswerSheetLayout.Create(
-                manifest.TemplateTitle,
-                manifest.QuestionCount,
-                manifest.OptionsPerQuestion);
-            if (!string.Equals(resolved.TemplateId, manifest.TemplateId, StringComparison.Ordinal))
+            var resolved = capture.TemplateLayout;
+            if (resolved is null
+                || resolved.SchemaVersion != manifest.TemplateSchemaVersion
+                || !string.Equals(resolved.TemplateId, manifest.TemplateId, StringComparison.Ordinal)
+                || !string.Equals(resolved.Title, manifest.TemplateTitle, StringComparison.Ordinal)
+                || resolved.QuestionCount != manifest.QuestionCount
+                || resolved.OptionsPerQuestion != manifest.OptionsPerQuestion)
             {
                 message = "关联模板信息与采集记录不一致，已停止识别。";
                 return false;

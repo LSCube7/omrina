@@ -37,6 +37,26 @@ internal static class SubjectiveReviewInputParser
             && maximumScore <= SubjectiveRegionDefinition.MaximumPointsLimit;
     }
 
+    public static bool TryParseMillimetres(
+        string? text,
+        double minimum,
+        double maximum,
+        CultureInfo culture,
+        out double value)
+    {
+        value = default;
+        if (minimum > maximum
+            || !decimal.TryParse(text, DecimalStyles, culture, out var parsed)
+            || parsed < (decimal)minimum
+            || parsed > (decimal)maximum)
+        {
+            return false;
+        }
+
+        value = (double)parsed;
+        return double.IsFinite(value);
+    }
+
     public static bool TryParseScore(
         string? text,
         decimal maximumScore,

@@ -11,9 +11,17 @@ namespace Omrina.Desktop;
 
 public sealed record SubjectiveCapturePickerItem(LocalSubjectiveCaptureSummary Summary)
 {
-    public string DisplayText =>
-        $"{Summary.TemplateTitle} · {Summary.PixelWidth}×{Summary.PixelHeight} · "
-        + $"{Summary.CreatedAtUtc.ToLocalTime():g} · {ShortId(Summary.CaptureId)}";
+    public string DisplayText
+    {
+        get
+        {
+            var regionSummary = Summary.SubjectiveQuestionCount > 0
+                ? $"{Summary.SubjectiveQuestionCount} 个主观题区域"
+                : "无主观题区域";
+            return $"{Summary.TemplateTitle} · {regionSummary} · {Summary.PixelWidth}×{Summary.PixelHeight} · "
+                + $"{Summary.CreatedAtUtc.ToLocalTime():g} · {ShortId(Summary.CaptureId)}";
+        }
+    }
 
     private static string ShortId(string value) => value.Length <= 8 ? value : value[..8];
 }
@@ -31,18 +39,6 @@ public sealed record SubjectiveReviewPickerItem(LocalSubjectiveReviewSummary Sum
             return $"{Summary.CreatedAtUtc.ToLocalTime():g} · {Summary.QuestionCount} 题 · v{Summary.Version} · {state} · {id[..8]}";
         }
     }
-}
-
-public sealed record SubjectiveRegionDraftItem(SubjectiveRegionDefinition Definition)
-{
-    public string DisplayText => SubjectiveReviewInputParser.FormatRegionDefinition(
-        Definition.QuestionNumber,
-        Definition.MaximumPoints,
-        Definition.Rectangle.X,
-        Definition.Rectangle.Y,
-        Definition.Rectangle.Width,
-        Definition.Rectangle.Height,
-        CultureInfo.CurrentCulture);
 }
 
 public sealed record SubjectiveQuestionPickerItem(SubjectiveGradingQuestion Question)
@@ -73,9 +69,7 @@ public sealed partial class SubjectiveReviewPage : Page
     private readonly Func<string, string, string, CancellationToken, Task<FileSaveResult>>? _saveTextAsync;
     private readonly ObservableCollection<SubjectiveCapturePickerItem> _captureItems = [];
     private readonly ObservableCollection<SubjectiveReviewPickerItem> _reviewItems = [];
-    private readonly ObservableCollection<SubjectiveRegionDraftItem> _regionItems = [];
     private readonly ObservableCollection<SubjectiveQuestionPickerItem> _questionItems = [];
-    private readonly List<SubjectiveRegionDefinition> _pendingRegions = [];
     private readonly AsyncSelectionGeneration _captureImageGeneration = new();
     private readonly AsyncSelectionGeneration _questionImageGeneration = new();
     private readonly AsyncSelectionGeneration _captureListGeneration = new();
@@ -128,7 +122,6 @@ public sealed partial class SubjectiveReviewPage : Page
         CapturePicker.DisplayMemberPath = nameof(SubjectiveCapturePickerItem.DisplayText);
         ReviewPicker.ItemsSource = _reviewItems;
         ReviewPicker.DisplayMemberPath = nameof(SubjectiveReviewPickerItem.DisplayText);
-        RegionList.ItemsSource = _regionItems;
         SubjectiveQuestionList.ItemsSource = _questionItems;
         UpdateActionStates();
         if (_service is null)
@@ -229,20 +222,20 @@ public sealed partial class SubjectiveReviewPage : Page
         }
 
         _selectedCapture = (CapturePicker.SelectedItem as SubjectiveCapturePickerItem)?.Summary;
-        _pendingRegions.Clear();
-        RefreshRegionList();
         if (_selectedCapture is null)
         {
             _captureImageGeneration.Invalidate();
             CancelRequest(_captureImageCancellation);
             OriginalCaptureImage.Source = null;
             OriginalCaptureSummaryText.Text = "选择采集记录后显示图像信息。";
+            CaptureTemplateStatusText.Text = "选择采集记录后检查关联的主观题区域。";
             _isCaptureImageAvailable = false;
             UpdateActionStates();
             return;
         }
 
         var capture = _selectedCapture;
+        UpdateCaptureTemplateStatus(capture);
         _ = RunTrackedOperationAsync(
             "原图预览失败",
             () => LoadCaptureImageAsync(capture),
@@ -268,114 +261,15 @@ public sealed partial class SubjectiveReviewPage : Page
                 && selected.Summary.ReviewId == item.Summary.ReviewId);
     }
 
-    private void AddRegionButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_selectedCapture is null || !_isCaptureImageAvailable)
-        {
-            ShowInfo("请先载入原图预览，再添加题目区域。", InfoBarSeverity.Warning);
-            return;
-        }
-
-        if (_pendingRegions.Count >= SubjectiveGradingSnapshot.MaximumQuestionCount)
-        {
-            ShowInfo("每页最多添加 64 个题目区域。", InfoBarSeverity.Warning);
-            return;
-        }
-
-        if (!SubjectiveReviewInputParser.TryParseInteger(
-                RegionQuestionNumberBox.Text,
-                1,
-                int.MaxValue,
-                out var questionNumber))
-        {
-            ShowInfo("题号必须是正整数。", InfoBarSeverity.Warning);
-            RegionQuestionNumberBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (_pendingRegions.Any(region => region.QuestionNumber == questionNumber))
-        {
-            ShowInfo("题号已存在，请输入另一个题号。", InfoBarSeverity.Warning);
-            RegionQuestionNumberBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (!SubjectiveReviewInputParser.TryParseMaximumScore(
-                RegionMaximumScoreBox.Text,
-                CultureInfo.CurrentCulture,
-                out var maximumScore))
-        {
-            ShowInfo("满分必须大于 0 且不超过 1,000,000；小数请使用当前语言的分隔符。", InfoBarSeverity.Warning);
-            RegionMaximumScoreBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (!SubjectiveReviewInputParser.TryParseInteger(RegionXBox.Text, 0, int.MaxValue, out var x)
-            || !SubjectiveReviewInputParser.TryParseInteger(RegionYBox.Text, 0, int.MaxValue, out var y)
-            || !SubjectiveReviewInputParser.TryParseInteger(RegionWidthBox.Text, 1, int.MaxValue, out var width)
-            || !SubjectiveReviewInputParser.TryParseInteger(RegionHeightBox.Text, 1, int.MaxValue, out var height))
-        {
-            ShowInfo("区域坐标必须是非负整数，宽度和高度必须是正整数。", InfoBarSeverity.Warning);
-            RegionXBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (_selectedCapture.PixelWidth > int.MaxValue || _selectedCapture.PixelHeight > int.MaxValue)
-        {
-            ShowInfo("原图尺寸超出可支持的像素范围。错误代码：CAPTURE_DIMENSIONS_UNSUPPORTED", InfoBarSeverity.Error);
-            return;
-        }
-
-        var imageWidth = (int)_selectedCapture.PixelWidth;
-        var imageHeight = (int)_selectedCapture.PixelHeight;
-        if (!SubjectiveReviewInputParser.IsRegionWithinImage(x, y, width, height, imageWidth, imageHeight))
-        {
-            ShowInfo(
-                $"区域必须位于原图 {imageWidth}×{imageHeight} 像素范围内。",
-                InfoBarSeverity.Warning);
-            return;
-        }
-
-        try
-        {
-            var rectangle = SubjectivePixelRectangle.Create(x, y, width, height, imageWidth, imageHeight);
-            var definition = SubjectiveRegionDefinition.Create(
-                Guid.NewGuid(),
-                questionNumber,
-                rectangle,
-                maximumScore,
-                imageWidth,
-                imageHeight);
-            _pendingRegions.Add(definition);
-            RefreshRegionList();
-            ShowInfo("题目区域已加入待创建列表。", InfoBarSeverity.Success);
-        }
-        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
-        {
-            ShowInfo(
-                $"题目区域无效，请检查题号、满分和像素范围。错误代码：INVALID_REGION（{exception.GetType().Name}）。",
-                InfoBarSeverity.Error);
-        }
-    }
-
-    private void RemoveRegionButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (RegionList.SelectedItem is not SubjectiveRegionDraftItem item)
-        {
-            return;
-        }
-
-        _pendingRegions.Remove(item.Definition);
-        RefreshRegionList();
-    }
-
-    private void RegionList_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateActionStates();
-
     private async void CreateReviewButton_Click(object sender, RoutedEventArgs e) =>
         await RunTrackedOperationAsync(
             "创建批阅记录失败",
             CreateReviewAsync,
-            () => !_isClosed && _selectedCapture is not null);
+            () => !_isClosed
+                && _selectedCapture is
+                {
+                    SubjectiveQuestionCount: > 0 and <= SubjectiveGradingSnapshot.MaximumQuestionCount
+                });
 
     private void SubjectiveQuestionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -424,7 +318,7 @@ public sealed partial class SubjectiveReviewPage : Page
 
     private async void ReloadReviewButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_document is null || _isMutatingReview || _isReadingReview)
+        if (_document is null || _isCreatingReview || _isMutatingReview || _isReadingReview)
         {
             return;
         }
@@ -509,9 +403,8 @@ public sealed partial class SubjectiveReviewPage : Page
                     CancelRequest(_captureImageCancellation);
                     OriginalCaptureImage.Source = null;
                     OriginalCaptureSummaryText.Text = "所选采集记录已不在当前列表中，请重新选择。";
+                    CaptureTemplateStatusText.Text = "所选采集记录不在当前列表中。";
                     _isCaptureImageAvailable = false;
-                    _pendingRegions.Clear();
-                    RefreshRegionList();
                 }
             }
             finally
@@ -783,31 +676,33 @@ public sealed partial class SubjectiveReviewPage : Page
             return;
         }
 
-        if (_service is null || _selectedCapture is null || !_isCaptureImageAvailable || _pendingRegions.Count == 0)
+        if (_service is null
+            || _selectedCapture is not
+            {
+                SubjectiveQuestionCount: > 0 and <= SubjectiveGradingSnapshot.MaximumQuestionCount
+            } capture
+            || !_isCaptureImageAvailable)
         {
-            ShowInfo("请先选择可用原图并添加至少一个题目区域。", InfoBarSeverity.Warning);
+            ShowInfo("请选择有主观题区域且原图可用的采集记录。区域应在模板页定义。", InfoBarSeverity.Warning);
             return;
         }
 
         _isCreatingReview = true;
         UpdateActionStates();
-        var captureId = _selectedCapture.CaptureId;
-        var regions = _pendingRegions.ToArray();
+        var captureId = capture.CaptureId;
         var cancellation = StartRequest(ref _mutationCancellation);
         try
         {
-            var document = await _service.CreateAsync(captureId, regions, cancellation.Token);
+            var document = await _service.CreateAsync(captureId, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (_isClosed || !string.Equals(_selectedCapture?.CaptureId, captureId, StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
 
-            _pendingRegions.Clear();
-            RefreshRegionList();
             UpdateReviewSummaryItem(document, select: true);
             SetDocument(document, preserveEditorInput: null);
-            SetInfo("批阅记录已创建", "可以开始选择题目并保存草稿。", InfoBarSeverity.Success);
+            SetInfo("批阅记录已创建", $"已按关联模板载入 {document.Snapshot.Questions.Count} 道主观题，可以开始批阅。", InfoBarSeverity.Success);
         }
         finally
         {
@@ -880,12 +775,11 @@ public sealed partial class SubjectiveReviewPage : Page
                 CancelRequest(_captureImageCancellation);
                 OriginalCaptureImage.Source = null;
                 OriginalCaptureSummaryText.Text = "原始采集图像已不可用；已保存分数、批阅历史和导出仍可使用。";
-                _pendingRegions.Clear();
-                RefreshRegionList();
+                CaptureTemplateStatusText.Text = "原始图像不可用；已有批阅记录仍可读取和导出。";
                 UpdateActionStates();
                 SetInfo(
                     "原图已不可用",
-                    "该批阅记录仍可读取和导出，但无法添加新题目区域或查看题目图像。错误代码：CAPTURE_NOT_FOUND",
+                    "该批阅记录仍可读取和导出，但无法创建新的批阅记录或查看题目图像。错误代码：CAPTURE_NOT_FOUND",
                     InfoBarSeverity.Warning);
             }
         }
@@ -1169,20 +1063,6 @@ public sealed partial class SubjectiveReviewPage : Page
                 && _selectedQuestion?.QuestionId == question.QuestionId);
     }
 
-    private void RefreshRegionList()
-    {
-        _regionItems.Clear();
-        foreach (var definition in _pendingRegions.OrderBy(region => region.QuestionNumber))
-        {
-            _regionItems.Add(new SubjectiveRegionDraftItem(definition));
-        }
-
-        RegionListStatusText.Text = _pendingRegions.Count == 0
-            ? "添加 1 到 64 个题目区域后创建批阅记录。"
-            : $"已添加 {_pendingRegions.Count} 个题目区域；题号必须唯一。";
-        UpdateActionStates();
-    }
-
     private void UpdateActionStates()
     {
         var serviceAvailable = _service is not null && !_isClosed;
@@ -1190,25 +1070,19 @@ public sealed partial class SubjectiveReviewPage : Page
         LoadMoreCapturesButton.IsEnabled = serviceAvailable && !_isLoadingCaptureList && _captureCursor is not null;
         ReloadReviewsButton.IsEnabled = serviceAvailable && !_isLoadingReviewList;
         LoadMoreReviewsButton.IsEnabled = serviceAvailable && !_isLoadingReviewList && _reviewCursor is not null;
-        AddRegionButton.IsEnabled = serviceAvailable
-            && !_isCreatingReview
-            && _selectedCapture is not null
-            && _isCaptureImageAvailable
-            && _pendingRegions.Count < SubjectiveGradingSnapshot.MaximumQuestionCount;
-        RemoveRegionButton.IsEnabled = serviceAvailable
-            && !_isCreatingReview
-            && RegionList.SelectedItem is SubjectiveRegionDraftItem;
-        RegionList.IsEnabled = serviceAvailable && !_isCreatingReview;
         CreateReviewButton.IsEnabled = serviceAvailable
             && !_isCreatingReview
             && !_isMutatingReview
             && !_isReadingReview
-            && _selectedCapture is not null
-            && _isCaptureImageAvailable
-            && _pendingRegions.Count is >= 1 and <= SubjectiveGradingSnapshot.MaximumQuestionCount;
+            && _selectedCapture is { SubjectiveQuestionCount: > 0 and <= SubjectiveGradingSnapshot.MaximumQuestionCount }
+            && _isCaptureImageAvailable;
         ExportReviewJsonButton.IsEnabled = serviceAvailable && !_isExporting && _document is not null && _saveTextAsync is not null;
         ExportReviewCsvButton.IsEnabled = serviceAvailable && !_isExporting && _document is not null && _saveTextAsync is not null;
-        ReloadReviewButton.IsEnabled = serviceAvailable && !_isMutatingReview && !_isReadingReview && _document is not null;
+        ReloadReviewButton.IsEnabled = serviceAvailable
+            && !_isCreatingReview
+            && !_isMutatingReview
+            && !_isReadingReview
+            && _document is not null;
         ReviewPicker.IsEnabled = serviceAvailable && !_isCreatingReview && !_isMutatingReview && !_isReadingReview;
         CapturePicker.IsEnabled = serviceAvailable && !_isCreatingReview;
         UpdateGradeActions();
@@ -1401,6 +1275,20 @@ public sealed partial class SubjectiveReviewPage : Page
         }
 
         _selectedCapture = summary;
+        UpdateCaptureTemplateStatus(summary);
+    }
+
+    private void UpdateCaptureTemplateStatus(LocalSubjectiveCaptureSummary capture)
+    {
+        CaptureTemplateStatusText.Text = capture.SubjectiveQuestionCount switch
+        {
+            > 0 and <= SubjectiveGradingSnapshot.MaximumQuestionCount =>
+                $"关联模板定义了 {capture.SubjectiveQuestionCount} 个主观题区域。载入原图后可按这些区域创建批阅记录。",
+            > SubjectiveGradingSnapshot.MaximumQuestionCount =>
+                "关联模板的主观题区域数量超出当前支持上限，无法创建批阅记录。错误代码：SUBJECTIVE_TEMPLATE_REGIONS_INVALID",
+            _ =>
+                "这条采集关联的模板没有主观题区域。请在“模板”页添加区域并重新采集；已有批阅记录仍可在下方重开。"
+        };
     }
 
     private void ShowServiceFailure(string title, LocalSubjectiveReviewException exception)

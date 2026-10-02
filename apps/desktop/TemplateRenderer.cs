@@ -116,6 +116,20 @@ internal static class TemplateRenderer
                 (bubble.Center.Y - bubble.RadiusMm) * unitsPerMillimetre);
             }
         }
+
+        foreach (var region in layout.SubjectiveRegions)
+        {
+            var rectangle = region.Rectangle;
+            AddShape(canvas, new Rectangle
+            {
+                Width = rectangle.Width * unitsPerMillimetre,
+                Height = rectangle.Height * unitsPerMillimetre,
+                Fill = new SolidColorBrush(Colors.Transparent),
+                Stroke = BlackBrush,
+                StrokeThickness = unitsPerMillimetre * 0.5
+            }, rectangle.X * unitsPerMillimetre, rectangle.Y * unitsPerMillimetre);
+            AddSubjectiveLabel(canvas, region, unitsPerMillimetre);
+        }
     }
 
     public static Rect GetContentBounds(AnswerSheetLayout layout, double unitsPerMillimetre)
@@ -169,6 +183,15 @@ internal static class TemplateRenderer
             IncludeBounds(question.NumberPosition.X, question.NumberPosition.Y - 4.5, 20, 4.5);
         }
 
+        foreach (var region in layout.SubjectiveRegions)
+        {
+            IncludeBounds(
+                region.Rectangle.X - 0.25,
+                region.Rectangle.Y - 0.25,
+                region.Rectangle.Width + 0.5,
+                region.Rectangle.Height + 0.5);
+        }
+
         var templateNumberWidth = EstimateTextWidthMm(layout.TemplateNumber, 3.5);
         IncludeBounds(
             layout.TemplateNumberPosition.X - templateNumberWidth / 2,
@@ -208,6 +231,40 @@ internal static class TemplateRenderer
         }
 
         return width;
+    }
+
+    private static string FormatSubjectiveLabel(TemplateSubjectiveRegion region) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"{region.QuestionNumber}（{region.MaximumScore:G29} 分）");
+
+    private static void AddSubjectiveLabel(
+        Canvas canvas,
+        TemplateSubjectiveRegion region,
+        double unitsPerMillimetre)
+    {
+        var text = FormatSubjectiveLabel(region);
+        var rectangle = region.Rectangle;
+        var textWidthMm = EstimateTextWidthMm(text, 3.5);
+        var availableWidthMm = rectangle.Width - 4;
+        var textBlock = new TextBlock
+        {
+            Text = text,
+            Width = textWidthMm * unitsPerMillimetre,
+            FontSize = 3.5 * unitsPerMillimetre,
+            FontFamily = new FontFamily("Arial"),
+            Foreground = BlackBrush,
+            TextWrapping = TextWrapping.NoWrap,
+            RenderTransformOrigin = new Point(0, 0)
+        };
+        if (textWidthMm > availableWidthMm)
+        {
+            textBlock.RenderTransform = new ScaleTransform { ScaleX = availableWidthMm / textWidthMm };
+        }
+
+        canvas.Children.Add(textBlock);
+        Canvas.SetLeft(textBlock, (rectangle.X + 2) * unitsPerMillimetre);
+        Canvas.SetTop(textBlock, (rectangle.Y + 1) * unitsPerMillimetre);
     }
 
     private static void AddText(

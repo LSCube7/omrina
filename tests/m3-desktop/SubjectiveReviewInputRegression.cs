@@ -10,6 +10,7 @@ public static class SubjectiveReviewInputRegression
     {
         VerifyIntegerFields();
         VerifyDecimalFields();
+        VerifyMillimetreFields();
         VerifyRegionBounds();
         VerifyDraftConfirmation();
         VerifySelectionGeneration();
@@ -104,6 +105,36 @@ public static class SubjectiveReviewInputRegression
         Assert(
             !SubjectiveReviewInputParser.IsRegionWithinImage(0, 0, 0, 1, 100, 100),
             "zero-width regions should be rejected");
+    }
+
+    private static void VerifyMillimetreFields()
+    {
+        var invariant = CultureInfo.InvariantCulture;
+        Assert(
+            SubjectiveReviewInputParser.TryParseMillimetres("12.5", 10, 200, invariant, out var left)
+            && left == 12.5d,
+            "paper coordinates should preserve fractional millimetres");
+        Assert(
+            !SubjectiveReviewInputParser.TryParseMillimetres("5,5", 0, 200, invariant, out _),
+            "a comma must not be reinterpreted as a thousands separator in invariant culture");
+        Assert(
+            SubjectiveReviewInputParser.TryParseMillimetres(
+                "12,5",
+                0,
+                200,
+                CultureInfo.GetCultureInfo("de-DE"),
+                out var localized)
+            && localized == 12.5d,
+            "paper coordinates should respect the active decimal separator");
+        Assert(
+            !SubjectiveReviewInputParser.TryParseMillimetres("1e2", 0, 200, invariant, out _),
+            "scientific notation should be rejected for paper coordinates");
+        Assert(
+            !SubjectiveReviewInputParser.TryParseMillimetres("201", 10, 200, invariant, out _),
+            "paper coordinates should respect the form's physical bounds");
+        Assert(
+            !SubjectiveReviewInputParser.TryParseMillimetres("", 0, 200, invariant, out _),
+            "empty paper coordinates should be rejected");
     }
 
     private static void VerifyDraftConfirmation()

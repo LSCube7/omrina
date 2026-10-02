@@ -110,7 +110,10 @@ public sealed partial class CapturePage : Page
         }
         var template = CaptureTemplateReference.FromLayout(layout);
         TemplateIdText.Text = $"模板 ID：{template.TemplateId}";
-        CaptureStatusText.Text = $"模板参数已确认：{layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项。";
+        var subjectiveSummary = layout.SubjectiveRegions.Count == 0
+            ? "无主观题区域"
+            : $"含 {layout.SubjectiveRegions.Count} 个主观题区域";
+        CaptureStatusText.Text = $"模板参数已确认：{layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项，{subjectiveSummary}。";
         UpdateImportButtonState();
         UpdateScanCaptureButtonState();
     }
@@ -173,12 +176,17 @@ public sealed partial class CapturePage : Page
         {
             var questionCount = ReadInteger(QuestionCountBox, "题数");
             var optionsPerQuestion = ReadInteger(OptionsPerQuestionBox, "每题选项数");
-            var layout = AnswerSheetLayout.Create(TitleBox.Text, questionCount, optionsPerQuestion);
+            var layout = _layout is { SubjectiveRegions.Count: > 0 } existingLayout
+                ? AnswerSheetLayout.Create(
+                    TitleBox.Text,
+                    questionCount,
+                    optionsPerQuestion,
+                    existingLayout.SubjectiveRegions)
+                : AnswerSheetLayout.Create(TitleBox.Text, questionCount, optionsPerQuestion);
             SetLayout(layout);
         }
         catch (Exception exception)
         {
-            _layout = null;
             _templateMatchesInputs = false;
             TemplateIdText.Text = "模板参数无效。";
             CaptureStatusText.Text = FormatFailure("模板参数确认失败", exception, "请检查标题、题数和选项数后重试。");
@@ -430,7 +438,6 @@ public sealed partial class CapturePage : Page
             return;
         }
 
-        _layout = null;
         _templateMatchesInputs = false;
         TemplateIdText.Text = "参数已变更，请重新确认模板参数。";
         CaptureStatusText.Text = "参数已变更，请重新确认模板参数。";
