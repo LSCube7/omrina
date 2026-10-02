@@ -14,6 +14,7 @@ Run("title is XML escaped", failures, VerifyTitleEscaping);
 Run("layout is deterministic", failures, VerifyDeterminism);
 Run("template identity is stable", failures, VerifyTemplateIdentity);
 Run("recognition geometry and mark states", failures, RecognitionRegression.Run);
+Run("subjective grading batches and snapshot restore", failures, SubjectiveGradingRegression.Run);
 
 if (args.Contains("--write-example", StringComparer.Ordinal))
 {
@@ -31,7 +32,7 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: 10 Omrina.Core regression tests.");
+Console.WriteLine("PASS: 11 Omrina.Core regression tests.");
 return 0;
 
 static void Run(string name, List<string> failures, Action test)
