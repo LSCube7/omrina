@@ -252,6 +252,7 @@ while (subscription.Reader.TryRead(out _)) drainedEvents++;
 Check(drainedEvents == 128 && !await subscription.Reader.WaitToReadAsync(), "overflow preserves queued events and completes reader");
 subscription.Complete();
 Check((int)subscription.CloseStatus == 1013, "connection cleanup preserves retryable close reason");
+await SubjectiveImageTests.RunAsync(Check);
 Console.WriteLine($"Server HTTP/WS checks passed: {assertions}");
 
 sealed class AdjustableClock : TimeProvider

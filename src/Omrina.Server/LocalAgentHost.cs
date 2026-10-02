@@ -20,6 +20,7 @@ internal sealed class LocalAgentHost
     private readonly Dictionary<string, Grant> _grants = new();
     private readonly Dictionary<string, (DateTimeOffset Start, int Count)> _rates = new();
     private readonly SemaphoreSlim _bodyReaders = new(8, 8);
+    private readonly SemaphoreSlim _subjectiveImageReaders = new(32, 32);
     private ITimer? _expiryTimer;
     public event Action? StateChanged;
     public event Action<string>? GrantRevoked;
@@ -173,6 +174,7 @@ internal sealed class LocalAgentHost
         app.MapDelete("/v1/grant", (HttpContext c) => { RevokeGrant(Current(c).Summary.GrantId); return Results.NoContent(); });
         app.MapGet("/v1/templates", (Func<HttpContext, Task<IResult>>)(c => QueryOperations(c, true)));
         app.MapGet("/v1/devices", (Func<HttpContext, Task<IResult>>)(c => QueryOperations(c, false)));
+        app.MapGet("/v1/subjective-reviews/{reviewId}/questions/{questionId}/image", ReadSubjectiveImage);
         app.MapGet("/v1/tasks", (HttpContext c) => { lock (_sync) return Json(Current(c).Tasks.Values.Select(t => t.Snapshot).ToArray()); });
         app.MapGet("/v1/tasks/{id}", (HttpContext c, string id) => { lock (_sync) return Current(c).Tasks.TryGetValue(id, out var task) ? Json(task.Snapshot) : Error(404, "TASK_NOT_FOUND"); });
         app.MapPost("/v1/tasks/{id}/cancel", (HttpContext c, string id) =>
@@ -205,6 +207,84 @@ internal sealed class LocalAgentHost
         app.MapGet("/v1/events", WebSocketAsync);
     }
     private static Grant Current(HttpContext c) => (Grant)c.Items["grant"]!;
+    private async Task<IResult> ReadSubjectiveImage(HttpContext context, string reviewId, string questionId)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        if (context.Request.QueryString.HasValue
+            || !Guid.TryParse(reviewId, out var parsedReviewId) || parsedReviewId == Guid.Empty
+            || !Guid.TryParse(questionId, out var parsedQuestionId) || parsedQuestionId == Guid.Empty)
+            return Error(400, "INVALID_IMAGE_RESOURCE");
+        if (_operations is not ILocalAgentSubjectiveImages images)
+            return Error(503, "SUBJECTIVE_IMAGES_UNAVAILABLE", "当前本地服务暂不支持读取答题区域。");
+        if (!_subjectiveImageReaders.Wait(0)) return Error(429, "REQUEST_BUSY");
+        var grant = Current(context);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, grant.Cancellation.Token);
+        lifetime.CancelAfter(TimeSpan.FromSeconds(30));
+        Task<LocalSubjectiveImage>? reading = null;
+        try
+        {
+            lifetime.Token.ThrowIfCancellationRequested();
+            reading = images.ReadSubjectiveImageAsync(grant.Summary.GrantId, parsedReviewId, parsedQuestionId, lifetime.Token);
+            var image = await reading.WaitAsync(lifetime.Token);
+            lifetime.Token.ThrowIfCancellationRequested();
+            if (image?.Bytes is null || image.Bytes.Length < 8
+                || !image.Bytes.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }))
+                return Error(500, "INVALID_REGION_IMAGE", "答题区域图像无法读取，请重新采集后重试。");
+            if (image.Bytes.Length > 8 * 1024 * 1024)
+                return Error(413, "REGION_IMAGE_TOO_LARGE", "答题区域图像过大，请缩小区域后重试。");
+            return new SubjectiveImageResult(image.Bytes, grant, _timeProvider);
+        }
+        catch (OperationCanceledException) when (grant.Cancellation.IsCancellationRequested)
+        { return Error(401, "UNAUTHORIZED", "请重新配对本地服务。"); }
+        catch (LocalOperationException exception)
+        {
+            return exception.Code switch
+            {
+                "NOT_FOUND" or "SUBJECTIVE_REVIEW_NOT_FOUND" or "SUBJECTIVE_QUESTION_NOT_FOUND" or "CAPTURE_NOT_FOUND" or "SUBJECTIVE_IMAGE_NOT_FOUND"
+                    => Error(404, "SUBJECTIVE_IMAGE_NOT_FOUND", "找不到此授权下的答题区域。"),
+                "SUBJECTIVE_IMAGE_TOO_LARGE" => Error(413, "REGION_IMAGE_TOO_LARGE", "答题区域图像过大，请缩小区域后重试。"),
+                "INVALID_REGION" => Error(400, "INVALID_REGION", "答题区域无效，请重新指定区域。"),
+                _ => Error(500, "REGION_IMAGE_READ_FAILED", "答题区域读取失败，请稍后重试。")
+            };
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException)
+        { return Error(504, "REGION_IMAGE_TIMEOUT", "答题区域读取超时，请稍后重试。"); }
+        catch { return Error(500, "REGION_IMAGE_READ_FAILED", "答题区域读取失败，请稍后重试。"); }
+        finally
+        {
+            // An adapter that ignores cancellation must retain its slot until it finishes.
+            if (reading is { IsCompleted: false })
+                _ = reading.ContinueWith(task => { _ = task.Exception; _subjectiveImageReaders.Release(); }, CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            else _subjectiveImageReaders.Release();
+        }
+    }
+
+    private sealed class SubjectiveImageResult(byte[] bytes, Grant grant, TimeProvider timeProvider) : IResult
+    {
+        public async Task ExecuteAsync(HttpContext context)
+        {
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, grant.Cancellation.Token);
+            if (grant.Cancellation.IsCancellationRequested || grant.Summary.ExpiresAt <= timeProvider.GetUtcNow())
+            { await Error(401, "UNAUTHORIZED", "请重新配对本地服务。").ExecuteAsync(context); return; }
+            lifetime.Token.ThrowIfCancellationRequested();
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.ContentType = "image/png";
+            context.Response.ContentLength = bytes.Length;
+            try { await context.Response.Body.WriteAsync(bytes, lifetime.Token); }
+            catch (OperationCanceledException) when (grant.Cancellation.IsCancellationRequested)
+            {
+                if (context.Response.HasStarted) context.Abort();
+                else
+                {
+                    context.Response.ContentLength = null;
+                    context.Response.ContentType = null;
+                    await Error(401, "UNAUTHORIZED", "请重新配对本地服务。").ExecuteAsync(context);
+                }
+            }
+        }
+    }
     private async Task<IResult> QueryOperations(HttpContext c, bool templates)
     {
         if (_operations is null) return Error(503, "OPERATIONS_UNAVAILABLE");
