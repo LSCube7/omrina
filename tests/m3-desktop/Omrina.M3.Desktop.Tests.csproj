@@ -19,5 +19,6 @@
   <ItemGroup>
     <Compile Include="../../apps/desktop/CaptureStore.cs" Link="CaptureStore.cs" />
     <Compile Include="../../apps/desktop/DesktopLocalAgentOperations.cs" Link="DesktopLocalAgentOperations.cs" />
+    <Compile Include="../../apps/desktop/ScannerDeviceIdentityMap.cs" Link="ScannerDeviceIdentityMap.cs" />
   </ItemGroup>
 </Project>

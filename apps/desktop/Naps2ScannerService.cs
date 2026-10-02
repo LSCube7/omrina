@@ -1,5 +1,6 @@
 using NAPS2.Scan;
 using Omrina.Scanning;
+using System.Diagnostics;
 
 namespace Omrina.Desktop;
 
@@ -13,7 +14,7 @@ internal sealed class Naps2ScannerService : IScannerService
     private readonly string _temporaryRoot;
     private readonly ScanningContext _scanningContext;
     private readonly ScanController _scanController;
-    private readonly Dictionary<string, (ScanDevice Device, Driver Driver)> _nativeDevices = new(StringComparer.Ordinal);
+    private readonly ScannerDeviceIdentityMap<(ScanDevice Device, Driver Driver)> _deviceIdentities = new();
     private bool _disposed;
 
     public Naps2ScannerService(string temporaryRoot)
@@ -32,24 +33,39 @@ internal sealed class Naps2ScannerService : IScannerService
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        _nativeDevices.Clear();
-        var devices = new List<ScannerDevice>();
+        var candidates = new List<(string? Driver, string? NativeId, (ScanDevice Device, Driver Driver) NativeDevice)>();
 
         foreach (var driver in Naps2ScannerPlatform.GetDrivers())
         {
             cancellationToken.ThrowIfCancellationRequested();
             var nativeDevices = await _scanController.GetDeviceList(driver);
-            var driverIndex = 0;
             foreach (var nativeDevice in nativeDevices)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var id = $"{driver.ToString().ToLowerInvariant()}:{driverIndex++}";
-                _nativeDevices.Add(id, (nativeDevice, driver));
-                devices.Add(new ScannerDevice(id, nativeDevice.Name, Naps2ScannerPlatform.GetDriverLabel(driver)));
+                candidates.Add((driver.ToString(), nativeDevice.ID, (nativeDevice, driver)));
             }
         }
 
-        return devices;
+        var identifiedDevices = _deviceIdentities.ReplaceDevices(
+            candidates,
+            out var skippedMissingIdentityCount,
+            out var skippedDuplicateIdentityCount);
+        if (skippedMissingIdentityCount > 0)
+        {
+            Debug.WriteLine($"Scanner discovery skipped {skippedMissingIdentityCount} device(s) without a stable native identity.");
+        }
+
+        if (skippedDuplicateIdentityCount > 0)
+        {
+            Debug.WriteLine($"Scanner discovery skipped {skippedDuplicateIdentityCount} duplicate native device identity/identities.");
+        }
+
+        return identifiedDevices
+            .Select(entry => new ScannerDevice(
+                entry.DeviceId,
+                entry.NativeDevice.Device.Name,
+                Naps2ScannerPlatform.GetDriverLabel(entry.NativeDevice.Driver)))
+            .ToArray();
     }
 
     public async Task<ScanResult> ScanAsync(
@@ -61,7 +77,7 @@ internal sealed class Naps2ScannerService : IScannerService
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(options);
 
-        if (!_nativeDevices.TryGetValue(device.Id, out var nativeDevice))
+        if (!_deviceIdentities.TryGetNativeDevice(device.Id, out var nativeDevice))
         {
             throw new InvalidOperationException("扫描设备已失效，请刷新设备列表后重试。");
         }
@@ -91,7 +107,7 @@ internal sealed class Naps2ScannerService : IScannerService
         if (!_disposed)
         {
             _disposed = true;
-            _nativeDevices.Clear();
+            _deviceIdentities.Dispose();
             _scanningContext.Dispose();
         }
 

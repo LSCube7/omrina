@@ -16,15 +16,104 @@ if (args.Contains("--http-harness", StringComparer.Ordinal))
 
 try
 {
+    VerifyScannerDeviceIdentityMap();
     await VerifyDesktopAgentOperationsAsync();
     await VerifyActualSkiaRejectsSyntheticFixtureAsync();
-    Console.WriteLine("PASS: M3 desktop adapter workflow (accepted recognition is simulated) and actual Skia rejects the 40x40 synthetic fixture without scoring.");
+    Console.WriteLine("PASS: scanner identity stability/revocation, M3 adapter workflow (accepted recognition is simulated), and actual Skia rejection without scoring.");
     return 0;
 }
 catch (Exception exception)
 {
     Console.Error.WriteLine($"FAIL: {exception.GetType().Name}: {exception.Message}");
     return 1;
+}
+
+static void VerifyScannerDeviceIdentityMap()
+{
+    using var identityMap = new ScannerDeviceIdentityMap<string>();
+    var initial = identityMap.ReplaceDevices(
+        [("WIA", "native-a", "scanner A"), ("WIA", "native-b", "scanner B")],
+        out var missingIdentityCount,
+        out var duplicateIdentityCount);
+    AssertEqual(0, missingIdentityCount, "first scanner enumeration should have stable identities");
+    AssertEqual(0, duplicateIdentityCount, "first scanner enumeration should not contain duplicates");
+    AssertEqual(2, initial.Count, "both native scanners should be visible");
+
+    var scannerAId = initial.Single(entry => entry.NativeDevice == "scanner A").DeviceId;
+    var scannerBId = initial.Single(entry => entry.NativeDevice == "scanner B").DeviceId;
+    AssertEqual(72, scannerAId.Length, "public device ID should contain a prefix and a full SHA-256 HMAC");
+    AssertTrue(!scannerAId.Contains("native-a", StringComparison.Ordinal), "public device IDs must not expose native IDs");
+
+    var reordered = identityMap.ReplaceDevices(
+        [("WIA", "native-b", "scanner B"), ("WIA", "native-a", "scanner A")],
+        out _,
+        out _);
+    AssertEqual(scannerAId, reordered.Single(entry => entry.NativeDevice == "scanner A").DeviceId, "scanner A identity should survive list reordering");
+    AssertEqual(scannerBId, reordered.Single(entry => entry.NativeDevice == "scanner B").DeviceId, "scanner B identity should survive list reordering");
+
+    var onlyB = identityMap.ReplaceDevices(
+        [("WIA", "native-b", "scanner B")],
+        out _,
+        out _);
+    AssertEqual(1, onlyB.Count, "the disappeared scanner should be removed from the active set");
+    AssertTrue(!identityMap.TryGetNativeDevice(scannerAId, out _), "the disappeared scanner's old ID must not resolve");
+    AssertTrue(identityMap.TryGetNativeDevice(scannerBId, out var remainingDevice), "the remaining scanner ID should resolve");
+    AssertEqual("scanner B", remainingDevice, "the remaining scanner ID must keep its own native mapping");
+
+    var sameNativeIdAcrossDrivers = identityMap.ReplaceDevices(
+        [("WIA", "shared-native-id", "WIA scanner"), ("TWAIN", "shared-native-id", "TWAIN scanner")],
+        out _,
+        out _);
+    AssertEqual(2, sameNativeIdAcrossDrivers.Count, "the driver name should participate in identity hashing");
+    AssertTrue(
+        sameNativeIdAcrossDrivers[0].DeviceId != sameNativeIdAcrossDrivers[1].DeviceId,
+        "the same native ID under different drivers should receive different public IDs");
+
+    var filtered = identityMap.ReplaceDevices(
+        [
+            ("WIA", "duplicate-id", "first duplicate"),
+            ("WIA", "duplicate-id", "second duplicate"),
+            ("WIA", null, "missing native ID"),
+            (" ", "missing-driver", "missing driver")
+        ],
+        out missingIdentityCount,
+        out duplicateIdentityCount);
+    AssertEqual(2, missingIdentityCount, "missing identities should be counted and skipped");
+    AssertEqual(2, duplicateIdentityCount, "all candidates for a duplicated native identity should be counted and skipped");
+    AssertEqual(0, filtered.Count, "ambiguous native identities should not leave any device mapped");
+
+    var duplicateIdentityId = identityMap.ReplaceDevices(
+        [("WIA", "same-native-id", "scanner probe")],
+        out _,
+        out _).Single().DeviceId;
+    AssertDuplicateDevices([
+        ("WIA", "same-native-id", "scanner A"),
+        ("WIA", "same-native-id", "scanner B")
+    ]);
+    AssertDuplicateDevices([
+        ("WIA", "same-native-id", "scanner B"),
+        ("WIA", "same-native-id", "scanner A")
+    ]);
+    AssertDuplicateDevices([
+        ("WIA", "same-native-id", "scanner A"),
+        ("WIA", "same-native-id", "scanner B"),
+        ("WIA", "same-native-id", "scanner C")
+    ]);
+
+    void AssertDuplicateDevices((string? Driver, string? NativeId, string NativeDevice)[] duplicateCandidates)
+    {
+        var ambiguous = identityMap.ReplaceDevices(duplicateCandidates, out _, out var skippedDuplicates);
+        AssertEqual(0, ambiguous.Count, "all scanners sharing a duplicated native identity must remain unavailable");
+        AssertEqual(duplicateCandidates.Length, skippedDuplicates, "every ambiguous candidate should be counted as skipped");
+        AssertTrue(!identityMap.TryGetNativeDevice(duplicateIdentityId, out _), "ambiguous scanner IDs must not resolve after duplicate filtering");
+    }
+
+    using var nextSession = new ScannerDeviceIdentityMap<string>();
+    var nextSessionEntry = nextSession.ReplaceDevices(
+        [("WIA", "native-a", "scanner A")],
+        out _,
+        out _).Single();
+    AssertTrue(scannerAId != nextSessionEntry.DeviceId, "public scanner IDs should be scoped to the current app session");
 }
 
 static async Task VerifyDesktopAgentOperationsAsync()
