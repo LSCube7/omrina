@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Omrina.Core;
 using Omrina.Desktop;
+using Omrina.M3.Desktop.Tests;
 using Omrina.Platform;
 using Omrina.Protocol;
 using Omrina.Scanning;
@@ -17,11 +18,12 @@ if (args.Contains("--http-harness", StringComparer.Ordinal))
 
 try
 {
+    SubjectiveReviewInputRegression.Run();
     VerifyScannerDeviceIdentityMap();
     await VerifyDesktopAgentOperationsAsync();
     await VerifyActualSkiaRejectsSyntheticFixtureAsync();
     await VerifySubjectiveImageCropperAsync();
-    Console.WriteLine("PASS: scanner identity stability/revocation, M3 workflow, M5 subjective store/adapter workflow, PNG/JPEG crop pixels, and actual Skia rejection without scoring.");
+    Console.WriteLine("PASS: scanner identity/revocation, M3 workflow, M5 trusted/web subjective store workflows, parser boundaries, PNG/JPEG crop pixels, and actual Skia rejection without scoring.");
     return 0;
 }
 catch (Exception exception)
@@ -342,11 +344,19 @@ static async Task VerifyDesktopAgentOperationsAsync()
             exportedDocument.RootElement.GetProperty("scoring").GetProperty("disposition").GetString(),
             "JSON export should include the latest reviewed score");
 
-        await VerifySubjectiveReviewWorkflowAsync(
+        var webReviewId = await VerifySubjectiveReviewWorkflowAsync(
             operations,
             grantA,
             grantB,
             uploadCaptureId,
+            rootDirectory);
+
+        await VerifyLocalSubjectiveReviewServiceAsync(
+            operations,
+            grantA,
+            grantB,
+            uploadCaptureId,
+            webReviewId,
             rootDirectory);
 
         operations.ForgetGrant(grantA);
@@ -438,7 +448,7 @@ static async Task VerifyActualSkiaRejectsSyntheticFixtureAsync()
     }
 }
 
-static async Task VerifySubjectiveReviewWorkflowAsync(
+static async Task<Guid> VerifySubjectiveReviewWorkflowAsync(
     DesktopLocalAgentOperations operations,
     string ownerGrant,
     string otherGrant,
@@ -631,6 +641,279 @@ static async Task VerifySubjectiveReviewWorkflowAsync(
     AssertTrue(
         new SubjectiveReviewStore(storageRoot).LoadForGrant(reviewId, otherGrant) is null,
         "another grant must not adopt a persisted review");
+    return reviewId;
+}
+
+static async Task VerifyLocalSubjectiveReviewServiceAsync(
+    DesktopLocalAgentOperations operations,
+    string ownerGrant,
+    string otherGrant,
+    string captureId,
+    Guid webReviewId,
+    string storageRoot)
+{
+    var captureStore = new CaptureStore(storageRoot);
+    var service = new LocalSubjectiveReviewService(captureStore);
+    var trustedStore = new SubjectiveReviewStore(storageRoot);
+    Directory.CreateDirectory(Path.Combine(storageRoot, "captures", "invalid-capture-name"));
+    var damagedCaptureId = Guid.NewGuid();
+    var damagedCaptureDirectory = Path.Combine(storageRoot, "captures", damagedCaptureId.ToString("N"));
+    Directory.CreateDirectory(damagedCaptureDirectory);
+    await File.WriteAllTextAsync(Path.Combine(damagedCaptureDirectory, "manifest.json"), "{invalid-manifest");
+
+    var capturePages = new List<LocalSubjectiveCaptureSummary>();
+    var captureDiagnostics = new List<LocalSubjectiveReviewDiagnostic>();
+    string? captureCursor = null;
+    do
+    {
+        var page = await service.ListCapturesAsync(pageSize: 1, cursor: captureCursor);
+        capturePages.AddRange(page.Items);
+        captureDiagnostics.AddRange(page.Diagnostics);
+        captureCursor = page.NextCursor;
+    }
+    while (captureCursor is not null);
+
+    AssertTrue(capturePages.Any(item => item.CaptureId == captureId), "capture paging should return the uploaded capture");
+    AssertTrue(capturePages.All(item => item.PixelWidth == 40 && item.PixelHeight == 40), "capture summaries should contain manifest-validated dimensions");
+    AssertTrue(!JsonSerializer.Serialize(capturePages).Contains(storageRoot, StringComparison.Ordinal), "capture summaries must not expose local paths");
+    AssertEqual("INVALID_CAPTURE_CURSOR", await GetServiceErrorCodeAsync(() => service.ListCapturesAsync(cursor: "../../outside")), "capture cursors must not accept paths");
+    AssertEqual("INVALID_CAPTURE_ID", await GetServiceErrorCodeAsync(() => service.ReadCaptureImageAsync("../../outside")), "raw image access must validate capture IDs instead of accepting paths");
+    AssertTrue(captureDiagnostics.Any(item => item.ResourceId == damagedCaptureId.ToString("N") && item.Code == "CAPTURE_HISTORY_INVALID"), "a damaged capture manifest should appear as a typed page diagnostic");
+
+    var rawImage = await service.ReadCaptureImageAsync(captureId);
+    await using (var rawStream = await rawImage.OpenReadAsync())
+    {
+        var header = new byte[8];
+        var read = await rawStream.ReadAsync(header);
+        AssertEqual(8, read, "raw capture stream should provide the PNG signature");
+        AssertTrue(header.SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }), "raw capture stream must come from the validated PNG");
+    }
+
+    var localQuestionId = Guid.NewGuid();
+    var localRegion = SubjectiveRegionDefinition.Create(
+        localQuestionId,
+        questionNumber: 1,
+        SubjectivePixelRectangle.Create(0, 0, 8, 8, 40, 40),
+        maximumPoints: 5m,
+        imageWidth: 40,
+        imageHeight: 40);
+    var localReview = await service.CreateAsync(captureId, [localRegion]);
+    AssertEqual(1L, localReview.Snapshot.Version, "trusted local reviews should begin at version one");
+    AssertEqual(SubjectiveReviewStore.DesktopLocalOwner, trustedStore.LoadTrusted(localReview.ReviewId)?.OwnerGrantId, "new local reviews should have the reserved local owner");
+    AssertTrue(trustedStore.LoadForGrant(localReview.ReviewId, ownerGrant) is null, "a web grant must not take over a local review");
+    await AssertOperationErrorAsync(
+        () => RunAsync(operations, ownerGrant, TaskOperation.SubjectiveRead, new { reviewId = localReview.ReviewId }),
+        "SUBJECTIVE_REVIEW_NOT_FOUND");
+
+    var localDocumentPath = Path.Combine(storageRoot, "subjective-reviews", $"{localReview.ReviewId:N}.json");
+    using (File.Open(localDocumentPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+        AssertEqual(
+            "SUBJECTIVE_REVIEW_STORE_FAILED",
+            await GetServiceErrorCodeAsync(() => service.ApplyEditsAsync(
+                localReview.ReviewId,
+                expectedVersion: 1,
+                "local teacher",
+                [new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Draft, 4m, "saved later")])),
+            "failed local disk replacement should be reported");
+    }
+
+    using (var cancelled = new CancellationTokenSource())
+    {
+        cancelled.Cancel();
+        try
+        {
+            await service.ApplyEditsAsync(
+                localReview.ReviewId,
+                1,
+                "local teacher",
+                [new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Draft, 4m, "saved later")],
+                cancelled.Token);
+            throw new InvalidOperationException("pre-cancelled local grade operation should be cancelled");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    AssertEqual(1L, trustedStore.LoadTrusted(localReview.ReviewId)?.Snapshot.Version, "write failure and cancellation must preserve the original local version");
+    var localDraft = await service.ApplyEditsAsync(
+        localReview.ReviewId,
+        1,
+        "local teacher",
+        [new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Draft, 4m, "saved draft")]);
+    var localFinal = await service.ApplyEditsAsync(
+        localReview.ReviewId,
+        2,
+        "local teacher",
+        [new SubjectiveGradeEdit(localQuestionId, SubjectiveReviewStatus.Confirmed, 4m, "saved draft")]);
+    AssertEqual(2L, localDraft.Snapshot.Version, "one local batch should advance one version");
+    AssertEqual(3L, localFinal.Snapshot.Version, "confirmation should be a separate atomic local batch");
+    AssertEqual(4m, localFinal.Snapshot.FinalSubtotal, "local final subtotal should sum only the subjective region scores");
+
+    var restartedService = new LocalSubjectiveReviewService(new CaptureStore(storageRoot), new SubjectiveReviewStore(storageRoot));
+    var reopened = await restartedService.ReadAsync(localReview.ReviewId);
+    AssertEqual(3L, reopened.Snapshot.Version, "a new local service instance should restore the latest version");
+    AssertEqual(2, reopened.Snapshot.History.Count, "a new local service instance should restore audit history");
+    var reopenedCrop = await restartedService.ReadQuestionImageAsync(localReview.ReviewId, localQuestionId);
+    using (var decodedCrop = SKBitmap.Decode(reopenedCrop.Bytes))
+    {
+        AssertTrue(decodedCrop is not null, "crop recovery after service restart should decode");
+        AssertEqual(new SKColor(0, 0, 0, 255), decodedCrop!.GetPixel(0, 0), "recovered crop should preserve the original selected pixels");
+    }
+
+    var existingWebReview = await service.ReadAsync(webReviewId);
+    var oldOwnerQuestion = existingWebReview.Snapshot.Questions[0];
+    var locallyReopenedWebReview = await service.ApplyEditsAsync(
+        webReviewId,
+        existingWebReview.Snapshot.Version,
+        "trusted local teacher",
+        [new SubjectiveGradeEdit(oldOwnerQuestion.QuestionId, SubjectiveReviewStatus.Draft, 7m, "reopened locally")]);
+    AssertEqual(ownerGrant, trustedStore.LoadTrusted(webReviewId)?.OwnerGrantId, "trusted local edits must preserve the original web owner");
+    AssertEqual(locallyReopenedWebReview.Snapshot.Version, (await RunAsync(operations, ownerGrant, TaskOperation.SubjectiveRead, new { reviewId = webReviewId })).GetProperty("version").GetInt64(), "the original grant should retain access after a local edit");
+
+    var concurrencyReview = await RunAsync(
+        operations,
+        ownerGrant,
+        TaskOperation.SubjectiveCreate,
+        new
+        {
+            captureId,
+            questions = new[]
+            {
+                new
+                {
+                    questionId = Guid.NewGuid(),
+                    questionNumber = 1,
+                    maxScore = 5m,
+                    region = new { x = 10, y = 10, width = 8, height = 8 }
+                }
+            }
+        });
+    var concurrencyReviewId = Guid.Parse(concurrencyReview.GetProperty("reviewId").GetString()!);
+    var concurrencyQuestionId = concurrencyReview.GetProperty("questions")[0].GetProperty("questionId").GetGuid();
+    var localAttempt = CaptureLocalApplyOutcomeAsync(
+        service,
+        concurrencyReviewId,
+        concurrencyQuestionId);
+    var webAttempt = CaptureWebApplyOutcomeAsync(
+        operations,
+        ownerGrant,
+        concurrencyReviewId,
+        concurrencyQuestionId);
+    var outcomes = await Task.WhenAll(localAttempt, webAttempt);
+    AssertTrue(
+        (outcomes[0] is null && outcomes[1] == "VERSION_CONFLICT")
+        || (outcomes[0] == "VERSION_CONFLICT" && outcomes[1] is null),
+        "local and web updates through separate Store instances must share expected-version serialization");
+    AssertEqual(ownerGrant, trustedStore.LoadTrusted(concurrencyReviewId)?.OwnerGrantId, "concurrent trusted edit must not transfer grant ownership");
+
+    var localCsv = await restartedService.ExportAsync(localReview.ReviewId, "csv");
+    AssertTrue(localCsv.Content.Contains("confirmed", StringComparison.Ordinal), "local CSV export should retain saved confirmation status");
+    var localJson = await restartedService.ExportAsync(localReview.ReviewId, "json");
+    using (var exported = JsonDocument.Parse(localJson.Content))
+    {
+        AssertEqual(3L, exported.RootElement.GetProperty("version").GetInt64(), "local JSON export should retain the committed history version");
+        AssertEqual(2, exported.RootElement.GetProperty("history").GetArrayLength(), "local JSON export should include the audit batches");
+    }
+
+    var corruptedReviewId = Guid.NewGuid();
+    var reviewDirectory = Path.Combine(storageRoot, "subjective-reviews");
+    await File.WriteAllTextAsync(Path.Combine(reviewDirectory, $"{corruptedReviewId:N}.json"), "{invalid-json");
+    var allReviewIds = new HashSet<Guid>();
+    var reviewDiagnostics = new List<LocalSubjectiveReviewDiagnostic>();
+    string? reviewCursor = null;
+    do
+    {
+        var page = await restartedService.ListReviewsAsync(pageSize: 1, cursor: reviewCursor);
+        foreach (var summary in page.Items)
+        {
+            AssertTrue(allReviewIds.Add(summary.ReviewId), "review keyset pagination must not duplicate records");
+        }
+
+        reviewDiagnostics.AddRange(page.Diagnostics);
+        reviewCursor = page.NextCursor;
+    }
+    while (reviewCursor is not null);
+    AssertTrue(allReviewIds.Contains(localReview.ReviewId), "review pagination should include the new local review");
+    AssertTrue(allReviewIds.Contains(webReviewId), "review pagination should include records created by an earlier web grant");
+    AssertTrue(reviewDiagnostics.Any(item => item.ResourceId == corruptedReviewId.ToString("N") && item.Code == "SUBJECTIVE_REVIEW_INVALID"), "a damaged review should appear as a typed page diagnostic");
+    AssertTrue(reviewDiagnostics.All(item => !item.Message.Contains(storageRoot, StringComparison.Ordinal)), "review diagnostics must not expose local paths");
+    AssertEqual("INVALID_REVIEW_CURSOR", await GetServiceErrorCodeAsync(() => restartedService.ListReviewsAsync(cursor: "C:/users")), "review cursors must not accept paths");
+    AssertTrue(captureDiagnostics.Any(item => item.Code == "CAPTURE_HISTORY_INVALID"), "capture paging should report invalid directory names rather than silently skip them");
+
+    var savedCapture = captureStore.LoadById(captureId)
+        ?? throw new InvalidOperationException("synthetic capture should exist before missing-image test");
+    File.Delete(savedCapture.ImageFilePath);
+    var missingImageRead = await restartedService.ReadAsync(localReview.ReviewId);
+    AssertEqual(3L, missingImageRead.Snapshot.Version, "missing source image must not hide saved grading history");
+    AssertTrue(missingImageRead.Capture is null, "missing source image should appear as unavailable metadata");
+    AssertTrue((await restartedService.ExportAsync(localReview.ReviewId, "json")).Content.Contains("saved draft", StringComparison.Ordinal), "missing source image must not block review export");
+    AssertEqual("CAPTURE_HISTORY_INVALID", await GetServiceErrorCodeAsync(() => restartedService.ReadQuestionImageAsync(localReview.ReviewId, localQuestionId)), "image access should clearly report a damaged or missing original");
+    await AssertOperationErrorAsync(
+        () => RunAsync(operations, otherGrant, TaskOperation.SubjectiveRead, new { reviewId = webReviewId }),
+        "SUBJECTIVE_REVIEW_NOT_FOUND");
+}
+
+static async Task<string?> CaptureLocalApplyOutcomeAsync(
+    LocalSubjectiveReviewService service,
+    Guid reviewId,
+    Guid questionId)
+{
+    try
+    {
+        await service.ApplyEditsAsync(
+            reviewId,
+            1,
+            "local concurrent teacher",
+            [new SubjectiveGradeEdit(questionId, SubjectiveReviewStatus.Draft, 3m, "local winner")]);
+        return null;
+    }
+    catch (LocalSubjectiveReviewException exception) when (exception.Code == "VERSION_CONFLICT")
+    {
+        return exception.Code;
+    }
+}
+
+static async Task<string?> CaptureWebApplyOutcomeAsync(
+    DesktopLocalAgentOperations operations,
+    string grantId,
+    Guid reviewId,
+    Guid questionId)
+{
+    try
+    {
+        await RunAsync(
+            operations,
+            grantId,
+            TaskOperation.SubjectiveGrade,
+            new
+            {
+                reviewId,
+                expectedVersion = 1,
+                reviewer = "web concurrent teacher",
+                edits = new[] { new { questionId, status = "draft", score = 2m, comment = "web winner" } }
+            });
+        return null;
+    }
+    catch (LocalOperationException exception) when (exception.Code == "VERSION_CONFLICT")
+    {
+        return exception.Code;
+    }
+}
+
+static async Task<string?> GetServiceErrorCodeAsync(Func<Task> action)
+{
+    try
+    {
+        await action();
+    }
+    catch (LocalSubjectiveReviewException exception)
+    {
+        return exception.Code;
+    }
+
+    return null;
 }
 
 static async Task VerifySubjectiveImageCropperAsync()

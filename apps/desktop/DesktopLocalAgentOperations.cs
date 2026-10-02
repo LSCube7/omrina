@@ -459,7 +459,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
             var reviewId = Guid.NewGuid();
             var response = CreateCheckedSubjectiveDocument(reviewId, snapshot);
-            await SaveSubjectiveReviewAsync(reviewId, grantId, snapshot, cancellationToken).ConfigureAwait(false);
+            await SaveNewSubjectiveReviewAsync(reviewId, grantId, snapshot, cancellationToken).ConfigureAwait(false);
             return response;
         }
         finally
@@ -504,20 +504,32 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = FindSubjectiveReview(grantResources, reviewId, grantId);
-            if (expectedVersion != record.Snapshot.Version)
-            {
-                throw new LocalOperationException("VERSION_CONFLICT", "批阅记录已更新，请先重新读取后再提交。");
-            }
-
             if (record.Snapshot.History.Count >= SubjectiveGradingSnapshot.MaximumHistoryBatchCount)
             {
                 throw new LocalOperationException("SUBJECTIVE_HISTORY_LIMIT", "批阅历史已达到上限，无法继续修改。");
             }
 
-            SubjectiveGradingSnapshot nextSnapshot;
+            SubjectiveReviewRecord committed;
             try
             {
-                nextSnapshot = record.Snapshot.ApplyEdits(edits, reviewer, expectedVersion);
+                committed = await _subjectiveReviewStore.ApplyForGrantAsync(
+                    reviewId,
+                    grantId,
+                    expectedVersion,
+                    current =>
+                    {
+                        if (current.History.Count >= SubjectiveGradingSnapshot.MaximumHistoryBatchCount)
+                        {
+                            throw new LocalOperationException(
+                                "SUBJECTIVE_HISTORY_LIMIT",
+                                "批阅历史已达到上限，无法继续修改。");
+                        }
+
+                        var next = current.ApplyEdits(edits, reviewer, expectedVersion);
+                        _ = CreateCheckedSubjectiveDocument(reviewId, next);
+                        return next;
+                    },
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (InvalidOperationException exception) when (exception.Message.Contains("不能超过 1 MiB", StringComparison.Ordinal))
             {
@@ -527,10 +539,12 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             {
                 throw new LocalOperationException("INVALID_SUBJECTIVE_GRADE", "评分修改无效，请检查状态、分值和评语后重试。");
             }
+            catch (SubjectiveReviewStoreException exception)
+            {
+                throw new LocalOperationException(exception.Code, exception.Message);
+            }
 
-            var response = CreateCheckedSubjectiveDocument(reviewId, nextSnapshot);
-            await SaveSubjectiveReviewAsync(reviewId, grantId, nextSnapshot, cancellationToken).ConfigureAwait(false);
-            return response;
+            return CreateCheckedSubjectiveDocument(reviewId, committed.Snapshot);
         }
         finally
         {
@@ -556,10 +570,9 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = FindSubjectiveReview(grantResources, reviewId, grantId);
-            var document = ToSubjectiveDocument(record.ReviewId, record.Snapshot);
             var content = format == "json"
-                ? JsonSerializer.Serialize(document, AgentJson.Options)
-                : ExportSubjectiveCsv(record.Snapshot);
+                ? SubjectiveReviewExporter.ExportJson(record.ReviewId, record.Snapshot)
+                : SubjectiveReviewExporter.ExportCsv(record.Snapshot);
             cancellationToken.ThrowIfCancellationRequested();
             return EnsureSubjectiveResultSize(ToJsonElement(new { format, content }));
         }
@@ -643,7 +656,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         }
     }
 
-    private async Task SaveSubjectiveReviewAsync(
+    private async Task SaveNewSubjectiveReviewAsync(
         Guid reviewId,
         string grantId,
         SubjectiveGradingSnapshot snapshot,
@@ -651,7 +664,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
     {
         try
         {
-            await _subjectiveReviewStore.SaveAsync(reviewId, grantId, snapshot, cancellationToken)
+            await _subjectiveReviewStore.CreateAsync(reviewId, grantId, snapshot, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (SubjectiveReviewStoreException exception)
@@ -685,7 +698,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
     private static JsonElement CreateCheckedSubjectiveDocument(Guid reviewId, SubjectiveGradingSnapshot snapshot)
     {
-        var result = ToJsonElement(ToSubjectiveDocument(reviewId, snapshot));
+        var result = ToJsonElement(SubjectiveReviewExporter.ToWireDocument(reviewId, snapshot));
         if (Encoding.UTF8.GetByteCount(result.GetRawText()) > SubjectiveReviewStore.MaximumStoredDocumentBytes)
         {
             throw SubjectiveReviewTooLarge();
@@ -706,114 +719,6 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
     private static LocalOperationException SubjectiveReviewTooLarge() =>
         new("SUBJECTIVE_REVIEW_TOO_LARGE", "批阅记录过大，请减少区域或历史内容后重试。");
-
-    private static object ToSubjectiveDocument(Guid reviewId, SubjectiveGradingSnapshot snapshot) => new
-    {
-        reviewId,
-        captureId = snapshot.CaptureId,
-        version = snapshot.Version,
-        questions = snapshot.Questions.Select(question => new
-        {
-            questionId = question.QuestionId,
-            questionNumber = question.QuestionNumber,
-            maxScore = question.MaximumScore,
-            region = new
-            {
-                x = question.Region.X,
-                y = question.Region.Y,
-                width = question.Region.Width,
-                height = question.Region.Height
-            },
-            status = ToWireStatus(question.Status),
-            score = question.Score,
-            comment = question.Comment,
-            reviewer = question.Reviewer,
-            confirmedAtUtc = question.ConfirmedAtUtc
-        }).ToArray(),
-        history = snapshot.History.Select(batch => new
-        {
-            version = batch.Version,
-            reviewer = batch.Reviewer,
-            timestampUtc = batch.TimestampUtc,
-            changes = batch.Changes.Select(change => new
-            {
-                questionId = change.QuestionId,
-                questionNumber = change.QuestionNumber,
-                action = change.Action switch
-                {
-                    SubjectiveGradingAction.SetDraft => "setDraft",
-                    SubjectiveGradingAction.Confirm => "confirm",
-                    SubjectiveGradingAction.Reset => "reset",
-                    _ => throw new InvalidOperationException("Unknown subjective grading action.")
-                },
-                before = ToWireGradeState(change.Before),
-                after = ToWireGradeState(change.After)
-            }).ToArray()
-        }).ToArray(),
-        createdAtUtc = snapshot.CreatedAtUtc,
-        updatedAtUtc = snapshot.UpdatedAtUtc,
-        isFinal = snapshot.IsFinal,
-        finalSubtotal = snapshot.FinalSubtotal
-    };
-
-    private static object ToWireGradeState(SubjectiveGradeState state) => new
-    {
-        status = ToWireStatus(state.Status),
-        score = state.Score,
-        comment = state.Comment,
-        reviewer = state.Reviewer,
-        confirmedAtUtc = state.ConfirmedAtUtc
-    };
-
-    private static string ToWireStatus(SubjectiveReviewStatus status) => status switch
-    {
-        SubjectiveReviewStatus.Unreviewed => "ungraded",
-        SubjectiveReviewStatus.Draft => "draft",
-        SubjectiveReviewStatus.Confirmed => "confirmed",
-        _ => throw new InvalidOperationException("Unknown subjective review status.")
-    };
-
-    private static string ExportSubjectiveCsv(SubjectiveGradingSnapshot snapshot)
-    {
-        var builder = new StringBuilder();
-        builder.AppendLine("questionId,questionNumber,maxScore,status,score,comment,reviewer,confirmedAtUtc");
-        foreach (var question in snapshot.Questions)
-        {
-            AppendCsvRow(builder,
-                question.QuestionId.ToString("D"),
-                question.QuestionNumber.ToString(CultureInfo.InvariantCulture),
-                question.MaximumScore.ToString(CultureInfo.InvariantCulture),
-                ToWireStatus(question.Status),
-                question.Score?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
-                question.Comment ?? string.Empty,
-                question.Reviewer ?? string.Empty,
-                question.ConfirmedAtUtc?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
-        }
-
-        return builder.ToString();
-    }
-
-    private static void AppendCsvRow(StringBuilder builder, params string[] values)
-    {
-        for (var index = 0; index < values.Length; index++)
-        {
-            if (index > 0)
-            {
-                builder.Append(',');
-            }
-
-            var value = values[index];
-            var firstNonWhitespace = value.AsSpan().TrimStart();
-            if (!firstNonWhitespace.IsEmpty && firstNonWhitespace[0] is '=' or '+' or '-' or '@')
-            {
-                value = "'" + value;
-            }
-
-            builder.Append('"').Append(value.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
-        }
-
-        builder.AppendLine();
-    }
 
     private JsonElement BuildResultSummary(string resultId, ResultResource result)
     {

@@ -60,6 +60,13 @@ public sealed record CaptureRecord(
     string ImageFilePath,
     string ManifestFilePath);
 
+public sealed record CaptureStoreDiagnostic(string ResourceId, string Code, string Message);
+
+public sealed record CaptureStorePage(
+    IReadOnlyList<CaptureRecord> Items,
+    IReadOnlyList<CaptureStoreDiagnostic> Diagnostics,
+    string? NextCursor);
+
 /// <summary>Known validation and storage failures shown by the capture UI.</summary>
 public class CaptureException : Exception
 {
@@ -95,6 +102,8 @@ public sealed class CaptureStorageException : CaptureException
 public sealed class CaptureStore
 {
     public const int ManifestSchemaVersion = 1;
+    private const int MaximumManifestBytes = 64 * 1024;
+    private const int MaximumPageSize = 50;
     public const ulong MaximumFileSizeBytes = 100UL * 1024 * 1024;
     public const uint MaximumImageWidth = 16_000;
     public const uint MaximumImageHeight = 16_000;
@@ -160,17 +169,190 @@ public sealed class CaptureStore
         return latestDirectory is null ? null : ReadCommittedRecord(latestDirectory);
     }
 
+    /// <summary>Loads a committed capture by its opaque GUID ID, never by a caller-supplied path.</summary>
+    public CaptureRecord? LoadById(string captureId, CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParse(captureId, out var parsedId) || parsedId == Guid.Empty)
+        {
+            throw new CaptureValidationException("INVALID_CAPTURE_ID", "采集记录 ID 无效。");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var capturesDirectory = Path.Combine(RootDirectory, "captures");
+        if (!Directory.Exists(capturesDirectory))
+        {
+            return null;
+        }
+
+        RejectReparsePoint(RootDirectory, isDirectory: true);
+        RejectReparsePoint(capturesDirectory, isDirectory: true);
+        var captureDirectory = Path.Combine(capturesDirectory, parsedId.ToString("N"));
+        if (!Directory.Exists(captureDirectory))
+        {
+            return null;
+        }
+
+        RejectReparsePoint(captureDirectory, isDirectory: true);
+        cancellationToken.ThrowIfCancellationRequested();
+        return ReadCommittedRecord(new DirectoryInfo(captureDirectory));
+    }
+
+    /// <summary>Enumerates captures in GUID-N ordinal order with bounded page memory.</summary>
+    public CaptureStorePage LoadPage(
+        int pageSize = 50,
+        string? cursor = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePageSize(pageSize);
+        var afterId = DecodeCursor(cursor);
+        var items = new List<CaptureRecord>(pageSize);
+        var diagnostics = new List<CaptureStoreDiagnostic>();
+        var lastConsumedId = afterId;
+        var hasMoreRecords = false;
+        var invalidDirectoryNameFound = false;
+        var consumedCount = 0;
+        var capturesDirectory = Path.Combine(RootDirectory, "captures");
+
+        if (!Directory.Exists(capturesDirectory))
+        {
+            return new CaptureStorePage(items, diagnostics, NextCursor: null);
+        }
+
+        try
+        {
+            RejectReparsePoint(RootDirectory, isDirectory: true);
+            RejectReparsePoint(capturesDirectory, isDirectory: true);
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var nextName = FindNextCaptureDirectory(
+                    capturesDirectory,
+                    lastConsumedId,
+                    cancellationToken,
+                    ref invalidDirectoryNameFound);
+                if (nextName is null)
+                {
+                    break;
+                }
+
+                var normalizedId = nextName;
+                consumedCount++;
+                CaptureRecord? record;
+                try
+                {
+                    record = LoadById(normalizedId, cancellationToken);
+                }
+                catch (CaptureException exception)
+                {
+                    diagnostics.Add(new CaptureStoreDiagnostic(normalizedId, exception.Code, exception.Message));
+                    record = null;
+                }
+
+                lastConsumedId = normalizedId;
+                if (record is not null)
+                {
+                    items.Add(record);
+                }
+
+                if (consumedCount == pageSize)
+                {
+                    hasMoreRecords = FindNextCaptureDirectory(
+                        capturesDirectory,
+                        lastConsumedId,
+                        cancellationToken,
+                        ref invalidDirectoryNameFound) is not null;
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (CaptureException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new CaptureStorageException(
+                "CAPTURE_HISTORY_READ_FAILED",
+                "无法读取采集记录列表，请稍后重试。",
+                exception);
+        }
+
+        if (cursor is null && invalidDirectoryNameFound)
+        {
+            diagnostics.Add(new CaptureStoreDiagnostic(
+                "invalid-capture-directory-names",
+                "CAPTURE_HISTORY_INVALID",
+                "检测到无法识别的采集记录目录；这些目录未被打开。"));
+        }
+
+        var nextCursor = hasMoreRecords ? EncodeCursor(lastConsumedId!) : null;
+        return new CaptureStorePage(items, diagnostics, nextCursor);
+    }
+
+    /// <summary>
+    /// Returns an opaque file reader. Opening it revalidates the committed capture and manifest;
+    /// callers never receive a path that could be reconstructed or altered.
+    /// </summary>
+    public IInputImageFile GetInputFile(string captureId, CancellationToken cancellationToken = default)
+    {
+        var record = LoadById(captureId, cancellationToken)
+            ?? throw new CaptureStorageException("CAPTURE_NOT_FOUND", "找不到本地采集图像。");
+        return new StoredCaptureInputImageFile(
+            this,
+            record.Manifest.CaptureId,
+            $"capture{record.Manifest.ImageExtension.ToLowerInvariant()}",
+            record.Manifest.ByteLength);
+    }
+
+    private async ValueTask<Stream> OpenStoredImageAsync(
+        string captureId,
+        ulong expectedLength,
+        CancellationToken cancellationToken)
+    {
+        var record = await Task.Run(() => LoadById(captureId, cancellationToken), cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new CaptureStorageException("CAPTURE_NOT_FOUND", "找不到本地采集图像。");
+        cancellationToken.ThrowIfCancellationRequested();
+        if (record.Manifest.ByteLength != expectedLength)
+        {
+            throw InvalidHistory("采集图像与已验证记录不一致。", null);
+        }
+
+        var stream = new FileStream(
+            record.ImageFilePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length != checked((long)expectedLength))
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+            throw InvalidHistory("采集图像与已验证记录不一致。", null);
+        }
+
+        return stream;
+    }
+
     private CaptureRecord ReadCommittedRecord(DirectoryInfo captureDirectory)
     {
         var manifestFilePath = Path.Combine(captureDirectory.FullName, "manifest.json");
         try
         {
+            RejectReparsePoint(RootDirectory, isDirectory: true);
+            RejectReparsePoint(Path.Combine(RootDirectory, "captures"), isDirectory: true);
+            RejectReparsePoint(captureDirectory.FullName, isDirectory: true);
             if (!File.Exists(manifestFilePath))
             {
                 throw InvalidHistory("最近采集记录缺少模板关联信息，无法打开。", null);
             }
 
-            var manifestJson = File.ReadAllText(manifestFilePath, Encoding.UTF8);
+            RejectReparsePoint(manifestFilePath, isDirectory: false);
+            var manifestJson = ReadManifestJson(manifestFilePath);
             var manifest = JsonSerializer.Deserialize<CaptureManifest>(manifestJson, ManifestJsonOptions)
                 ?? throw InvalidHistory("最近采集记录的模板关联信息为空。", null);
 
@@ -219,6 +401,8 @@ public sealed class CaptureStore
             {
                 throw InvalidHistory("最近采集记录的原图不存在，无法打开。", null);
             }
+
+            RejectReparsePoint(imagePath, isDirectory: false);
 
             ValidateHistoryManifest(manifest, captureDirectory, imagePath);
 
@@ -279,6 +463,147 @@ public sealed class CaptureStore
     private static CaptureStorageException InvalidHistory(string message, Exception? innerException)
     {
         return new CaptureStorageException("CAPTURE_HISTORY_INVALID", message, innerException);
+    }
+
+    private static string ReadManifestJson(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 16 * 1024,
+            options: FileOptions.SequentialScan);
+        if (stream.Length <= 0 || stream.Length > MaximumManifestBytes)
+        {
+            throw InvalidHistory("最近采集记录的模板关联信息大小无效。", null);
+        }
+
+        var buffer = new byte[MaximumManifestBytes + 1];
+        var offset = 0;
+        while (offset < buffer.Length)
+        {
+            var read = stream.Read(buffer, offset, buffer.Length - offset);
+            if (read == 0)
+            {
+                break;
+            }
+
+            offset += read;
+        }
+
+        if (offset > MaximumManifestBytes || stream.ReadByte() != -1)
+        {
+            throw InvalidHistory("最近采集记录的模板关联信息大小无效。", null);
+        }
+
+        var hasUtf8Bom = offset >= 3
+            && buffer[0] == 0xEF
+            && buffer[1] == 0xBB
+            && buffer[2] == 0xBF;
+        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+            .GetString(buffer, hasUtf8Bom ? 3 : 0, offset - (hasUtf8Bom ? 3 : 0));
+    }
+
+    private static string? FindNextCaptureDirectory(
+        string capturesDirectory,
+        string? afterId,
+        CancellationToken cancellationToken,
+        ref bool invalidDirectoryNameFound)
+    {
+        string? selectedId = null;
+        foreach (var directory in Directory.EnumerateDirectories(capturesDirectory, "*", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var name = Path.GetFileName(directory);
+            if (name.StartsWith(".", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!Guid.TryParseExact(name, "N", out var parsedId))
+            {
+                invalidDirectoryNameFound = true;
+                continue;
+            }
+
+            var normalizedId = parsedId.ToString("N");
+            if (!string.Equals(name, normalizedId, StringComparison.Ordinal))
+            {
+                invalidDirectoryNameFound = true;
+                continue;
+            }
+
+            if (afterId is not null && string.CompareOrdinal(normalizedId, afterId) <= 0)
+            {
+                continue;
+            }
+
+            if (selectedId is null || string.CompareOrdinal(normalizedId, selectedId) < 0)
+            {
+                selectedId = normalizedId;
+            }
+        }
+
+        return selectedId;
+    }
+
+    private static void ValidatePageSize(int pageSize)
+    {
+        if (pageSize is < 1 or > MaximumPageSize)
+        {
+            throw new CaptureValidationException("INVALID_PAGE_SIZE", "每页最多读取 50 条记录。");
+        }
+    }
+
+    private static string? DecodeCursor(string? cursor)
+    {
+        if (cursor is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (cursor.Length > 64 || cursor.Any(character => !(char.IsAsciiLetterOrDigit(character) || character is '-' or '_')))
+            {
+                throw new FormatException();
+            }
+
+            var normalized = cursor.Replace('-', '+').Replace('_', '/');
+            normalized = normalized.PadRight((normalized.Length + 3) / 4 * 4, '=');
+            var value = Encoding.ASCII.GetString(Convert.FromBase64String(normalized));
+            if (!value.StartsWith("v1:", StringComparison.Ordinal)
+                || !Guid.TryParseExact(value.AsSpan(3), "N", out var captureId)
+                || captureId == Guid.Empty
+                || !string.Equals(value.AsSpan(3).ToString(), captureId.ToString("N"), StringComparison.Ordinal))
+            {
+                throw new FormatException();
+            }
+
+            return captureId.ToString("N");
+        }
+        catch (FormatException)
+        {
+            throw new CaptureValidationException("INVALID_CAPTURE_CURSOR", "采集记录列表位置无效，请重新加载。");
+        }
+    }
+
+    private static string EncodeCursor(string captureId)
+    {
+        return Convert.ToBase64String(Encoding.ASCII.GetBytes($"v1:{captureId}"))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    private static void RejectReparsePoint(string path, bool isDirectory)
+    {
+        var exists = isDirectory ? Directory.Exists(path) : File.Exists(path);
+        if (exists && (File.GetAttributes(path) & System.IO.FileAttributes.ReparsePoint) != 0)
+        {
+            throw InvalidHistory("采集记录路径无效，无法安全访问。", null);
+        }
     }
 
     private static void ValidateHistoryManifest(
@@ -593,6 +918,30 @@ public sealed class CaptureStore
         }
 
         return Path.Combine(localApplicationData, "AnswerSheet");
+    }
+
+    private sealed class StoredCaptureInputImageFile : IInputImageFile
+    {
+        private readonly CaptureStore _store;
+        private readonly string _captureId;
+        private readonly ulong _expectedLength;
+
+        public StoredCaptureInputImageFile(CaptureStore store, string captureId, string name, ulong length)
+        {
+            _store = store;
+            _captureId = captureId;
+            Name = name;
+            _expectedLength = length;
+        }
+
+        public string Name { get; }
+
+        public ulong Length => _expectedLength;
+
+        public ValueTask<Stream> OpenReadAsync(CancellationToken cancellationToken = default)
+        {
+            return _store.OpenStoredImageAsync(_captureId, _expectedLength, cancellationToken);
+        }
     }
 }
 
