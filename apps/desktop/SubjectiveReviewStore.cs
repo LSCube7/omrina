@@ -25,7 +25,7 @@ public sealed class SubjectiveReviewStoreException : Exception
 
 public sealed record SubjectiveReviewStoreDiagnostic(string ResourceId, string Code, string Message);
 
-public sealed record SubjectiveReviewPage(
+public sealed record SubjectiveReviewStorePage(
     IReadOnlyList<SubjectiveReviewRecord> Items,
     IReadOnlyList<SubjectiveReviewStoreDiagnostic> Diagnostics,
     string? NextCursor);
@@ -135,7 +135,7 @@ public sealed class SubjectiveReviewStore
         return ApplyCoreAsync(reviewId, expectedOwnerGrantId: null, expectedVersion, apply, cancellationToken);
     }
 
-    public SubjectiveReviewPage ListTrustedPage(
+    public SubjectiveReviewStorePage ListTrustedPage(
         int pageSize = 50,
         string? cursor = null,
         CancellationToken cancellationToken = default)
@@ -154,7 +154,7 @@ public sealed class SubjectiveReviewStore
             EnsureDirectory(create: false);
             if (!Directory.Exists(_directory))
             {
-                return new SubjectiveReviewPage(items, diagnostics, NextCursor: null);
+                return new SubjectiveReviewStorePage(items, diagnostics, NextCursor: null);
             }
 
             while (true)
@@ -220,7 +220,7 @@ public sealed class SubjectiveReviewStore
         }
 
         var nextCursor = hasMoreRecords ? EncodeCursor(lastConsumedId!) : null;
-        return new SubjectiveReviewPage(items, diagnostics, nextCursor);
+        return new SubjectiveReviewStorePage(items, diagnostics, nextCursor);
     }
 
     private async Task<SubjectiveReviewRecord> ApplyCoreAsync(

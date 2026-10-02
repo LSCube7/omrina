@@ -43,6 +43,7 @@
                 <NavigationViewItem Content="模板" Tag="template" Icon="Edit" />
                 <NavigationViewItem Content="采集" Tag="capture" Icon="Camera" />
                 <NavigationViewItem Content="识别 / 复核" Tag="recognition" Icon="Accept" />
+                <NavigationViewItem Content="主观题批阅" Tag="subjective-review" Icon="Edit" />
                 <NavigationViewItem Content="设置" Tag="settings" Icon="Setting" />
                 <NavigationViewItem Content="关于" Tag="about" Icon="Help" />
             </NavigationView.MenuItems>

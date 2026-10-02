@@ -20,6 +20,7 @@ public sealed partial class MainWindow : Window
     private readonly TemplatePage _templatePage;
     private readonly CapturePage _capturePage;
     private readonly RecognitionPage _recognitionPage;
+    private readonly SubjectiveReviewPage _subjectiveReviewPage;
     private readonly SettingsPage _settingsPage;
     private readonly AboutPage _aboutPage;
     private bool _isClosed;
@@ -36,6 +37,9 @@ public sealed partial class MainWindow : Window
         _scannerService = new SerializedScannerService(
             DesktopPlatformFactory.CreateScanner(_captureStore.RootDirectory));
         _recognitionService = new SkiaAnswerSheetRecognitionService();
+        _subjectiveReviewPage = new SubjectiveReviewPage(
+            new LocalSubjectiveReviewService(_captureStore),
+            SaveTextAsync);
         _agentOperations = new DesktopLocalAgentOperations(
             _captureStore,
             _scannerService,
@@ -111,7 +115,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void AppNavigationView_SelectionChanged(
+    private async void AppNavigationView_SelectionChanged(
         NavigationView sender,
         NavigationViewSelectionChangedEventArgs args)
     {
@@ -143,6 +147,10 @@ public sealed partial class MainWindow : Window
                 NavigateTo(_recognitionPage, "识别 / 复核");
                 break;
             }
+            case "subjective-review":
+                NavigateTo(_subjectiveReviewPage, "主观题批阅");
+                await _subjectiveReviewPage.ActivateAsync();
+                break;
             case "settings":
                 NavigateTo(_settingsPage, "设置");
                 break;
@@ -410,8 +418,10 @@ public sealed partial class MainWindow : Window
         _isClosed = true;
         try
         {
-            await _capturePage.CancelAndWaitAsync();
-            await _recognitionPage.CancelAndWaitAsync();
+            await Task.WhenAll(
+                _capturePage.CancelAndWaitAsync(),
+                _recognitionPage.CancelAndWaitAsync(),
+                _subjectiveReviewPage.CancelAndWaitAsync());
             if (_printController is not null)
             {
                 await _printController.WaitForIdleAsync();
