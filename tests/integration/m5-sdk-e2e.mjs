@@ -48,7 +48,7 @@ try {
   stage = "start harness";
   harness = await startHarness(harnessAssembly);
   const fixtureBytes = await readSyntheticFixture(harness.fixturePath);
-  assertPngDimensions(fixtureBytes, 40, 40, "harness fixture");
+  assertPngDimensions(fixtureBytes, 420, 594, "harness mixed-template fixture");
   console.log("PASS synthetic fixture");
 
   firstClient = createClient(harness.endpoint);
@@ -63,12 +63,24 @@ try {
     firstClient,
     firstClient.createTemplateTask({
       idempotencyKey: randomUUID(),
-      parameters: { title: "M5 synthetic page", questionCount: 2, optionsPerQuestion: 4 },
+      parameters: {
+        title: "M5 synthetic page",
+        questionCount: 10,
+        optionsPerQuestion: 4,
+        subjectiveRegions: [
+          { questionNumber: 11, maxScore: 20, rectangleMm: { x: 110, y: 60, width: 80, height: 55 } },
+          { questionNumber: 12, maxScore: 10, rectangleMm: { x: 110, y: 125, width: 80, height: 50 } },
+        ],
+      },
     }, requestOptions),
     "template",
   );
   const templateResult = requireRecord(templateTask.result, "template result");
   const templateId = requireString(templateResult.templateId, "templateId");
+  assert(templateResult.schemaVersion === 2, "subjective template task should create schema-2 layout");
+  const templateRegions = requireArray(templateResult.subjectiveRegions, "template subjectiveRegions");
+  assert(templateRegions.length === 2, "template should return both generated subjective regions");
+  const questionIds = templateRegions.map((region, index) => requireGuid(region.questionId, `template subjective region ${index + 1} questionId`));
   console.log("PASS template task");
 
   stage = "upload synthetic capture";
@@ -87,32 +99,31 @@ try {
   const captureId = requireGuid(uploadResult.captureId, "captureId");
   console.log("PASS synthetic upload");
 
-  const questionIds = [randomUUID(), randomUUID()];
   stage = "create subjective review";
   const createTask = await submitAndWait(
     firstClient,
     firstClient.createSubjectiveReviewTask({
       idempotencyKey: randomUUID(),
-      parameters: {
-        captureId,
-        questions: [
-          { questionId: questionIds[0], questionNumber: 1, maxScore: 10, region: { x: 0, y: 0, width: 10, height: 10 } },
-          { questionId: questionIds[1], questionNumber: 2, maxScore: 20, region: { x: 10, y: 0, width: 20, height: 10 } },
-        ],
-      },
+      parameters: { captureId },
     }, requestOptions),
     "subjective review creation",
   );
   const createResult = requireRecord(createTask.result, "subjective review creation result");
   const reviewId = requireGuid(createResult.reviewId, "reviewId");
   const createdSnapshot = unwrapSnapshot(createResult);
+  const firstRegion = createdSnapshot.questions[0]?.region;
+  const secondRegion = createdSnapshot.questions[1]?.region;
+  assertRegionNear(firstRegion, { x: 220, y: 120, width: 160, height: 110 }, "first template region projection");
+  assertRegionNear(secondRegion, { x: 220, y: 250, width: 160, height: 100 }, "second template region projection");
+  const firstQuestionBase = { questionId: questionIds[0], questionNumber: 11, maxScore: 20, region: firstRegion };
+  const secondQuestionBase = { questionId: questionIds[1], questionNumber: 12, maxScore: 10, region: secondRegion };
   verifySnapshot(createdSnapshot, {
     reviewId,
     captureId,
     version: 1,
     expected: [
-      { questionId: questionIds[0], questionNumber: 1, maxScore: 10, region: { x: 0, y: 0, width: 10, height: 10 }, status: "ungraded", score: null, comment: null },
-      { questionId: questionIds[1], questionNumber: 2, maxScore: 20, region: { x: 10, y: 0, width: 20, height: 10 }, status: "ungraded", score: null, comment: null },
+      { ...firstQuestionBase, status: "ungraded", score: null, comment: null },
+      { ...secondQuestionBase, status: "ungraded", score: null, comment: null },
     ],
     isFinal: false,
     finalSubtotal: null,
@@ -121,9 +132,9 @@ try {
 
   stage = "read first question image";
   const firstQuestionImage = await firstClient.getSubjectiveQuestionImage(reviewId, questionIds[0], requestOptions);
-  assertPngDimensions(firstQuestionImage, 10, 10, "first subjective region");
+  assertPngDimensions(firstQuestionImage, firstRegion.width, firstRegion.height, "first rectified subjective region");
   const secondQuestionImage = await firstClient.getSubjectiveQuestionImage(reviewId, questionIds[1], requestOptions);
-  assertPngDimensions(secondQuestionImage, 20, 10, "second subjective region");
+  assertPngDimensions(secondQuestionImage, secondRegion.width, secondRegion.height, "second rectified subjective region");
   console.log("PASS subjective PNG signature and dimensions");
 
   stage = "save draft batch";
@@ -137,7 +148,7 @@ try {
         reviewer: "M5 E2E reviewer",
         edits: [
           { questionId: questionIds[0], status: "draft", score: 8, comment: "first draft" },
-          { questionId: questionIds[1], status: "draft", score: 16, comment: "second draft" },
+          { questionId: questionIds[1], status: "draft", score: 6, comment: "second draft" },
         ],
       },
     }, requestOptions),
@@ -149,8 +160,8 @@ try {
     captureId,
     version: 2,
     expected: [
-      { questionId: questionIds[0], questionNumber: 1, maxScore: 10, region: { x: 0, y: 0, width: 10, height: 10 }, status: "draft", score: 8, comment: "first draft" },
-      { questionId: questionIds[1], questionNumber: 2, maxScore: 20, region: { x: 10, y: 0, width: 20, height: 10 }, status: "draft", score: 16, comment: "second draft" },
+      { ...firstQuestionBase, status: "draft", score: 8, comment: "first draft" },
+      { ...secondQuestionBase, status: "draft", score: 6, comment: "second draft" },
     ],
     isFinal: false,
     finalSubtotal: null,
@@ -169,7 +180,7 @@ try {
         reviewer: "M5 E2E confirmer",
         edits: [
           { questionId: questionIds[0], status: "confirmed", score: 8, comment: "first draft" },
-          { questionId: questionIds[1], status: "confirmed", score: 16, comment: "second draft" },
+          { questionId: questionIds[1], status: "confirmed", score: 6, comment: "second draft" },
         ],
       },
     }, requestOptions),
@@ -181,11 +192,11 @@ try {
     captureId,
     version: 3,
     expected: [
-      { questionId: questionIds[0], questionNumber: 1, maxScore: 10, region: { x: 0, y: 0, width: 10, height: 10 }, status: "confirmed", score: 8, comment: "first draft" },
-      { questionId: questionIds[1], questionNumber: 2, maxScore: 20, region: { x: 10, y: 0, width: 20, height: 10 }, status: "confirmed", score: 16, comment: "second draft" },
+      { ...firstQuestionBase, status: "confirmed", score: 8, comment: "first draft" },
+      { ...secondQuestionBase, status: "confirmed", score: 6, comment: "second draft" },
     ],
     isFinal: true,
-    finalSubtotal: 24,
+    finalSubtotal: 14,
   });
   console.log("PASS confirmed final subtotal");
 
@@ -212,7 +223,7 @@ try {
     version: 3,
     expected: confirmedSnapshot.questions,
     isFinal: true,
-    finalSubtotal: 24,
+    finalSubtotal: 14,
   });
   console.log("PASS stale version leaves review unchanged");
 
@@ -239,7 +250,7 @@ try {
     version: 3,
     expected: confirmedSnapshot.questions,
     isFinal: true,
-    finalSubtotal: 24,
+    finalSubtotal: 14,
   });
   console.log("PASS confirmed score edit requires draft state");
 
@@ -263,8 +274,8 @@ try {
     captureId,
     version: 4,
     expected: [
-      { questionId: questionIds[0], questionNumber: 1, maxScore: 10, region: { x: 0, y: 0, width: 10, height: 10 }, status: "draft", score: 5, comment: "revised score" },
-      { questionId: questionIds[1], questionNumber: 2, maxScore: 20, region: { x: 10, y: 0, width: 20, height: 10 }, status: "confirmed", score: 16, comment: "second draft" },
+      { ...firstQuestionBase, status: "draft", score: 5, comment: "revised score" },
+      { ...secondQuestionBase, status: "confirmed", score: 6, comment: "second draft" },
     ],
     isFinal: false,
     finalSubtotal: null,
@@ -291,11 +302,11 @@ try {
     captureId,
     version: 5,
     expected: [
-      { questionId: questionIds[0], questionNumber: 1, maxScore: 10, region: { x: 0, y: 0, width: 10, height: 10 }, status: "confirmed", score: 5, comment: "revised score" },
-      { questionId: questionIds[1], questionNumber: 2, maxScore: 20, region: { x: 10, y: 0, width: 20, height: 10 }, status: "confirmed", score: 16, comment: "second draft" },
+      { ...firstQuestionBase, status: "confirmed", score: 5, comment: "revised score" },
+      { ...secondQuestionBase, status: "confirmed", score: 6, comment: "second draft" },
     ],
     isFinal: true,
-    finalSubtotal: 21,
+    finalSubtotal: 11,
   });
   assertAuditHistory(finalSnapshot, questionIds);
   console.log("PASS revised score reconfirmation");
@@ -318,7 +329,7 @@ try {
     version: 5,
     expected: finalSnapshot.questions,
     isFinal: true,
-    finalSubtotal: 21,
+    finalSubtotal: 11,
   });
   assert(JSON.stringify(exportedSnapshot.history) === JSON.stringify(finalSnapshot.history), "JSON export must preserve the complete grading history");
   console.log("PASS JSON export");
@@ -335,8 +346,8 @@ try {
   const csvExport = requireRecord(csvExportTask.result, "CSV export result");
   assert(typeof csvExport.content === "string" && csvExport.content.length > 0, "CSV export content must be a non-empty string");
   assert(csvExport.content.startsWith("questionId,questionNumber,maxScore,status,score,comment,reviewer,confirmedAtUtc"), "CSV export must contain its question grading columns");
-  assert(csvExport.content.includes("revised score") && /\r?\n"[^"]+","1","10","confirmed","5","revised score",/.test(csvExport.content), "CSV export must contain the revised question score and comment");
-  assert(/\r?\n"[^"]+","2","20","confirmed","16","second draft",/.test(csvExport.content), "CSV export must contain the second confirmed question score");
+  assert(csvExport.content.includes("revised score") && /\r?\n"[^"]+","11","20","confirmed","5","revised score",/.test(csvExport.content), "CSV export must contain the revised question score and comment");
+  assert(/\r?\n"[^"]+","12","10","confirmed","6","second draft",/.test(csvExport.content), "CSV export must contain the second confirmed question score");
   console.log("PASS CSV export");
 
   stage = "pair second grant";
@@ -387,7 +398,7 @@ try {
     version: 5,
     expected: finalSnapshot.questions,
     isFinal: true,
-    finalSubtotal: 21,
+    finalSubtotal: 11,
   });
   console.log("PASS same-origin grants remain isolated");
 
@@ -765,8 +776,21 @@ function assertRectangle(value, expected) {
   assert(actual.height === expected.height, "region height mismatch");
 }
 
+function assertRegionNear(value, expected, label) {
+  const actual = requireRecord(value, label);
+  for (const key of ["x", "y", "width", "height"]) {
+    assert(Number.isFinite(actual[key]), `${label} ${key} must be finite`);
+    assert(Math.abs(actual[key] - expected[key]) <= 2, `${label} ${key} differs from template projection`);
+  }
+}
+
 function requireRecord(value, label) {
   assert(value !== null && typeof value === "object" && !Array.isArray(value), `${label} is not an object`);
+  return value;
+}
+
+function requireArray(value, label) {
+  assert(Array.isArray(value), `${label} is not an array`);
   return value;
 }
 
@@ -777,7 +801,7 @@ function requireString(value, label) {
 
 function requireGuid(value, label) {
   const text = requireString(value, label);
-  assert(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)
+  assert(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)
     || /^[0-9a-f]{32}$/i.test(text), `${label} is not a GUID`);
   return text.toLowerCase();
 }

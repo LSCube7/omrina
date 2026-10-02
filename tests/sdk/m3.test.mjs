@@ -101,6 +101,7 @@ test("M3 pairing stores credentials in memory and uses fixed authenticated route
 
   const templates = await client.getTemplates();
   assert.equal(templates[0].svg, template.svg);
+  assert.deepEqual(templates[0].subjectiveRegions, [], "legacy templates should parse with no subjective regions");
   assert.deepEqual(await client.getDevices(), [{ deviceId: "scanner-1", name: "Scanner", driver: "mock" }]);
   assert.equal(requests[2].headers.get("authorization"), "Bearer secret-token");
   assert.equal(requests[3].headers.get("authorization"), "Bearer secret-token");
@@ -148,7 +149,16 @@ test("business methods send only fixed operations and accurately parse task snap
 
   await client.createTemplateTask({
     idempotencyKey: "key-template",
-    parameters: { title: "Quiz", questionCount: 10, optionsPerQuestion: 4 },
+    parameters: {
+      title: "Quiz",
+      questionCount: 10,
+      optionsPerQuestion: 4,
+      subjectiveRegions: [{
+        questionNumber: 11,
+        maxScore: 10,
+        rectangleMm: { x: 20, y: 180, width: 80, height: 24 },
+      }],
+    },
   });
   await client.uploadImage({
     idempotencyKey: "key-upload",
@@ -185,15 +195,7 @@ test("business methods send only fixed operations and accurately parse task snap
   });
   await client.createSubjectiveReviewTask({
     idempotencyKey: "key-subjective-create",
-    parameters: {
-      captureId: "capture-1",
-      questions: [{
-        questionId: "12345678-1234-1234-1234-1234567890ab",
-        questionNumber: 1,
-        maxScore: 10,
-        region: { x: 0, y: 0, width: 20, height: 20 },
-      }],
-    },
+    parameters: { captureId: "capture-1" },
   });
   await client.createSubjectiveReadTask({
     idempotencyKey: "key-subjective-read",
@@ -235,6 +237,13 @@ test("business methods send only fixed operations and accurately parse task snap
       "subjectiveExport",
     ],
   );
+  const templateTaskBody = JSON.parse(requests.find(({ url, init }) =>
+    url.pathname === "/v1/tasks" && init.method === "POST" && JSON.parse(init.body).operation === "template").init.body);
+  assert.deepEqual(templateTaskBody.parameters.subjectiveRegions, [{
+    questionNumber: 11,
+    maxScore: 10,
+    rectangleMm: { x: 20, y: 180, width: 80, height: 24 },
+  }]);
   const uploadRequest = requests.find(({ url }) => url.pathname === "/v1/tasks/upload");
   assert.ok(uploadRequest);
   assert.equal(uploadRequest.init.method, "POST");
@@ -286,7 +295,7 @@ test("subjective image retrieval uses its fixed authenticated PNG route", async 
   );
   assert.throws(
     () => client.createSubjectiveReviewTask({
-      idempotencyKey: "key-invalid-region",
+      idempotencyKey: "key-caller-defined-region",
       parameters: {
         captureId: "capture-1",
         questions: [{
@@ -294,6 +303,23 @@ test("subjective image retrieval uses its fixed authenticated PNG route", async 
           questionNumber: 1,
           maxScore: 10,
           region: { x: -1, y: 0, width: 20, height: 20 },
+        }],
+      },
+    }),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_ARGUMENT",
+  );
+
+  assert.throws(
+    () => client.createTemplateTask({
+      idempotencyKey: "key-invalid-mm-region",
+      parameters: {
+        title: "Quiz",
+        questionCount: 10,
+        optionsPerQuestion: 4,
+        subjectiveRegions: [{
+          questionNumber: 1,
+          maxScore: 10,
+          rectangleMm: { x: 200, y: 280, width: 20, height: 24 },
         }],
       },
     }),

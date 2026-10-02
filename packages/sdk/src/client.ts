@@ -61,6 +61,21 @@ export type TemplateSummary = {
   optionsPerQuestion: number;
   templateNumber: string;
   svg: string;
+  subjectiveRegions: TemplateSubjectiveRegionSummary[];
+};
+
+export type TemplateSubjectiveRegionSummary = {
+  questionId: string;
+  questionNumber: number;
+  maxScore: number;
+  rectangleMm: TemplateMillimetreRectangle;
+};
+
+export type TemplateMillimetreRectangle = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 export type DeviceDescriptor = {
@@ -73,6 +88,13 @@ export type TemplateTaskParameters = {
   title: string;
   questionCount: number;
   optionsPerQuestion: number;
+  subjectiveRegions?: TemplateSubjectiveRegionInput[];
+};
+
+export type TemplateSubjectiveRegionInput = {
+  questionNumber: number;
+  maxScore: number;
+  rectangleMm: TemplateMillimetreRectangle;
 };
 
 export type ScanTaskParameters = {
@@ -120,16 +142,8 @@ export type SubjectivePixelRegion = {
   height: number;
 };
 
-export type SubjectiveQuestionDefinition = {
-  questionId: string;
-  questionNumber: number;
-  maxScore: number;
-  region: SubjectivePixelRegion;
-};
-
 export type SubjectiveCreateTaskParameters = {
   captureId: string;
-  questions: SubjectiveQuestionDefinition[];
 };
 
 export type SubjectiveGradeStatus = "draft" | "confirmed" | "ungraded";
@@ -1276,9 +1290,13 @@ function parseTemplateSummary(payload: unknown): TemplateSummary {
     || !isInteger(payload.questionCount)
     || !isInteger(payload.optionsPerQuestion)
     || typeof payload.templateNumber !== "string"
-    || typeof payload.svg !== "string") {
+    || typeof payload.svg !== "string"
+    || (payload.subjectiveRegions !== undefined && !Array.isArray(payload.subjectiveRegions))) {
     throw invalidResponse("Template entry did not match the supported protocol.");
   }
+  const subjectiveRegions = payload.subjectiveRegions === undefined
+    ? []
+    : payload.subjectiveRegions.map(parseTemplateSubjectiveRegionSummary);
   return {
     templateId: payload.templateId,
     schemaVersion: payload.schemaVersion,
@@ -1287,6 +1305,37 @@ function parseTemplateSummary(payload: unknown): TemplateSummary {
     optionsPerQuestion: payload.optionsPerQuestion,
     templateNumber: payload.templateNumber,
     svg: payload.svg,
+    subjectiveRegions,
+  };
+}
+
+function parseTemplateSubjectiveRegionSummary(payload: unknown): TemplateSubjectiveRegionSummary {
+  if (!isRecord(payload)
+    || typeof payload.questionId !== "string"
+    || !isPositiveInt32(payload.questionNumber)
+    || typeof payload.maxScore !== "number"
+    || !Number.isFinite(payload.maxScore)
+    || payload.maxScore <= 0
+    || payload.maxScore > 1_000_000
+    || !isRecord(payload.rectangleMm)
+    || !isFiniteNonNegativeNumber(payload.rectangleMm.x)
+    || !isFiniteNonNegativeNumber(payload.rectangleMm.y)
+    || !isFinitePositiveNumber(payload.rectangleMm.width)
+    || !isFinitePositiveNumber(payload.rectangleMm.height)
+    || payload.rectangleMm.x + payload.rectangleMm.width > 210
+    || payload.rectangleMm.y + payload.rectangleMm.height > 297) {
+    throw invalidResponse("Template subjective region did not match the supported protocol.");
+  }
+  return {
+    questionId: payload.questionId,
+    questionNumber: payload.questionNumber,
+    maxScore: payload.maxScore,
+    rectangleMm: {
+      x: payload.rectangleMm.x,
+      y: payload.rectangleMm.y,
+      width: payload.rectangleMm.width,
+      height: payload.rectangleMm.height,
+    },
   };
 }
 
@@ -1400,6 +1449,33 @@ function validateTemplateParameters(parameters: TemplateTaskParameters): void {
   requireNonEmptyString(parameters.title, "title");
   requirePositiveInteger(parameters.questionCount, "questionCount");
   requirePositiveInteger(parameters.optionsPerQuestion, "optionsPerQuestion");
+  if (parameters.subjectiveRegions === undefined) {
+    return;
+  }
+  if (!Array.isArray(parameters.subjectiveRegions) || parameters.subjectiveRegions.length < 1 || parameters.subjectiveRegions.length > 64) {
+    throw invalidArgument("subjectiveRegions must contain between 1 and 64 template regions when provided.");
+  }
+  const questionNumbers = new Set<number>();
+  for (const region of parameters.subjectiveRegions) {
+    if (!isRecord(region)
+      || !isPositiveInt32(region.questionNumber)
+      || region.questionNumber > 2_147_483_647
+      || questionNumbers.has(region.questionNumber)
+      || typeof region.maxScore !== "number"
+      || !Number.isFinite(region.maxScore)
+      || region.maxScore <= 0
+      || region.maxScore > 1_000_000
+      || !isRecord(region.rectangleMm)
+      || !isFiniteNonNegativeNumber(region.rectangleMm.x)
+      || !isFiniteNonNegativeNumber(region.rectangleMm.y)
+      || !isFinitePositiveNumber(region.rectangleMm.width)
+      || !isFinitePositiveNumber(region.rectangleMm.height)
+      || region.rectangleMm.x + region.rectangleMm.width > 210
+      || region.rectangleMm.y + region.rectangleMm.height > 297) {
+      throw invalidArgument("Each subjective template region must be a unique bounded millimetre rectangle with a positive maximum score.");
+    }
+    questionNumbers.add(region.questionNumber);
+  }
 }
 
 function validateScanParameters(parameters: ScanTaskParameters): void {
@@ -1439,54 +1515,23 @@ function validateReviewParameters(parameters: ReviewTaskParameters): void {
 }
 
 function validateSubjectiveCreateParameters(parameters: SubjectiveCreateTaskParameters): void {
+  if (!isRecord(parameters)
+    || Object.keys(parameters).some((key) => key !== "captureId")) {
+    throw invalidArgument("subjectiveCreate accepts only the captureId; regions come from its template.");
+  }
   requireNonEmptyString(parameters.captureId, "captureId");
-  if (!Array.isArray(parameters.questions) || parameters.questions.length < 1 || parameters.questions.length > 64) {
-    throw invalidArgument("questions must contain between 1 and 64 subjective question regions.");
-  }
-  const questionIds = new Set<string>();
-  const questionNumbers = new Set<number>();
-  for (const question of parameters.questions) {
-    if (!isRecord(question)) {
-      throw invalidArgument("Each subjective question must include an ID, number, maximum score, and pixel region.");
-    }
-    validateGuid(question.questionId, "questionId");
-    if (questionIds.has(question.questionId)) {
-      throw invalidArgument("questionId values must be unique.");
-    }
-    questionIds.add(question.questionId);
-    if (!Number.isSafeInteger(question.questionNumber) || question.questionNumber < 1 || question.questionNumber > 64) {
-      throw invalidArgument("questionNumber must be between 1 and 64.");
-    }
-    if (questionNumbers.has(question.questionNumber)) {
-      throw invalidArgument("questionNumber values must be unique.");
-    }
-    questionNumbers.add(question.questionNumber);
-    if (typeof question.maxScore !== "number"
-      || !Number.isFinite(question.maxScore)
-      || question.maxScore <= 0
-      || question.maxScore > 1_000_000) {
-      throw invalidArgument("maxScore must be greater than zero and at most 1,000,000.");
-    }
-    const region = question.region;
-    if (!isRecord(region)
-      || !Number.isSafeInteger(region.x)
-      || !Number.isSafeInteger(region.y)
-      || !Number.isSafeInteger(region.width)
-      || !Number.isSafeInteger(region.height)
-      || region.x < 0
-      || region.y < 0
-      || region.width <= 0
-      || region.height <= 0
-      || region.x > 16_000
-      || region.y > 16_000
-      || region.width > 16_000
-      || region.height > 16_000
-      || region.x + region.width > 16_000
-      || region.y + region.height > 16_000
-      || region.width * region.height > 4_000_000) {
-      throw invalidArgument("region must be a positive, bounded pixel rectangle.");
-    }
-  }
+}
+
+function isFiniteNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isFinitePositiveNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isPositiveInt32(value: unknown): value is number {
+  return isInteger(value) && value > 0 && value <= 2_147_483_647;
 }
 
 function validateSubjectiveGradeParameters(parameters: SubjectiveGradeTaskParameters): void {
