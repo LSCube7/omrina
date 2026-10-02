@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OMRINA M3 SDK 浏览器联调</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 2rem 1rem;
+        background: #f4f6f8;
+        color: #17202a;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 1.5rem;
+        border: 1px solid #d9e0e7;
+        border-radius: 12px;
+        background: white;
+        box-shadow: 0 8px 30px rgb(20 40 60 / 8%);
+      }
+      h1 { margin-top: 0; font-size: 1.5rem; }
+      p { line-height: 1.55; }
+      .field { display: grid; gap: 0.35rem; margin: 1rem 0; }
+      label { font-weight: 650; }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 0.65rem 0.75rem;
+        border: 1px solid #9eacba;
+        border-radius: 6px;
+        font: inherit;
+      }
+      .actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 1rem 0; }
+      button {
+        padding: 0.65rem 0.9rem;
+        border: 0;
+        border-radius: 6px;
+        background: #155eef;
+        color: white;
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+      button.secondary { background: #475467; }
+      button.danger { background: #b42318; }
+      button:disabled { cursor: wait; opacity: 0.55; }
+      #log {
+        min-height: 14rem;
+        max-height: 28rem;
+        overflow: auto;
+        padding: 0.9rem;
+        border-radius: 6px;
+        background: #101828;
+        color: #e4e7ec;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 0.85rem/1.5 ui-monospace, Consolas, monospace;
+      }
+      .note { color: #475467; font-size: 0.92rem; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #101828; color: #e4e7ec; }
+        main { background: #1d2939; border-color: #344054; }
+        input { background: #101828; color: #e4e7ec; border-color: #667085; }
+        .note { color: #d0d5dd; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OMRINA M3 SDK 浏览器联调</h1>
+      <p class="note">仅用于本地开发验证。桌面批准配对后，将一次性 code 输入下方；页面不会把授权令牌放入 URL 或日志。</p>
+
+      <div class="field">
+        <label for="endpoint">本地服务端点</label>
+        <input id="endpoint" value="http://127.0.0.1:17844" autocomplete="url">
+      </div>
+      <div class="field">
+        <label for="client-name">客户端名称</label>
+        <input id="client-name" value="OMRINA browser harness" maxlength="80">
+      </div>
+      <div class="actions">
+        <button id="request-pairing">申请配对</button>
+      </div>
+
+      <div class="field">
+        <label for="pairing-code">桌面显示的一次性 code</label>
+        <input id="pairing-code" type="password" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="actions">
+        <button id="exchange-pairing" class="secondary">交换授权</button>
+        <button id="run-smoke">运行模板、任务与事件检查</button>
+        <button id="revoke-grant" class="danger">撤销授权</button>
+      </div>
+
+      <h2>运行记录</h2>
+      <pre id="log" role="status" aria-live="polite"></pre>
+    </main>
+
+    <script type="module">
+      import { OmrinaClient, OmrinaSdkError } from "/sdk/index.js";
+
+      const endpointInput = document.querySelector("#endpoint");
+      const clientNameInput = document.querySelector("#client-name");
+      const codeInput = document.querySelector("#pairing-code");
+      const log = document.querySelector("#log");
+      const buttons = [...document.querySelectorAll("button")];
+      let client;
+      let pairingRequestId;
+      let eventController;
+      let eventWatch;
+
+      function write(level, message) {
+        const line = `[${new Date().toLocaleTimeString()}] ${level} ${message}`;
+        log.textContent = `${log.textContent}${log.textContent ? "\n" : ""}${line}`;
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function describeError(error) {
+        if (error instanceof OmrinaSdkError) {
+          return `${error.code}${error.status ? ` HTTP ${error.status}` : ""}: ${error.message}`;
+        }
+        return error instanceof Error ? error.message : "未知错误";
+      }
+
+      function setBusy(busy) {
+        for (const button of buttons) button.disabled = busy;
+      }
+
+      function newClient() {
+        client = new OmrinaClient({ endpoint: endpointInput.value.trim() });
+        pairingRequestId = undefined;
+        return client;
+      }
+
+      function requireClient() {
+        return client ?? newClient();
+      }
+
+      async function stopEvents() {
+        if (!eventController) return;
+        eventController.abort();
+        eventController = undefined;
+        try {
+          await eventWatch;
+        } catch (error) {
+          if (!(error instanceof OmrinaSdkError && error.code === "ABORTED")) {
+            write("ERROR", `事件连接结束：${describeError(error)}`);
+          }
+        }
+      }
+
+      async function startEvents() {
+        await stopEvents();
+        eventController = new AbortController();
+        const controller = eventController;
+        let readyResolve;
+        let readyReject;
+        const ready = new Promise((resolve, reject) => {
+          readyResolve = resolve;
+          readyReject = reject;
+        });
+        let isReady = false;
+        eventWatch = requireClient().watchEvents({
+          signal: controller.signal,
+          onAuthenticated(sequence) {
+            write("PASS", `WebSocket 已认证，当前序号 ${sequence}`);
+          },
+          onRecovered(recovery) {
+            write("PASS", `任务恢复 ${recovery.reason}：${recovery.tasks.length} 项`);
+            if (!isReady) {
+              isReady = true;
+              readyResolve();
+            }
+          },
+          onEvent(event) {
+            write("PASS", `收到任务事件 #${event.sequence}：${event.task.operation} / ${event.task.status}`);
+          },
+        }).catch((error) => {
+          if (!isReady) readyReject(error);
+          if (!(error instanceof OmrinaSdkError && error.code === "ABORTED")) {
+            write("ERROR", `事件连接失败：${describeError(error)}`);
+          }
+        });
+        return ready;
+      }
+
+      document.querySelector("#request-pairing").addEventListener("click", async () => {
+        setBusy(true);
+        try {
+          const activeClient = newClient();
+          const ticket = await activeClient.requestPairing({ clientName: clientNameInput.value.trim() });
+          pairingRequestId = ticket.requestId;
+          codeInput.value = "";
+          write("PASS", `配对请求已创建：${ticket.requestId}，请在桌面批准后输入一次性 code。`);
+        } catch (error) {
+          write("ERROR", describeError(error));
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      document.querySelector("#exchange-pairing").addEventListener("click", async () => {
+        setBusy(true);
+        try {
+          if (!pairingRequestId) throw new Error("请先申请配对。");
+          const code = codeInput.value;
+          await requireClient().exchangePairing({ requestId: pairingRequestId, code });
+          codeInput.value = "";
+          write("PASS", "授权交换成功，令牌只保存在当前页面内存中。未显示令牌。");
+        } catch (error) {
+          write("ERROR", describeError(error));
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      document.querySelector("#run-smoke").addEventListener("click", async () => {
+        setBusy(true);
+        try {
+          const activeClient = requireClient();
+          const templates = await activeClient.getTemplates();
+          const devices = await activeClient.getDevices();
+          write("PASS", `模板 ${templates.length} 项（SVG 字段可读），设备 ${devices.length} 项。`);
+
+          await startEvents();
+          const task = await activeClient.createTemplateTask({
+            idempotencyKey: crypto.randomUUID(),
+            parameters: { title: "SDK browser smoke", questionCount: 10, optionsPerQuestion: 4 },
+          });
+          const current = await activeClient.getTask(task.taskId);
+          const tasks = await activeClient.listTasks();
+          await activeClient.cancelTask(task.taskId);
+          write("PASS", `任务创建、查询、取消与列表通过：${current.operation} / ${current.status}；列表 ${tasks.length} 项。`);
+        } catch (error) {
+          write("ERROR", describeError(error));
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      document.querySelector("#revoke-grant").addEventListener("click", async () => {
+        setBusy(true);
+        try {
+          await stopEvents();
+          await requireClient().revokeGrant();
+          client = undefined;
+          pairingRequestId = undefined;
+          codeInput.value = "";
+          write("PASS", "授权已撤销，SDK 已清除当前实例中的令牌。可重新申请配对。 ");
+        } catch (error) {
+          write("ERROR", describeError(error));
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      write("READY", `静态联调页已加载；HTTP/WS 请求会使用当前页面 Origin。默认目标 ${endpointInput.value}。`);
+    </script>
+  </body>
+</html>
