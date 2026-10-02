@@ -19,11 +19,11 @@ public sealed class LoopbackHealthServer : IAsyncDisposable
     public IReadOnlyList<PendingPairing> PendingPairings => _host.PendingPairings;
     public IReadOnlyList<GrantSummary> ActiveGrants => _host.ActiveGrants;
     public string? BaseAddress { get; private set; }
-    public LoopbackHealthServer(ILocalAgentOperations? operations = null, IEnumerable<string>? allowedOrigins = null, int port = Port)
+    public LoopbackHealthServer(ILocalAgentOperations? operations = null, IEnumerable<string>? allowedOrigins = null, int port = Port, TimeProvider? timeProvider = null)
     {
         _port = port;
         _host = new LocalAgentHost(operations, allowedOrigins ??
-            (Environment.GetEnvironmentVariable("OMRINA_ALLOWED_ORIGINS") ?? Environment.GetEnvironmentVariable("ANSWERSHEET_ALLOWED_ORIGINS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            (Environment.GetEnvironmentVariable("OMRINA_ALLOWED_ORIGINS") ?? Environment.GetEnvironmentVariable("ANSWERSHEET_ALLOWED_ORIGINS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), timeProvider ?? TimeProvider.System);
         _host.StateChanged += () => PairingStateChanged?.Invoke();
         _host.GrantRevoked += id => GrantRevoked?.Invoke(id);
     }

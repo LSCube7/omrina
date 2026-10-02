@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Omrina.Server.Tests" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\Omrina.Protocol\Omrina.Protocol.csproj" />
   </ItemGroup>

@@ -104,6 +104,33 @@ async Task<JsonElement> Receive(ClientWebSocket ws)
     return JsonDocument.Parse(bytes.AsMemory(0, received.Count)).RootElement.Clone();
 }
 Check((await Receive(socket)).GetProperty("type").GetString() == "authenticated", "WS first-frame authentication");
+var extraSubscriptions = new List<ClientWebSocket>();
+try
+{
+    for (var i = 0; i < 7; i++)
+    {
+        var extra = new ClientWebSocket(); extraSubscriptions.Add(extra);
+        extra.Options.SetRequestHeader("Origin", origin);
+        await extra.ConnectAsync(new Uri(server.BaseAddress!.Replace("http://", "ws://") + "/v1/events"), CancellationToken.None);
+        await extra.SendAsync(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { type = "authenticate", token = grant.Token })), WebSocketMessageType.Text, true, CancellationToken.None);
+        Check((await Receive(extra)).GetProperty("type").GetString() == "authenticated", "valid WS subscription within capacity " + (i + 2));
+    }
+    using var ninth = new ClientWebSocket(); ninth.Options.SetRequestHeader("Origin", origin);
+    await ninth.ConnectAsync(new Uri(server.BaseAddress!.Replace("http://", "ws://") + "/v1/events"), CancellationToken.None);
+    await ninth.SendAsync(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { type = "authenticate", token = grant.Token })), WebSocketMessageType.Text, true, CancellationToken.None);
+    Check((await Receive(ninth)).GetProperty("type").GetString() == "closed" && (int?)ninth.CloseStatus == 1013, "ninth valid WS subscription receives wire close code 1013");
+    using var response = await Request("GET", "/v1/tasks", token: grant.Token);
+    Check(response.IsSuccessStatusCode, "WS subscription capacity does not revoke grant");
+}
+finally
+{
+    foreach (var extra in extraSubscriptions)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try { await extra.CloseAsync(WebSocketCloseStatus.NormalClosure, "Test completed", timeout.Token); }
+        finally { extra.Dispose(); }
+    }
+}
 using (var unauthenticated = new ClientWebSocket())
 {
     unauthenticated.Options.SetRequestHeader("Origin", origin);
@@ -151,10 +178,20 @@ await operations.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5)); Check(true, 
 server.RevokeGrant(grant.GrantId);
 while ((await Receive(socket)).GetProperty("type").GetString() != "closed") { }
 Check(true, "revoke closes WS");
+Check(socket.CloseStatus == WebSocketCloseStatus.PolicyViolation, "revoke uses authorization close code 1008");
 using (var response = await Request("GET", "/v1/tasks", token: grant.Token)) Check(response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized, "revoked token denied");
 using var ticketResponse2 = await Request("POST", "/v1/pairing/requests", new PairingRequest("bad codes"));
 var ticket2 = await Read<PairingTicket>(ticketResponse2); var correctCode = server.ApprovePairing(ticket2.RequestId);
+var exhaustedNotification = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+void OnPairingStateChanged()
+{
+    if (!server.PendingPairings.Any(pairing => pairing.RequestId == ticket2.RequestId)) exhaustedNotification.TrySetResult();
+}
+server.PairingStateChanged += OnPairingStateChanged;
 for (var i = 0; i < 5; i++) { using var response = await Request("POST", "/v1/pairing/exchange", new PairingExchange(ticket2.RequestId, "wrong")); Check(response.StatusCode == HttpStatusCode.Unauthorized, "wrong code denied " + i); }
+await exhaustedNotification.Task.WaitAsync(TimeSpan.FromSeconds(5));
+server.PairingStateChanged -= OnPairingStateChanged;
+Check(true, "exhausted code attempts notify desktop and remove pending request");
 using (var response = await Request("POST", "/v1/pairing/exchange", new PairingExchange(ticket2.RequestId, correctCode))) Check(response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.TooManyRequests, "code locked after attempts");
 for (var i = 0; i < 11; i++)
 {
@@ -181,7 +218,48 @@ await server.StopAsync(); await server.StartAsync();
 for (var i = 0; i < 100 && operations.CancelCount < 33; i++) await Task.Delay(10);
 Check(operations.CancelCount >= 33, "stop cancels all active operations");
 using (var response = await Request("GET", "/v1/tasks", token: other.Token, from: "https://other.example")) Check(response.StatusCode == HttpStatusCode.Forbidden, "restart invalidates grants");
+
+// Exercise the production timer and notification without waiting five real minutes.
+var clock = new AdjustableClock();
+await using (var expiringServer = new LoopbackHealthServer(operations, port: 0, timeProvider: clock))
+{
+    await expiringServer.StartAsync();
+    using var expiryClient = new HttpClient();
+    using var request = new HttpRequestMessage(HttpMethod.Post, expiringServer.BaseAddress + "/v1/pairing/requests");
+    request.Headers.Add("Origin", origin);
+    request.Content = new StringContent("{\"clientName\":\"Expiry regression\"}", Encoding.UTF8, "application/json");
+    using var response = await expiryClient.SendAsync(request);
+    Check(response.StatusCode == HttpStatusCode.Accepted, "expiry regression pairing requested");
+    var ticket = await Read<PairingTicket>(response);
+    var expiredNotification = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    expiringServer.PairingStateChanged += () =>
+    {
+        if (!expiringServer.PendingPairings.Any(p => p.RequestId == ticket.RequestId)) expiredNotification.TrySetResult();
+    };
+    clock.Advance(TimeSpan.FromMinutes(6));
+    await expiredNotification.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    Check(true, "periodic pending expiry notifies desktop without another request");
+}
+
+// Drive the real bounded production buffer; no socket backpressure or private state reflection.
+var subscription = new EventSubscription();
+var acceptedEvents = Enumerable.Range(1, 128).Count(sequence => subscription.TryPublish(new AgentEvent("task", sequence)));
+Check(acceptedEvents == 128, "production event buffer accepts its bounded capacity");
+Check(!subscription.TryPublish(new AgentEvent("task", 129)), "production event buffer detects overflow");
+Check((int)subscription.CloseStatus == 1013, "event overflow uses retryable close code 1013");
+var drainedEvents = 0;
+while (subscription.Reader.TryRead(out _)) drainedEvents++;
+Check(drainedEvents == 128 && !await subscription.Reader.WaitToReadAsync(), "overflow preserves queued events and completes reader");
+subscription.Complete();
+Check((int)subscription.CloseStatus == 1013, "connection cleanup preserves retryable close reason");
 Console.WriteLine($"Server HTTP/WS checks passed: {assertions}");
+
+sealed class AdjustableClock : TimeProvider
+{
+    private long _offsetTicks;
+    public override DateTimeOffset GetUtcNow() => DateTimeOffset.UtcNow.AddTicks(Interlocked.Read(ref _offsetTicks));
+    public void Advance(TimeSpan duration) => Interlocked.Add(ref _offsetTicks, duration.Ticks);
+}
 
 sealed class TestOperations : ILocalAgentOperations
 {

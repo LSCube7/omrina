@@ -416,8 +416,12 @@ export class OmrinaClient {
         if (cause instanceof EventCallbackFailure) {
           throw cause.cause;
         }
+        if (cause instanceof OmrinaSdkError && cause.code === "UNAUTHORIZED") {
+          this.#grant = undefined;
+          throw cause;
+        }
         if (cause instanceof OmrinaSdkError
-          && (cause.code === "UNAUTHORIZED" || cause.code === "INVALID_RESPONSE" || cause.code === "INVALID_ARGUMENT")) {
+          && (cause.code === "INVALID_RESPONSE" || cause.code === "INVALID_ARGUMENT")) {
           throw cause;
         }
         if (!hasConnected) {

@@ -275,16 +275,17 @@ test("task creation is not automatically retried after an uncertain network fail
   assert.equal(attempts, 1);
 });
 
-test("WebSocket authentication, sequence tracking, and reconnect recovery use only GET tasks", async () => {
+test("WebSocket 1013 reconnects and recovers tasks while 1008 clears credentials", async () => {
   const sockets = [];
   let taskReads = 0;
   class FakeSocket extends EventTarget {
     readyState = 0;
     sent = [];
 
-    constructor(sequence) {
+    constructor(sequence, authenticate = true) {
       super();
       this.sequence = sequence;
+      this.authenticate = authenticate;
       queueMicrotask(() => {
         this.readyState = 1;
         this.dispatchEvent(new Event("open"));
@@ -293,6 +294,10 @@ test("WebSocket authentication, sequence tracking, and reconnect recovery use on
 
     send(message) {
       this.sent.push(message);
+      if (!this.authenticate) {
+        queueMicrotask(() => this.remoteClose(1008));
+        return;
+      }
       queueMicrotask(() => this.emit({ type: "authenticated", sequence: this.sequence }));
     }
 
@@ -355,7 +360,6 @@ test("WebSocket authentication, sequence tracking, and reconnect recovery use on
       }
       if (recovery.reason === "reconnected") {
         reconnectRecoveryResolve(recovery);
-        controller.abort();
       }
     },
   });
@@ -367,11 +371,36 @@ test("WebSocket authentication, sequence tracking, and reconnect recovery use on
   sockets[0].emit({ type: "task", sequence: 1, task: makeTask("scan") });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(events[0].sequence, 1);
-  sockets[0].remoteClose();
+  sockets[0].remoteClose(1013);
   const recovered = await reconnectRecovery;
   assert.equal(recovered.sequence, 2);
-  await assert.rejects(watcher, (error) => error instanceof OmrinaSdkError && error.code === "ABORTED");
+  assert.equal(sockets[1].readyState, 1, "1013 capacity closes should reconnect with the existing grant");
+  sockets[1].remoteClose(1008);
+  await assert.rejects(watcher, (error) => error instanceof OmrinaSdkError && error.code === "UNAUTHORIZED");
+  await assert.rejects(client.listTasks(), (error) => {
+    return error instanceof OmrinaSdkError && error.code === "MISSING_CREDENTIAL";
+  });
   assert.equal(taskReads, 2);
   assert.equal(sockets.length, 2);
   assert.deepEqual(JSON.parse(sockets[1].sent[0]), { type: "authenticate", token: "secret-token" });
+
+  const unauthorizedSocket = new FakeSocket(0, false);
+  const unauthenticatedClient = new OmrinaClient({
+    grant,
+    fetch: async () => {
+      throw new Error("task recovery must not run before event authentication");
+    },
+    webSocketFactory: () => unauthorizedSocket,
+  });
+  const unauthorizedWatcher = unauthenticatedClient.watchEvents({
+    signal: new AbortController().signal,
+    timeoutMs: 50,
+    onEvent: () => undefined,
+  });
+  await assert.rejects(unauthorizedWatcher, (error) => {
+    return error instanceof OmrinaSdkError && error.code === "UNAUTHORIZED";
+  });
+  await assert.rejects(unauthenticatedClient.listTasks(), (error) => {
+    return error instanceof OmrinaSdkError && error.code === "MISSING_CREDENTIAL";
+  });
 });

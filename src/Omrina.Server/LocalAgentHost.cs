@@ -3,7 +3,6 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Channels;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Omrina.Protocol;
@@ -15,17 +14,19 @@ internal sealed class LocalAgentHost
     private const int MaxJson = 65536, MaxImage = 20 * 1024 * 1024;
     private readonly object _sync = new();
     private readonly ILocalAgentOperations? _operations;
+    private readonly TimeProvider _timeProvider;
     private readonly HashSet<string> _healthOrigins;
     private readonly Dictionary<string, Pairing> _pairings = new();
     private readonly Dictionary<string, Grant> _grants = new();
     private readonly Dictionary<string, (DateTimeOffset Start, int Count)> _rates = new();
     private readonly SemaphoreSlim _bodyReaders = new(8, 8);
-    private Timer? _expiryTimer;
+    private ITimer? _expiryTimer;
     public event Action? StateChanged;
     public event Action<string>? GrantRevoked;
-    public LocalAgentHost(ILocalAgentOperations? operations, IEnumerable<string> origins)
+    public LocalAgentHost(ILocalAgentOperations? operations, IEnumerable<string> origins, TimeProvider timeProvider)
     {
         _operations = operations;
+        _timeProvider = timeProvider;
         _healthOrigins = new HashSet<string>(origins.Select(origin => ValidOrigin(origin) ? origin : throw new ArgumentException("Invalid HTTP/HTTPS Origin.")), StringComparer.Ordinal);
     }
     public IReadOnlyList<PendingPairing> PendingPairings { get { lock (_sync) { Prune(); return _pairings.Values.Select(p => p.Summary).ToArray(); } } }
@@ -59,8 +60,10 @@ internal sealed class LocalAgentHost
     }
     private void Prune()
     {
-        var now = DateTimeOffset.UtcNow;
-        foreach (var p in _pairings.Values.Where(p => p.Summary.ExpiresAt <= now).ToArray()) _pairings.Remove(p.Summary.RequestId);
+        var now = _timeProvider.GetUtcNow();
+        var expiredPairings = _pairings.Values.Where(p => p.Summary.ExpiresAt <= now).ToArray();
+        foreach (var p in expiredPairings) _pairings.Remove(p.Summary.RequestId);
+        if (expiredPairings.Length > 0) NotifyStateChanged();
         foreach (var g in _grants.Values.Where(g => g.Summary.ExpiresAt <= now).ToArray())
         {
             _grants.Remove(g.Summary.GrantId);
@@ -71,9 +74,10 @@ internal sealed class LocalAgentHost
     private bool Rate(string key, int limit)
     {
         Prune();
-        if (!_rates.TryGetValue(key, out var rate)) { if (_rates.Count >= 256) return false; rate = (DateTimeOffset.UtcNow, 0); }
+        if (!_rates.TryGetValue(key, out var rate)) { if (_rates.Count >= 256) return false; rate = (_timeProvider.GetUtcNow(), 0); }
         _rates[key] = (rate.Start, rate.Count + 1); return rate.Count < limit;
     }
+    private void NotifyStateChanged() => ThreadPool.QueueUserWorkItem(_ => StateChanged?.Invoke());
     private static bool ValidOrigin(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
         && (uri.Scheme == "http" || uri.Scheme == "https") && uri.UserInfo == "" && uri.AbsolutePath == "/"
         && uri.Query == "" && uri.Fragment == "" && uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped) == value;
@@ -95,7 +99,7 @@ internal sealed class LocalAgentHost
     }
     public void Map(WebApplication app)
     {
-        app.Lifetime.ApplicationStarted.Register(() => _expiryTimer = new Timer(_ => { lock (_sync) Prune(); }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)));
+        app.Lifetime.ApplicationStarted.Register(() => _expiryTimer = _timeProvider.CreateTimer(_ => { lock (_sync) Prune(); }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)));
         app.UseWebSockets();
         app.Use(async (context, next) =>
         {
@@ -142,7 +146,7 @@ internal sealed class LocalAgentHost
             lock (_sync)
             {
                 if (!Rate("pair:" + c.Request.Headers.Origin, 10) || _pairings.Count >= 64) return Error(429, "RATE_LIMITED");
-                ticket = new(Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow.AddMinutes(5));
+                ticket = new(Guid.NewGuid().ToString("N"), _timeProvider.GetUtcNow().AddMinutes(5));
                 _pairings.Add(ticket.RequestId, new Pairing(new(ticket.RequestId, c.Request.Headers.Origin.ToString(), body.ClientName, ticket.ExpiresAt)));
             }
             StateChanged?.Invoke(); return Json(ticket, 202);
@@ -156,10 +160,10 @@ internal sealed class LocalAgentHost
             {
                 if (!Rate("exchange:" + c.Request.Headers.Origin, 10)) return Error(429, "RATE_LIMITED");
                 if (!_pairings.TryGetValue(body.RequestId, out var p) || p.Summary.Origin != c.Request.Headers.Origin.ToString()) return Error(401, "PAIRING_DENIED");
-                if (!Matches(p.CodeHash, body.Code ?? "")) { if (++p.Attempts >= 5) _pairings.Remove(body.RequestId); return Error(401, "PAIRING_DENIED"); }
+                if (!Matches(p.CodeHash, body.Code ?? "")) { if (++p.Attempts >= 5) { _pairings.Remove(body.RequestId); NotifyStateChanged(); } return Error(401, "PAIRING_DENIED"); }
                 if (_grants.Count >= 64) return Error(429, "GRANT_LIMIT");
                 _pairings.Remove(body.RequestId);
-                var token = Secret(); var now = DateTimeOffset.UtcNow;
+                var token = Secret(); var now = _timeProvider.GetUtcNow();
                 var summary = new GrantSummary(Guid.NewGuid().ToString("N"), p.Summary.Origin, p.Summary.ClientName, now, now.AddHours(8));
                 _grants.Add(summary.GrantId, new Grant(summary, Hash(token)));
                 response = new(summary.GrantId, token, summary.ExpiresAt);
@@ -243,7 +247,7 @@ internal sealed class LocalAgentHost
             var allTasks = _grants.Values.SelectMany(g => g.Tasks.Values).ToArray();
             var active = allTasks.Where(t => t.Snapshot.Status is LocalTaskStatus.Queued or LocalTaskStatus.Running).ToArray();
             if (!Rate("task:" + grant.Summary.GrantId, 60) || grant.Tasks.Count >= 256 || allTasks.Length >= 512 || active.Length >= 32 || (image is not null && active.Count(t => t.Snapshot.Operation == TaskOperation.Upload) >= 4)) return Error(429, "TASK_LIMIT");
-            var now = DateTimeOffset.UtcNow;
+            var now = _timeProvider.GetUtcNow();
             job = new(new(Guid.NewGuid().ToString("N"), operation, LocalTaskStatus.Queued, null, null, now, now), fingerprint, CancellationTokenSource.CreateLinkedTokenSource(grant.Cancellation.Token));
             grant.Tasks.Add(job.Snapshot.TaskId, job); grant.Keys.Add(key, job);
             Publish(grant, job.Snapshot);
@@ -268,14 +272,15 @@ internal sealed class LocalAgentHost
         catch { Update(grant, job, LocalTaskStatus.Failed, error: new("OPERATION_FAILED", "操作失败，请检查输入后重试。")); }
     }
     private void Update(Grant grant, Job job, LocalTaskStatus status, JsonElement? result = null, ProtocolError? error = null)
-    { lock (_sync) { job.Snapshot = job.Snapshot with { Status = status, Result = result, Error = error, UpdatedAt = DateTimeOffset.UtcNow }; Publish(grant, job.Snapshot); } }
+    { lock (_sync) { job.Snapshot = job.Snapshot with { Status = status, Result = result, Error = error, UpdatedAt = _timeProvider.GetUtcNow() }; Publish(grant, job.Snapshot); } }
     private static void Publish(Grant grant, TaskSnapshot task)
-    { var evt = new AgentEvent("task", ++grant.Sequence, task); foreach (var listener in grant.Listeners.ToArray()) if (!listener.Writer.TryWrite(evt)) { listener.Writer.TryComplete(); grant.Listeners.Remove(listener); } }
+    { var evt = new AgentEvent("task", ++grant.Sequence, task); foreach (var listener in grant.Listeners.ToArray()) if (!listener.TryPublish(evt)) grant.Listeners.Remove(listener); }
     private async Task WebSocketAsync(HttpContext c)
     {
         if (!c.WebSockets.IsWebSocketRequest || c.Request.QueryString.HasValue) { c.Response.StatusCode = 400; return; }
         using var socket = await c.WebSockets.AcceptWebSocketAsync();
-        Grant? grant = null; Channel<AgentEvent>? events = null;
+        Grant? grant = null; EventSubscription? events = null;
+        var connectionCloseStatus = WebSocketCloseStatus.PolicyViolation;
         Task<WebSocketReceiveResult>? receiving = null;
         try
         {
@@ -290,11 +295,16 @@ internal sealed class LocalAgentHost
             long sequence;
             lock (_sync)
             {
-                if (grant.Listeners.Count >= 8 || grant.Cancellation.IsCancellationRequested) return;
-                events = Channel.CreateBounded<AgentEvent>(new BoundedChannelOptions(128) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
+                if (grant.Cancellation.IsCancellationRequested) return;
+                if (grant.Listeners.Count >= 8)
+                {
+                    connectionCloseStatus = (WebSocketCloseStatus)1013;
+                    return;
+                }
+                events = new EventSubscription();
                 grant.Listeners.Add(events); sequence = grant.Sequence;
             }
-            using var live = CancellationTokenSource.CreateLinkedTokenSource(c.RequestAborted, grant.Cancellation.Token); live.CancelAfter(grant.Summary.ExpiresAt - DateTimeOffset.UtcNow);
+            using var live = CancellationTokenSource.CreateLinkedTokenSource(c.RequestAborted, grant.Cancellation.Token); live.CancelAfter(grant.Summary.ExpiresAt - _timeProvider.GetUtcNow());
             await Send(socket, new AgentEvent("authenticated", sequence), live.Token);
             receiving = socket.ReceiveAsync(new byte[1024], c.RequestAborted);
             while (true)
@@ -310,13 +320,16 @@ internal sealed class LocalAgentHost
         catch (JsonException) { }
         finally
         {
-            if (grant is not null && events is not null) lock (_sync) { grant.Listeners.Remove(events); events.Writer.TryComplete(); }
+            if (grant is not null && events is not null) lock (_sync) { grant.Listeners.Remove(events); events.Complete(); }
             if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
                 using var closing = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                 try
                 {
-                    await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Session ended", closing.Token);
+                    var closeStatus = grant is null || grant.Cancellation.IsCancellationRequested || grant.Summary.ExpiresAt <= _timeProvider.GetUtcNow()
+                        ? WebSocketCloseStatus.PolicyViolation
+                        : events?.CloseStatus ?? connectionCloseStatus;
+                    await socket.CloseOutputAsync(closeStatus, "Session ended", closing.Token);
                     if (receiving is null || receiving.IsCompleted) receiving = socket.ReceiveAsync(new byte[1024], closing.Token);
                     if (receiving is not null) await receiving.WaitAsync(closing.Token);
                 }
@@ -333,7 +346,7 @@ internal sealed class LocalAgentHost
         public GrantSummary Summary = summary; public byte[] TokenHash = tokenHash;
         public CancellationTokenSource Cancellation = new();
         public Dictionary<string, Job> Tasks = new(); public Dictionary<string, Job> Keys = new();
-        public List<Channel<AgentEvent>> Listeners = new(); public long Sequence;
+        public List<EventSubscription> Listeners = new(); public long Sequence;
         public void Revoke() => Cancellation.Cancel();
     }
 }
