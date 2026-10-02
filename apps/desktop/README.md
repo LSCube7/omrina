@@ -85,7 +85,7 @@ macOS/Linux 未运行应用或设备后端，三平台 CI 和设备测试继续�
 
 ## 本地健康检查
 
-启动应用后，本地服务只在 `127.0.0.1:17843` 监听，且只提供 `GET /health`：
+启动应用后，本地服务只在 `127.0.0.1:17843` 监听。`GET /health` 用于本机诊断：
 
 ```json
 {"service":"omrina-local","protocolVersion":1,"status":"ready"}
@@ -98,7 +98,7 @@ dotnet run --project .\apps\desktop\Omrina.Desktop.csproj -p:Platform=x64
 Invoke-RestMethod http://127.0.0.1:17843/health
 ```
 
-此端点只用于本机诊断，不是配对或授权接口，也不提供设备、扫描、文件或 WebSocket API。没有 `Origin` 请求头的本机诊断请求可以访问。若浏览器需要读取响应，请在启动应用的进程环境中设置以逗号分隔的精确 HTTP/HTTPS 来源，例如：
+此端点只用于本机诊断，不授予业务权限。没有 `Origin` 请求头的本机诊断请求可以访问。若浏览器需要在配对前读取健康响应，请在启动应用的进程环境中设置以逗号分隔的精确 HTTP/HTTPS 来源，例如：
 
 ```powershell
 $env:OMRINA_ALLOWED_ORIGINS = 'https://app.example.com,http://localhost:3000'
@@ -107,13 +107,19 @@ dotnet run --project .\apps\desktop\Omrina.Desktop.csproj -p:Platform=x64
 
 `OMRINA_ALLOWED_ORIGINS` 是当前配置项名称；主机仍兼容旧的 `ANSWERSHEET_ALLOWED_ORIGINS` 环境变量。该配置不改变 OMRINA 的品牌或 `Omrina.*` 代码命名，只控制来源校验，不授予设备访问权限。
 
-未配置来源时，所有带 `Origin` 的请求都会被拒绝。配置项中每个值必须是没有路径、查询、片段或用户信息的完整 HTTP/HTTPS Origin；无效配置会让本地服务启动失败，并在界面中显示错误。服务不会使用通配符 CORS、HTTPS 证书或遥测。
+未配置来源时，未授权网站的健康检查会被拒绝；有效来源仍可申请配对。配置项中每个值必须是没有路径、查询、片段或用户信息的完整 HTTP/HTTPS Origin；无效配置会让本地服务启动失败，并在界面中显示错误。服务不会使用通配符 CORS、HTTPS 证书或遥测。
+
+### 网站配对与业务访问
+
+网站使用 SDK 申请配对后，在“设置”页查看待确认的完整网站来源与能力说明。允许后本地显示一次性配对码，由用户提供给对应网站；拒绝则不生成凭据。已授权网站可以在同一页面撤销，撤销会取消该授权的任务并断开事件连接。
+
+业务接口位于 `/v1`，支持模板、设备、上传、扫描、识别、评分、复核和导出任务；WebSocket 连接先认证再接收事件。所有资源按授权隔离，接口不接收任意本地路径。授权、模板与结果索引在进程内存中，重启后需要重新配对，已保存的采集文件仍保留。完整协议见 [M3 契约](../../docs/architecture/m3-contract.md)。
 
 ## 测试扫描
 
 旧版 MainWindow“扫描测试纸”入口已退役。采集页统一提供扫描入口，以平板来源、A4、300 DPI 和非原生驱动界面扫描，并把返回的首张图像交给 `CaptureStore`，保留原图并写入模板关联 manifest。界面会显示保存结果，但文档不记录本机用户路径。
 
-该操作仅用于已明确放置且授权读取的测试纸。它不提供批量扫描、自动进纸、设备 HTTP API 或网页控制接口。
+该操作仅用于已明确放置且授权读取的测试纸。M3 网站扫描同样限定 A4 平板首张和受支持的 DPI，不提供批量扫描或自动进纸。
 
 ## 当前验证状态
 

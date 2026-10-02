@@ -11,7 +11,7 @@ npm run typecheck
 npm run build
 ```
 
-构建会把 `src/` 编译为 `dist/`，同时生成 `.d.ts` 声明。包的 `exports` 指向 `dist/index.js` 与 `dist/index.d.ts`；`dist/` 是本地构建产物，不提交、不发布。TypeScript 仅作为开发依赖，SDK 没有运行时依赖。
+构建会把 `src/` 编译为 `dist/`，同时生成 `.d.ts` 声明。包的 `exports` 指向 `dist/index.js` 与 `dist/index.d.ts`；`dist/` 不提交到 Git，但 npm 包清单包含这些构建文件。本阶段仅执行 `npm pack --dry-run` 检查包内容，尚未发布。TypeScript 仅作为开发依赖，SDK 没有运行时依赖。
 
 在仓库根目录运行 SDK 单元测试：
 
@@ -77,10 +77,29 @@ await client.revokeGrant();
 
 ## 本地浏览器联调
 
-需先启动桌面 M3 测试服务，再在仓库根目录执行：
+先启动模拟业务的测试服务（不启动桌面 UI 或扫描设备），再在另一个终端启动页面：
 
 ```powershell
+dotnet run --project .\tests\server\Omrina.Server.Tests.csproj --no-restore -- --browser-harness
 node .\tests\integration\m3-static-server.mjs
 ```
 
-仅监听 `127.0.0.1:17846`，打开 `http://127.0.0.1:17846/m3-browser.html`。页面默认连接 `http://127.0.0.1:17844` 测试 host，可修改端点。页面不会显示或写入日志中的 token；桌面批准后，把本地显示的一次性 code 输入页面即可。
+页面服务仅监听 `127.0.0.1:17846`，打开 `http://127.0.0.1:17846/m3-browser.html`。页面默认连接 `http://127.0.0.1:17844` 测试 host，可修改端点。申请配对后，在测试服务终端输入 `pending`，核对来源和请求 ID，再输入 `approve <requestId>`，将显示的一次性码填入页面。页面不会将 token 放入 URL 或日志。生产应用的允许/拒绝操作在桌面设置页完成，不提供自动批准路由。
+
+## SDK 到实际业务适配器的联调
+
+先构建 SDK，再运行测试适配器服务：
+
+```powershell
+dotnet run --project .\tests\m3-desktop\Omrina.M3.Desktop.Tests.csproj --no-restore -- --http-harness
+```
+
+服务绑定 `127.0.0.1:17845`，输出本次临时合成 PNG 的路径。在另一终端使用该路径：
+
+```powershell
+node .\tests\integration\m3-sdk-e2e.mjs http://127.0.0.1:17845 "本次合成PNG路径"
+```
+
+脚本使用固定测试来源 `http://localhost:3000`。在服务终端核对 `pending` 后批准请求，把一次性码输入脚本，验证模板、上传、识别、评分、复核、导出和任务恢复，最后撤销测试授权。完成后在服务终端输入 `quit`。
+
+本联调使用实际 Server、Desktop 业务适配器和 Core 评分/复核/导出；设备和成功识别输出使用模拟实现。它不验证真实答题纸识别准确率或浏览器权限。实际验证范围与失败记录见 [验证记录](../../docs/development/validation.md)。

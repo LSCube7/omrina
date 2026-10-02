@@ -160,23 +160,37 @@ macOS/Linux 未运行应用或设备后端，三平台 CI 和设备测试继续�
 
 桌面 M2 的 Windows 与 Uno Desktop 目标在最终文案改动后以隔离 `OutputPath` 各构建通过，均为 0 个错误、1 条 `NU1900`（NuGet 漏洞审计源不可达）。普通输出路径被正在运行的 OMRINA 窗口占用，所以没有关闭该进程；第一次隔离参数误将 `MSBuildProjectExtensionsPath` 传播给引用项目并产生 `NETSDK1005`，改为仅隔离输出目录后通过。Windows 实际窗口已成功启动，单窗口 NavigationView 可见“识别 / 复核”入口；工具随后检测到窗口有用户输入，停止自动点击，所以识别、复核、导出的完整 UI 交互本轮未验收。macOS/Linux 实机与三平台 CI 仍暂缓。
 
+## 2026-10-02 M3 本机服务验证
+
+- `dotnet build src/Omrina.Server/Omrina.Server.csproj --no-restore`：0 警告、0 错误。
+- `dotnet run --project tests/server/Omrina.Server.Tests.csproj --no-restore`：82 项真实回环 HTTP / WebSocket 断言通过。覆盖精确来源与凭据绑定、Host 校验、桌面批准/拒绝、错误配对码锁定、任务与上传字节幂等、跨授权隔离、JSON/上传参数大小、配对和运行任务容量、撤销时取消设备查询、未认证 WebSocket 超时且无业务事件、畸形认证消息、事件序号、撤销关闭、停机取消与重启失效。业务实现为模拟对象，不调用实体设备。
+- 首轮检查暴露了 WebSocket 撤销时接收取消导致连接中止，以及查询路由未正确返回结果的问题；修正后补充了断言并通过上述最终检查。
+- 既有 Core 10 组、M2 10 组回归通过；M3 没有修改识别算法或评分规则。
+- CaptureStore 的 13 组回归通过。`dotnet run --project tests/m3-desktop/Omrina.M3.Desktop.Tests.csproj --no-restore` 的两组检查通过：实际业务适配器调用合成图上传、模拟扫描/识别、Core 评分/复核/导出，以及真实 Skia 识别器拒绝 40×40 低质量输入并不给分。覆盖自定义模板/采集/结果的跨授权隔离、版本递增与冲突、路径限制和撤销后的拒绝访问。成功识别输出为模拟对象，不是该小图的算法识别结果。
+- Windows `net10.0-windows10.0.26100.0` 与 Uno `net10.0-desktop` 分别使用隔离 `OutputPath` 进行 `--no-restore` 构建，均 0 个错误、各 1 条 `NU1900`（漏洞审计源不可用）。未覆盖正在运行的应用，未新增设备操作或三平台 CI。
+- SDK 的 `npm run typecheck`、`npm run build` 通过，TypeScript 5.9.3 是本次已授权的唯一新增开发依赖，运行时零依赖。`node --test tests/sdk/*.test.mjs` 14 项通过，包含既有健康检查、配对/任务/取消/错误、事件认证与恢复、认证成功后清除超时计时器，以及真实 Node fetch 中文上传参数头的回归。
+- `npm pack --dry-run` 通过，包清单包含 10 个文件，含 JavaScript 与声明文件；未发布 npm 包。首轮因用户级 npm cache 写入 `EPERM` 失败，改用任务临时 cache 后通过。`dist/`、依赖缓存和构建输出未提交。
+- `tests/integration/m3-sdk-e2e.mjs` 使用构建后的 SDK，对 `tests/m3-desktop` 的实际 Server + Desktop 业务适配器回环服务执行配对、默认模板查询、自定义模板生成、中文文件名 PNG 上传、识别、评分、复核、JSON 导出、任务列表恢复与撤销授权，全链路通过。核对 10 题得 10 分，修订第 1 题后 9 分，结果版本 2→3，JSON 导出包含复核历史。图像为 40×40 合成 PNG，扫描器与成功识别输出为模拟实现；评分、复核与导出使用 Core。测试结束已撤销临时授权。
+- 直接适配器测试最后补充断言时，普通及重复使用的临时输出被运行中的测试 harness 锁定，产生 `MSB3026` / `MSB3027`。停止该测试 harness 并使用新的独立输出目录后构建与测试通过；未关闭用户桌面窗口，未修改构建依赖。
+- 已启动仅监听回环的开发静态页面 `127.0.0.1:17846` 和模拟服务 `127.0.0.1:17844`，SDK JavaScript 构建成功。内置浏览器和 Chrome 的自动化工具打开页面均返回 `net::ERR_BLOCKED_BY_CLIENT`，未进行页面交互、跨来源 CORS 或浏览器 WebSocket 验收。没有改变浏览器策略或绕过安全检查；测试服务随后已停止。可按 SDK README 在正常浏览器中手动复核。
+
 ## 尚未验证
 
 - 取消中的驱动行为、多页和不同设备兼容性。
 - HTTPS 浏览器到真实本地服务的 HTTP / WebSocket 连接。
 - 纸面打印比例、不同设备兼容性和重复采集。
 - 窄窗口尺寸、系统缩放和多显示器切换下的 UI 重排。
-- 配对授权与业务接口（尚未实现）。
+- 配对授权界面的完整交互、真实网站与扫描设备的业务联调。
 - macOS / Linux 实机 UI 与扫描验收；三平台 CI 当前暂缓。
 
-SDK 单元测试使用模拟响应，只证明客户端行为，不证明上述集成路径。
+SDK 单元测试使用模拟响应，只证明客户端行为；M3 的真实 HTTP / WebSocket 与浏览器检查另列记录，不替代上述实机验收。
 
 ## 已执行静态检查
 
 桌面项目 `.csproj`、应用清单和两个 XAML 文件已通过 XML 解析。该检查只证明 XML 格式有效，不能替代 XAML 类型检查、C# 编译或界面运行。
 
-## SDK 自动测试
+## M0 SDK 自动测试（历史记录）
 
 执行 `node --test tests/sdk/*.test.mjs`，7 项通过。覆盖回环端点限制、固定健康检查路径、重定向与凭据策略、请求超时、读取响应体超时、调用方取消、HTTP / 协议错误及定时器上限。
 
-Node.js 直接擦除 TypeScript 类型运行测试；尚未执行 TypeScript 编译器类型检查，也尚未构建可发布的 npm 产物。
+当时使用 Node.js 直接擦除 TypeScript 类型运行测试，未执行 TypeScript 编译器类型检查或 npm 产物构建。M3 新增正式编译，结果按后续记录解释。

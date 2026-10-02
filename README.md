@@ -1,6 +1,6 @@
 # OMRINA
 
-**Optical Mark Recognition Integration Agent** 是运行在本机的跨平台 Local Integration Agent。当前代码提供 Windows、macOS 和 Linux 桌面目标、平台无关的模板与扫描契约、图像导入保存、本地识别与评分复核，以及只读的本地健康检查；完整的浏览器连接、任务、本地授权、状态事件和 WebSocket 能力仍按后续里程碑推进。
+**Optical Mark Recognition Integration Agent** 是运行在本机的跨平台 Local Integration Agent。当前代码提供 Windows、macOS 和 Linux 桌面目标、模板生成、图像采集、本地识别与评分复核，以及通过配对授权访问这些能力的本机 HTTP / WebSocket 服务和无 UI 的 TypeScript SDK。
 
 公开仓库：[LSCube7/omrina](https://github.com/LSCube7/omrina)
 
@@ -14,16 +14,16 @@ OMRINA 不是面向终端用户的完整答题应用。桌面 UI 主要用于配
 - Windows 使用 `WindowsAppSDKSelfContained=true` 随输出提供 Windows App SDK runtime payload；macOS/Linux 使用 Skia desktop entrypoint。
 - Windows 构建与 CaptureStore 回归已在本机验证；macOS/Linux 编译、运行、设备发现和文件选择器实机验收暂缓，不能写成已验收。
 - 三平台 CI 当前暂缓，不能把 macOS / Linux 编译、发布或实机验收写成已通过。
-- M0 的 HTTPS、WebSocket、配对授权和授权撤销仍待验证；当前健康检查只证明本地诊断路径。
+- 公网 HTTPS 来源的浏览器权限、完整桌面授权交互与实物设备验收仍需补充；代码级和浏览器验证分别记录在验证文档中。
 
 ## 架构
 
 代码按职责拆分，平台相关 API 保持在明确的边界内：
 
-- `Omrina.Core`：提供模板数据模型、A4 几何、SVG 输出、定位与填涂识别、答案键、评分、复核及 JSON/CSV 导出；扫描任务、状态和配置仍属规划范围；只包含平台无关的 .NET 逻辑。
-- `Omrina.Protocol`：当前只定义 M0 健康检查的协议常量和响应模型；完整的 HTTP、WebSocket、授权、设备和任务协议仍属规划范围。
+- `Omrina.Core`：提供模板数据模型、A4 几何、SVG 输出、定位与填涂识别、答案键、评分、复核及 JSON/CSV 导出；只包含平台无关的 .NET 逻辑。
+- `Omrina.Protocol`：定义健康检查、配对、授权、任务快照和状态事件的传输模型。
 - `Omrina.Scanning`：统一扫描抽象与结果模型；具体驱动由扫描适配层处理。
-- `Omrina.Server`：当前提供仅监听回环地址的健康检查 HTTP 服务和来源校验；事件与任务调度仍属规划范围。
+- `Omrina.Server`：仅监听回环地址，处理精确来源配对、凭据验证、授权撤销、异步任务、幂等创建、取消及 WebSocket 事件，通过业务接口调用本地能力。
 - `Omrina.Platform`：平台无关的输入图像文件契约、Skia PNG/JPEG 完整解码校验、灰度图解码与本地文件实现。
 - `Omrina.Desktop`：Uno 桌面入口与平台适配边界；Windows、macOS/Linux 分别选择文件、扫描和打印实现。页面包含状态、模板、采集、识别/复核、设置和关于，业务页面在主窗口内缓存。
 
@@ -75,10 +75,18 @@ dotnet run --project .\tests\m2\Omrina.M2.Tests.csproj --no-restore
 dotnet run --project .\tests\capture\Omrina.Capture.Tests.csproj --no-restore
 ```
 
+## M3：本机服务与无 UI 的 SDK
+
+网站调用 SDK 发起配对，在桌面“设置”页由用户查看完整来源并允许。用户将本地显示的一次性配对码交给 SDK，交换仅绑定该来源的凭据。业务调用同时验证来源和凭据；环境变量允许读取健康检查不代表获得业务授权。
+
+SDK 可以生成模板、上传关联的 PNG/JPEG、选择设备扫描，并通过任务调用识别、评分、复核和 JSON/CSV 导出。模板结果包含 SVG；任务、采集与结果按授权隔离，不接收网页传入的本地文件路径。创建任务使用幂等键，复核带结果版本，WebSocket 提供状态通知；断线后查询任务恢复状态。SDK 不自动重试扫描等有副作用的操作。
+
+当前授权与业务索引保存在内存，应用重启后需要重新配对；已保存的采集文件保留在本机。SDK 使用方式见 [SDK README](packages/sdk/README.md)，参数、限额与授权规则见 [M3 契约](docs/architecture/m3-contract.md) 和 [M3 架构](docs/architecture/m3.md)。该 npm 包尚未发布。
+
 ## 后续里程碑
 
-1. M0：完成 HTTPS 浏览器访问、WebSocket、配对授权和授权撤销验证。
+1. M0 / M3：补充公网 HTTPS 浏览器访问与本地授权界面交互验收。
 2. M1：补充纸面尺寸测量，并固化打印、填涂、扫描的可重复验收记录。
 3. M2：补充更多实际纸张、扫描方向、分辨率和设备的识别验证。
-4. M3：完成跨平台 SDK 业务接入。
+4. M3：补充真实网站与设备端到端联调。
 5. M4：确定安装分发、兼容性和使用文档；恢复三平台 CI 后再安排 macOS / Linux 实机验收。
