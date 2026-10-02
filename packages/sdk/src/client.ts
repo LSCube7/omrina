@@ -5,13 +5,26 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_JSON_BYTES = 64 * 1024;
 const MAX_UPLOAD_METADATA_BYTES = 4 * 1024;
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_SUBJECTIVE_IMAGE_BYTES = 8 * 1024 * 1024;
+const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const INITIAL_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 5_000;
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
-export type TaskOperation = "template" | "upload" | "scan" | "recognize" | "score" | "review" | "export";
+export type TaskOperation =
+  | "template"
+  | "upload"
+  | "scan"
+  | "recognize"
+  | "score"
+  | "review"
+  | "export"
+  | "subjectiveCreate"
+  | "subjectiveRead"
+  | "subjectiveGrade"
+  | "subjectiveExport";
 export type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export type ProtocolError = {
@@ -100,6 +113,104 @@ export type ExportTaskParameters = {
   format: "json" | "csv";
 };
 
+export type SubjectivePixelRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type SubjectiveQuestionDefinition = {
+  questionId: string;
+  questionNumber: number;
+  maxScore: number;
+  region: SubjectivePixelRegion;
+};
+
+export type SubjectiveCreateTaskParameters = {
+  captureId: string;
+  questions: SubjectiveQuestionDefinition[];
+};
+
+export type SubjectiveGradeStatus = "draft" | "confirmed" | "ungraded";
+
+export type SubjectiveGradeEdit = {
+  questionId: string;
+  status: SubjectiveGradeStatus;
+  score: number | null;
+  comment: string;
+};
+
+export type SubjectiveGradeTaskParameters = {
+  reviewId: string;
+  expectedVersion: number;
+  reviewer: string;
+  edits: SubjectiveGradeEdit[];
+};
+
+export type SubjectiveQuestionStatus = "ungraded" | "draft" | "confirmed";
+
+export type SubjectiveQuestion = {
+  questionId: string;
+  questionNumber: number;
+  maxScore: number;
+  region: SubjectivePixelRegion;
+  status: SubjectiveQuestionStatus;
+  score: number | null;
+  comment: string | null;
+  reviewer: string | null;
+  confirmedAtUtc: string | null;
+};
+
+export type SubjectiveGradeState = {
+  status: SubjectiveQuestionStatus;
+  score: number | null;
+  comment: string | null;
+  reviewer: string | null;
+  confirmedAtUtc: string | null;
+};
+
+export type SubjectiveGradeChange = {
+  questionId: string;
+  questionNumber: number;
+  action: "setDraft" | "confirm" | "reset";
+  before: SubjectiveGradeState;
+  after: SubjectiveGradeState;
+};
+
+export type SubjectiveGradeHistoryBatch = {
+  version: number;
+  reviewer: string;
+  timestampUtc: string;
+  changes: SubjectiveGradeChange[];
+};
+
+export type SubjectiveReviewDocument = {
+  reviewId: string;
+  captureId: string;
+  version: number;
+  questions: SubjectiveQuestion[];
+  history: SubjectiveGradeHistoryBatch[];
+  createdAtUtc: string;
+  updatedAtUtc: string;
+  isFinal: boolean;
+  finalSubtotal: number | null;
+};
+
+export type SubjectiveReadTaskParameters = {
+  reviewId: string;
+};
+
+export type SubjectiveExportTaskParameters = {
+  reviewId: string;
+  format: "json" | "csv";
+};
+
+export type SubjectiveExportResult = {
+  format: "json" | "csv";
+  content: string;
+};
+
 export type UploadImageRequest = {
   idempotencyKey: string;
   templateId: string;
@@ -127,6 +238,9 @@ export type SdkResponse = {
   ok: boolean;
   status: number;
   json(): Promise<unknown>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+  body?: ReadableStream<Uint8Array> | null;
+  headers?: Pick<Headers, "get">;
 };
 
 /** 用于测试或宿主注入的 fetch；SDK 自己构造固定路由与请求头。 */
@@ -357,6 +471,83 @@ export class OmrinaClient {
     return this.#createJsonTask("export", request, options);
   }
 
+  createSubjectiveReviewTask(
+    request: TaskSubmission<SubjectiveCreateTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateSubjectiveCreateParameters(request.parameters);
+    return this.#createJsonTask("subjectiveCreate", request, options);
+  }
+
+  createSubjectiveReadTask(
+    request: TaskSubmission<SubjectiveReadTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateGuid(request.parameters.reviewId, "reviewId");
+    return this.#createJsonTask("subjectiveRead", request, options);
+  }
+
+  createSubjectiveGradeTask(
+    request: TaskSubmission<SubjectiveGradeTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateSubjectiveGradeParameters(request.parameters);
+    return this.#createJsonTask("subjectiveGrade", request, options);
+  }
+
+  createSubjectiveExportTask(
+    request: TaskSubmission<SubjectiveExportTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateGuid(request.parameters.reviewId, "reviewId");
+    if (request.parameters.format !== "json" && request.parameters.format !== "csv") {
+      throw invalidArgument("format must be json or csv.");
+    }
+    return this.#createJsonTask("subjectiveExport", request, options);
+  }
+
+  getSubjectiveQuestionImage(
+    reviewId: string,
+    questionId: string,
+    options: RequestOptions = {},
+  ): Promise<Uint8Array> {
+    validateGuid(reviewId, "reviewId");
+    validateGuid(questionId, "questionId");
+    const path = `/v1/subjective-reviews/${encodeURIComponent(reviewId)}/questions/${encodeURIComponent(questionId)}/image`;
+    return this.#performRequest(path, "GET", options, { authenticated: true, expectedStatus: 200 }, async (response, timedOut, signal) => {
+      if (response.headers) {
+        const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+        if (contentType !== "image/png") {
+          throw invalidResponse("Subjective image response must be PNG.");
+        }
+      } else {
+        throw invalidResponse("Subjective image response is missing its content type.");
+      }
+      let imageBytes: Uint8Array;
+      try {
+        imageBytes = await readBoundedSubjectiveImage(response, timedOut, signal);
+      } catch (cause) {
+        const abortError = getRequestAbortError(timedOut(), signal, cause);
+        if (abortError) {
+          throw abortError;
+        }
+        if (cause instanceof OmrinaSdkError) {
+          throw cause;
+        }
+        throw new OmrinaSdkError("INVALID_RESPONSE", "The local agent returned an unreadable image body.", { cause });
+      }
+      throwIfRequestAborted(timedOut(), signal);
+      if (imageBytes.byteLength === 0) {
+        throw invalidResponse("Subjective image response size is outside the supported range.");
+      }
+      if (imageBytes.byteLength < PNG_SIGNATURE.byteLength
+        || PNG_SIGNATURE.some((byte, index) => imageBytes[index] !== byte)) {
+        throw invalidResponse("Subjective image response does not contain a PNG image.");
+      }
+      return imageBytes;
+    });
+  }
+
   async listTasks(options: RequestOptions = {}): Promise<TaskSnapshot[]> {
     return this.#requestJson("/v1/tasks", "GET", options, { authenticated: true }, parseTaskList);
   }
@@ -548,8 +739,15 @@ export class OmrinaClient {
       const response = await this.#fetch(buildRouteUrl(this.#baseUrl, path), init);
       throwIfRequestAborted(timedOut, options.signal);
       if (!response.ok) {
-        const error = await parseHttpError(response);
-        throwIfRequestAborted(timedOut, options.signal);
+        if (response.status === 401 || response.status === 403) {
+          this.#grant = undefined;
+        }
+        const error = await awaitWithRequestSignal(
+          parseHttpError(response),
+          () => timedOut,
+          controller.signal,
+        );
+        throwIfRequestAborted(timedOut, controller.signal);
         if (error.code === "UNAUTHORIZED") {
           this.#grant = undefined;
         }
@@ -563,13 +761,13 @@ export class OmrinaClient {
         );
       }
 
-      return await consume(response, () => timedOut, options.signal);
+      return await consume(response, () => timedOut, controller.signal);
     } catch (cause) {
       if (cause instanceof OmrinaSdkError) {
         throw cause;
       }
 
-      const abortError = getRequestAbortError(timedOut, options.signal, cause);
+      const abortError = getRequestAbortError(timedOut, controller.signal, cause);
       if (abortError) {
         throw abortError;
       }
@@ -893,6 +1091,38 @@ function getRequestAbortError(
   return undefined;
 }
 
+function awaitWithRequestSignal<T>(
+  operation: Promise<T>,
+  timedOut: () => boolean,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal?.aborted) {
+      void operation.catch(() => undefined);
+      reject(getRequestAbortError(timedOut(), signal));
+      return;
+    }
+
+    let settled = false;
+    const abort = () => settle(() => reject(getRequestAbortError(timedOut(), signal)));
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const settle = (action: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      action();
+    };
+
+    signal?.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => settle(() => resolve(value)),
+      (cause: unknown) => settle(() => reject(cause)),
+    );
+  });
+}
+
 function delayWithSignal(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1139,7 +1369,11 @@ function isTaskOperation(value: unknown): value is TaskOperation {
     || value === "recognize"
     || value === "score"
     || value === "review"
-    || value === "export";
+    || value === "export"
+    || value === "subjectiveCreate"
+    || value === "subjectiveRead"
+    || value === "subjectiveGrade"
+    || value === "subjectiveExport";
 }
 
 function isTaskStatus(value: unknown): value is TaskStatus {
@@ -1202,6 +1436,174 @@ function validateReviewParameters(parameters: ReviewTaskParameters): void {
   if (parameters.answerKey !== undefined) {
     validateAnswerKey(parameters.answerKey, "answerKey");
   }
+}
+
+function validateSubjectiveCreateParameters(parameters: SubjectiveCreateTaskParameters): void {
+  requireNonEmptyString(parameters.captureId, "captureId");
+  if (!Array.isArray(parameters.questions) || parameters.questions.length < 1 || parameters.questions.length > 64) {
+    throw invalidArgument("questions must contain between 1 and 64 subjective question regions.");
+  }
+  const questionIds = new Set<string>();
+  const questionNumbers = new Set<number>();
+  for (const question of parameters.questions) {
+    if (!isRecord(question)) {
+      throw invalidArgument("Each subjective question must include an ID, number, maximum score, and pixel region.");
+    }
+    validateGuid(question.questionId, "questionId");
+    if (questionIds.has(question.questionId)) {
+      throw invalidArgument("questionId values must be unique.");
+    }
+    questionIds.add(question.questionId);
+    if (!Number.isSafeInteger(question.questionNumber) || question.questionNumber < 1 || question.questionNumber > 64) {
+      throw invalidArgument("questionNumber must be between 1 and 64.");
+    }
+    if (questionNumbers.has(question.questionNumber)) {
+      throw invalidArgument("questionNumber values must be unique.");
+    }
+    questionNumbers.add(question.questionNumber);
+    if (typeof question.maxScore !== "number"
+      || !Number.isFinite(question.maxScore)
+      || question.maxScore <= 0
+      || question.maxScore > 1_000_000) {
+      throw invalidArgument("maxScore must be greater than zero and at most 1,000,000.");
+    }
+    const region = question.region;
+    if (!isRecord(region)
+      || !Number.isSafeInteger(region.x)
+      || !Number.isSafeInteger(region.y)
+      || !Number.isSafeInteger(region.width)
+      || !Number.isSafeInteger(region.height)
+      || region.x < 0
+      || region.y < 0
+      || region.width <= 0
+      || region.height <= 0
+      || region.x > 16_000
+      || region.y > 16_000
+      || region.width > 16_000
+      || region.height > 16_000
+      || region.x + region.width > 16_000
+      || region.y + region.height > 16_000
+      || region.width * region.height > 4_000_000) {
+      throw invalidArgument("region must be a positive, bounded pixel rectangle.");
+    }
+  }
+}
+
+function validateSubjectiveGradeParameters(parameters: SubjectiveGradeTaskParameters): void {
+  validateGuid(parameters.reviewId, "reviewId");
+  if (!Number.isSafeInteger(parameters.expectedVersion) || parameters.expectedVersion < 0) {
+    throw invalidArgument("expectedVersion must be a non-negative safe integer.");
+  }
+  requireNonEmptyString(parameters.reviewer, "reviewer");
+  if (parameters.reviewer.length > 64) {
+    throw invalidArgument("reviewer must be 64 characters or fewer.");
+  }
+  if (!Array.isArray(parameters.edits) || parameters.edits.length < 1 || parameters.edits.length > 64) {
+    throw invalidArgument("edits must contain between 1 and 64 question updates.");
+  }
+  const questionIds = new Set<string>();
+  for (const edit of parameters.edits) {
+    if (!isRecord(edit)) {
+      throw invalidArgument("Each subjective grade edit must include a question ID, status, score, and comment.");
+    }
+    validateGuid(edit.questionId, "questionId");
+    if (questionIds.has(edit.questionId)) {
+      throw invalidArgument("questionId values in edits must be unique.");
+    }
+    questionIds.add(edit.questionId);
+    if (edit.status !== "draft" && edit.status !== "confirmed" && edit.status !== "ungraded") {
+      throw invalidArgument("status must be draft, confirmed, or ungraded.");
+    }
+    if (edit.score !== null
+      && (typeof edit.score !== "number" || !Number.isFinite(edit.score) || edit.score < 0)) {
+      throw invalidArgument("score must be a non-negative number or null.");
+    }
+    if (typeof edit.comment !== "string" || edit.comment.length > 256) {
+      throw invalidArgument("comment must be 256 characters or fewer.");
+    }
+    if ((edit.status === "ungraded" && (edit.score !== null || edit.comment.trim() !== ""))
+      || ((edit.status === "draft" || edit.status === "confirmed") && edit.score === null)) {
+      throw invalidArgument("The score and comment must match the selected subjective status.");
+    }
+  }
+}
+
+function validateGuid(value: string, label: string): void {
+  requireNonEmptyString(value, label);
+  if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(value)) {
+    throw invalidArgument(`${label} must be a GUID.`);
+  }
+}
+
+async function readBoundedSubjectiveImage(
+  response: SdkResponse,
+  timedOut: () => boolean,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const contentLength = response.headers?.get("content-length");
+  if (contentLength !== null && contentLength !== undefined && contentLength.trim() !== "") {
+    const normalizedLength = contentLength.trim();
+    if (!/^\d+$/.test(normalizedLength)) {
+      throw invalidResponse("Subjective image response has an invalid content length.");
+    }
+    const declaredLength = Number(normalizedLength);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength > MAX_SUBJECTIVE_IMAGE_BYTES) {
+      throw invalidResponse("Subjective image response size is outside the supported range.");
+    }
+  }
+
+  if (response.body) {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    let mayReleaseLock = true;
+    try {
+      while (true) {
+        throwIfRequestAborted(timedOut(), signal);
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await awaitWithRequestSignal(reader.read(), timedOut, signal);
+        } catch (cause) {
+          if (signal?.aborted) {
+            mayReleaseLock = false;
+            void reader.cancel().catch(() => undefined);
+          }
+          throw cause;
+        }
+        const { done, value } = result;
+        if (done) {
+          break;
+        }
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_SUBJECTIVE_IMAGE_BYTES) {
+          void reader.cancel().catch(() => undefined);
+          throw invalidResponse("Subjective image response size is outside the supported range.");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      if (mayReleaseLock) {
+        reader.releaseLock();
+      }
+    }
+
+    const output = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return output;
+  }
+
+  if (!response.arrayBuffer) {
+    throw invalidResponse("The local agent did not return a binary image body.");
+  }
+  const payload = await awaitWithRequestSignal(response.arrayBuffer(), timedOut, signal);
+  if (!(payload instanceof ArrayBuffer) || payload.byteLength > MAX_SUBJECTIVE_IMAGE_BYTES) {
+    throw invalidResponse("Subjective image response size is outside the supported range.");
+  }
+  return new Uint8Array(payload);
 }
 
 function validateAnswerKey(answerKey: AnswerKey, label: string): void {

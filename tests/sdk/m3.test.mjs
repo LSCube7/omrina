@@ -183,12 +183,57 @@ test("business methods send only fixed operations and accurately parse task snap
     idempotencyKey: "key-export",
     parameters: { resultId: "result-1", format: "json" },
   });
+  await client.createSubjectiveReviewTask({
+    idempotencyKey: "key-subjective-create",
+    parameters: {
+      captureId: "capture-1",
+      questions: [{
+        questionId: "12345678-1234-1234-1234-1234567890ab",
+        questionNumber: 1,
+        maxScore: 10,
+        region: { x: 0, y: 0, width: 20, height: 20 },
+      }],
+    },
+  });
+  await client.createSubjectiveReadTask({
+    idempotencyKey: "key-subjective-read",
+    parameters: { reviewId: "abcdefab-cdef-abcd-efab-cdefabcdefab" },
+  });
+  await client.createSubjectiveGradeTask({
+    idempotencyKey: "key-subjective-grade",
+    parameters: {
+      reviewId: "abcdefab-cdef-abcd-efab-cdefabcdefab",
+      expectedVersion: 1,
+      reviewer: "teacher",
+      edits: [{
+        questionId: "12345678-1234-1234-1234-1234567890ab",
+        status: "draft",
+        score: 8,
+        comment: "Checked",
+      }],
+    },
+  });
+  await client.createSubjectiveExportTask({
+    idempotencyKey: "key-subjective-export",
+    parameters: { reviewId: "abcdefab-cdef-abcd-efab-cdefabcdefab", format: "csv" },
+  });
 
   assert.deepEqual(
     requests.filter(({ url }) => url.pathname === "/v1/tasks" && url.search === "")
       .filter(({ init }) => init.method === "POST")
       .map(({ init }) => JSON.parse(init.body).operation),
-    ["template", "scan", "recognize", "score", "review", "export"],
+    [
+      "template",
+      "scan",
+      "recognize",
+      "score",
+      "review",
+      "export",
+      "subjectiveCreate",
+      "subjectiveRead",
+      "subjectiveGrade",
+      "subjectiveExport",
+    ],
   );
   const uploadRequest = requests.find(({ url }) => url.pathname === "/v1/tasks/upload");
   assert.ok(uploadRequest);
@@ -207,6 +252,140 @@ test("business methods send only fixed operations and accurately parse task snap
   assert.equal((await client.cancelTask("task-recognize")).status, "cancelled");
   assert.ok(requests.every(({ headers }) => headers.get("authorization") === "Bearer secret-token"));
   assert.ok(requests.every(({ url }) => !url.href.includes("secret-token")));
+});
+
+test("subjective image retrieval uses its fixed authenticated PNG route", async () => {
+  const requests = [];
+  const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+  const client = new OmrinaClient({
+    grant,
+    fetch: async (input, init) => {
+      requests.push({ url: new URL(input), init, headers: new Headers(init.headers) });
+      return {
+        ...jsonResponse(null),
+        headers: new Headers({ "Content-Type": "image/png" }),
+        arrayBuffer: async () => pngBytes.slice().buffer,
+      };
+    },
+  });
+
+  const image = await client.getSubjectiveQuestionImage(
+    "abcdefab-cdef-abcd-efab-cdefabcdefab",
+    "12345678-1234-1234-1234-1234567890ab",
+  );
+  assert.deepEqual([...image], [...pngBytes]);
+  assert.equal(requests[0].url.pathname, "/v1/subjective-reviews/abcdefab-cdef-abcd-efab-cdefabcdefab/questions/12345678-1234-1234-1234-1234567890ab/image");
+  assert.equal(requests[0].init.method, "GET");
+  assert.equal(requests[0].headers.get("authorization"), "Bearer secret-token");
+  assert.equal(requests[0].init.credentials, "omit");
+  assert.equal(requests[0].init.cache, "no-store");
+
+  assert.throws(
+    () => client.getSubjectiveQuestionImage("../outside", "12345678-1234-1234-1234-1234567890ab"),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_ARGUMENT",
+  );
+  assert.throws(
+    () => client.createSubjectiveReviewTask({
+      idempotencyKey: "key-invalid-region",
+      parameters: {
+        captureId: "capture-1",
+        questions: [{
+          questionId: "12345678-1234-1234-1234-1234567890ab",
+          questionNumber: 1,
+          maxScore: 10,
+          region: { x: -1, y: 0, width: 20, height: 20 },
+        }],
+      },
+    }),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_ARGUMENT",
+  );
+});
+
+test("subjective image retrieval validates MIME, signature, declared and streamed size", async () => {
+  const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const createClient = (response) => new OmrinaClient({
+    grant,
+    fetch: async () => response,
+  });
+  const imageArgs = [
+    "abcdefab-cdef-abcd-efab-cdefabcdefab",
+    "12345678-1234-1234-1234-1234567890ab",
+  ];
+
+  await assert.rejects(
+    createClient({
+      ...jsonResponse(null),
+      headers: new Headers({ "Content-Type": "image/jpeg" }),
+      arrayBuffer: async () => pngSignature.buffer,
+    }).getSubjectiveQuestionImage(...imageArgs),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_RESPONSE",
+  );
+  await assert.rejects(
+    createClient({
+      ...jsonResponse(null),
+      headers: new Headers({ "Content-Type": "image/png" }),
+      arrayBuffer: async () => new Uint8Array(8).buffer,
+    }).getSubjectiveQuestionImage(...imageArgs),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_RESPONSE",
+  );
+
+  let oversizedArrayBufferRead = false;
+  await assert.rejects(
+    createClient({
+      ...jsonResponse(null),
+      headers: new Headers({ "Content-Type": "image/png", "Content-Length": String(8 * 1024 * 1024 + 1) }),
+      arrayBuffer: async () => {
+        oversizedArrayBufferRead = true;
+        return pngSignature.buffer;
+      },
+    }).getSubjectiveQuestionImage(...imageArgs),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_RESPONSE",
+  );
+  assert.equal(oversizedArrayBufferRead, false);
+
+  let streamCancelled = false;
+  const oversizedStream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(8 * 1024 * 1024 + 1));
+    },
+    cancel() {
+      streamCancelled = true;
+    },
+  });
+  await assert.rejects(
+    createClient({
+      ...jsonResponse(null),
+      headers: new Headers({ "Content-Type": "image/png" }),
+      body: oversizedStream,
+    }).getSubjectiveQuestionImage(...imageArgs),
+    (error) => error instanceof OmrinaSdkError && error.code === "INVALID_RESPONSE",
+  );
+  assert.equal(streamCancelled, true);
+});
+
+test("401 clears the in-memory grant before a stalled error body times out", async () => {
+  const client = new OmrinaClient({
+    grant,
+    timeoutMs: 20,
+    fetch: async () => ({
+      ok: false,
+      status: 401,
+      json: () => new Promise(() => {}),
+    }),
+  });
+  const imageArgs = [
+    "abcdefab-cdef-abcd-efab-cdefabcdefab",
+    "12345678-1234-1234-1234-1234567890ab",
+  ];
+
+  await assert.rejects(
+    client.getSubjectiveQuestionImage(...imageArgs),
+    (error) => error instanceof OmrinaSdkError && error.code === "TIMEOUT",
+  );
+  await assert.rejects(
+    client.getSubjectiveQuestionImage(...imageArgs),
+    (error) => error instanceof OmrinaSdkError && error.code === "MISSING_CREDENTIAL",
+  );
 });
 
 test("invalid endpoints, task paths, review versions, and path-like upload names are rejected", async () => {
