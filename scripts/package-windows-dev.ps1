@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$AuditExistingPublishDirectory,
-    [switch]$TestPrivacyScanner
+    [switch]$TestPrivacyScanner,
+    [switch]$TestPublishDiagnostics
 )
 
 Set-StrictMode -Version Latest
@@ -9,8 +10,11 @@ $ErrorActionPreference = 'Stop'
 
 $workspaceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectPath = Join-Path $workspaceRoot 'apps\desktop\Omrina.Desktop.csproj'
+$projectNames = @('Omrina.Desktop', 'Omrina.Core', 'Omrina.Protocol', 'Omrina.Scanning', 'Omrina.Server', 'Omrina.Platform')
+$packageConfiguration = 'Release'
 $targetFramework = 'net10.0-windows10.0.26100.0'
 $runtimeIdentifier = 'win-x64'
+$packageCachePath = Join-Path $workspaceRoot '.tools\nuget-packages'
 $minimumFreeBytes = 1.5GB
 $artifactsRoot = Join-Path $workspaceRoot 'artifacts'
 $packageRoot = Join-Path $artifactsRoot 'windows-dev'
@@ -26,10 +30,6 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
 
 if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
     throw 'DESKTOP_PROJECT_NOT_FOUND'
-}
-
-if (-not (Test-Path -LiteralPath (Join-Path $workspaceRoot 'apps\desktop\obj\project.assets.json') -PathType Leaf)) {
-    throw 'RESTORED_ASSETS_NOT_FOUND; run the documented offline restore before packaging.'
 }
 
 function Assert-NoReparsePoint([string]$Path) {
@@ -234,6 +234,261 @@ function Get-LocalPrivacyLeaks([string]$DirectoryPath) {
     return $matches.ToArray()
 }
 
+function ConvertTo-SafeDiagnosticDetail([string]$Text) {
+    $safeText = $Text
+    $localRoots = @(
+        @{ Path = $workspaceRoot; Placeholder = '<WORKSPACE>' },
+        @{ Path = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile); Placeholder = '<USER_PROFILE>' },
+        @{ Path = $env:TEMP; Placeholder = '<TEMP>' },
+        @{ Path = $env:TMP; Placeholder = '<TEMP>' },
+        @{ Path = $env:APPDATA; Placeholder = '<APP_DATA>' },
+        @{ Path = $env:LOCALAPPDATA; Placeholder = '<LOCAL_APP_DATA>' },
+        @{ Path = $env:NUGET_PACKAGES; Placeholder = '<NUGET_PACKAGES>' },
+        @{ Path = $env:DOTNET_ROOT; Placeholder = '<DOTNET_ROOT>' },
+        @{ Path = $packageCachePath; Placeholder = '<NUGET_PACKAGES>' }
+    )
+
+    foreach ($localRoot in $localRoots) {
+        if ([string]::IsNullOrWhiteSpace($localRoot.Path) -or -not [IO.Path]::IsPathRooted($localRoot.Path)) {
+            continue
+        }
+
+        $rootVariants = @(
+            [IO.Path]::GetFullPath($localRoot.Path).TrimEnd('\', '/'),
+            [IO.Path]::GetFullPath($localRoot.Path).TrimEnd('\', '/').Replace('\', '/')
+        )
+        foreach ($rootVariant in $rootVariants) {
+            if (-not [string]::IsNullOrWhiteSpace($rootVariant)) {
+                $safeText = [regex]::Replace(
+                    $safeText,
+                    [regex]::Escape($rootVariant),
+                    $localRoot.Placeholder,
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            }
+        }
+    }
+
+    $safeText = [regex]::Replace($safeText, '(?i)file:///?[a-z]:[/\\][^\s"''<>|]+', '<LOCAL_PATH>')
+    $safeText = [regex]::Replace($safeText, '(?i)(?:[a-z]:[/\\]|\\\\)[^\s"''<>|]+', '<LOCAL_PATH>')
+    $safeText = [regex]::Replace(
+        $safeText,
+        '(?i)\b(access[_-]?token|refresh[_-]?token|token|password|secret|api[_-]?key|authorization|bearer|cookie|client[_-]?secret|credential)\b(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)',
+        '$1$2<redacted>')
+    $safeText = [regex]::Replace($safeText, '\s+', ' ').Trim()
+    if ($safeText.Length -gt 300) {
+        $safeText = $safeText.Substring(0, 300)
+    }
+
+    return $safeText
+}
+
+function Get-SafePublishDiagnostics([string]$LogPath, [string[]]$ProjectNames, [string]$Operation = 'PUBLISH') {
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+        return @("${Operation}_DIAGNOSTIC=LOG_UNAVAILABLE")
+    }
+
+    $diagnosticPattern = [regex]::new('(?i)\b(?<severity>error|warning)(?:\s+(?<code>[A-Z][A-Z0-9]*\d{2,}))?\s*:')
+    $errors = [Collections.Generic.List[string]]::new()
+    $warnings = [Collections.Generic.List[string]]::new()
+    $seenErrors = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $seenWarnings = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($line in [IO.File]::ReadLines($LogPath)) {
+        $match = $diagnosticPattern.Match($line)
+        if (-not $match.Success) {
+            continue
+        }
+
+        $projectFileName = 'unknown'
+        foreach ($projectName in $ProjectNames) {
+            $candidateFileName = "$projectName.csproj"
+            if ($line.IndexOf($candidateFileName, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $projectFileName = $candidateFileName
+                break
+            }
+        }
+
+        $severity = $match.Groups['severity'].Value.ToUpperInvariant()
+        $code = $match.Groups['code'].Value.ToUpperInvariant()
+        if ([string]::IsNullOrWhiteSpace($code)) {
+            $code = 'NO_CODE'
+        }
+
+        $diagnostic = "${Operation}_DIAGNOSTIC=$severity $code project=$projectFileName"
+        if ($code -eq 'WMC9999') {
+            $messageStart = $match.Index + $match.Length
+            $detail = $line.Substring($messageStart).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($detail)) {
+                $safeDetail = ConvertTo-SafeDiagnosticDetail $detail
+                if (-not [string]::IsNullOrWhiteSpace($safeDetail)) {
+                    $diagnostic += " message=$safeDetail"
+                }
+            }
+        }
+
+        if ($severity -eq 'ERROR') {
+            if ($seenErrors.Add($diagnostic)) {
+                $errors.Add($diagnostic)
+            }
+        }
+        elseif ($seenWarnings.Add($diagnostic)) {
+            $warnings.Add($diagnostic)
+        }
+
+        if ($errors.Count -ge 12) {
+            break
+        }
+    }
+
+    $selectedDiagnostics = [Collections.Generic.List[string]]::new()
+    foreach ($diagnostic in $errors) {
+        if ($selectedDiagnostics.Count -ge 12) {
+            break
+        }
+        $selectedDiagnostics.Add($diagnostic)
+    }
+    foreach ($diagnostic in $warnings) {
+        if ($selectedDiagnostics.Count -ge 12) {
+            break
+        }
+        $selectedDiagnostics.Add($diagnostic)
+    }
+
+    if ($selectedDiagnostics.Count -eq 0) {
+        return @("${Operation}_DIAGNOSTIC=NO_ERROR_OR_WARNING_CODE_EXTRACTED")
+    }
+
+    return $selectedDiagnostics.ToArray()
+}
+
+function Assert-RestoredProjectAssets([string[]]$ProjectNames, [string]$WorkDirectory, [string]$LocalFeedDirectory) {
+    $targetSetMismatches = [Collections.Generic.List[string]]::new()
+    $targetSummaries = [Collections.Generic.List[string]]::new()
+
+    foreach ($projectName in $ProjectNames) {
+        $assetsPath = Join-Path (Join-Path (Join-Path $WorkDirectory 'extensions') $projectName) 'project.assets.json'
+        if (-not (Test-Path -LiteralPath $assetsPath -PathType Leaf)) {
+            throw "ISOLATED_RELEASE_ASSETS_NOT_FOUND:$projectName"
+        }
+
+        $assets = Get-Content -LiteralPath $assetsPath -Raw | ConvertFrom-Json
+        $restoreProperty = $assets.project.PSObject.Properties['restore']
+        if ($null -eq $restoreProperty) {
+            throw "ISOLATED_RELEASE_ASSETS_INVALID:$projectName"
+        }
+
+        $restore = $restoreProperty.Value
+        $projectPathProperty = $restore.PSObject.Properties['projectPath']
+        $sourcesProperty = $restore.PSObject.Properties['sources']
+        if ($null -eq $projectPathProperty -or $null -eq $sourcesProperty) {
+            throw "ISOLATED_RELEASE_RESTORE_METADATA_MISSING:$projectName"
+        }
+
+        if ($projectName -eq 'Omrina.Desktop') {
+            $expectedProjectPath = $projectPath
+            $expectedTargetFramework = $targetFramework
+        }
+        else {
+            $expectedProjectPath = Join-Path (Join-Path (Join-Path $workspaceRoot 'src') $projectName) "$projectName.csproj"
+            $expectedTargetFramework = 'net10.0'
+        }
+
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetFullPath([string]$projectPathProperty.Value),
+                [IO.Path]::GetFullPath($expectedProjectPath))) {
+            throw "ISOLATED_RELEASE_PROJECT_PATH_MISMATCH:$projectName"
+        }
+
+        $sourcesValue = $sourcesProperty.Value
+        if ($sourcesValue -is [Collections.IDictionary]) {
+            $sourceNames = @($sourcesValue.Keys)
+        }
+        elseif ($sourcesValue -is [Array]) {
+            $sourceNames = @($sourcesValue)
+        }
+        else {
+            $sourceNames = @($sourcesValue.PSObject.Properties | ForEach-Object { $_.Name })
+        }
+
+        $expectedSource = [IO.Path]::GetFullPath($LocalFeedDirectory).TrimEnd('\', '/')
+        if ($sourceNames.Count -ne 1 -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetFullPath(([string]$sourceNames[0]).TrimEnd('\', '/')),
+                $expectedSource)) {
+            throw "ISOLATED_RELEASE_SOURCE_SET_MISMATCH:$projectName"
+        }
+
+        $frameworkTargetKey = $expectedTargetFramework
+        $ridTargetKey = "$expectedTargetFramework/$runtimeIdentifier"
+        if ($projectName -eq 'Omrina.Desktop') {
+            $allowedTargetKeys = @($targetFramework, 'net10.0-desktop')
+            foreach ($declaredRid in @('win-x86', 'win-x64', 'win-arm64')) {
+                $allowedTargetKeys += "$targetFramework/$declaredRid"
+                $allowedTargetKeys += "net10.0-desktop/$declaredRid"
+            }
+        }
+        else {
+            $allowedTargetKeys = @($frameworkTargetKey, $ridTargetKey)
+        }
+
+        $targetKeys = @($assets.targets.PSObject.Properties.Name)
+        $safeTargetKeys = [Collections.Generic.List[string]]::new()
+        foreach ($targetKey in $targetKeys) {
+            if ($targetKey.Length -le 100 -and $targetKey -match '^[a-zA-Z0-9][a-zA-Z0-9.+/-]*$' -and $safeTargetKeys.Count -lt 12) {
+                $safeTargetKeys.Add($targetKey)
+            }
+        }
+        $targetSummaries.Add("$projectName=$($safeTargetKeys -join ',')")
+
+        $unexpectedTargetKeys = @($targetKeys | Where-Object { $_ -notin $allowedTargetKeys })
+        if ($targetKeys.Count -eq 0 -or $unexpectedTargetKeys.Count -gt 0) {
+            $targetSetMismatches.Add($projectName)
+        }
+
+        if ($projectName -eq 'Omrina.Desktop' -and "$targetFramework/$runtimeIdentifier" -notin $targetKeys) {
+            if (-not $targetSetMismatches.Contains($projectName)) {
+                $targetSetMismatches.Add($projectName)
+            }
+        }
+
+        if ($projectName -ne 'Omrina.Desktop' -and
+            $frameworkTargetKey -notin $targetKeys -and
+            $ridTargetKey -notin $targetKeys) {
+            if (-not $targetSetMismatches.Contains($projectName)) {
+                $targetSetMismatches.Add($projectName)
+            }
+        }
+    }
+
+    if ($targetSetMismatches.Count -gt 0) {
+        throw "ISOLATED_RELEASE_TFM_TARGET_SET_MISMATCH:projects=$($targetSetMismatches -join ',');targets=$($targetSummaries -join ';')"
+    }
+}
+
+function Assert-ReleaseDevelopmentImportsExcluded([string]$WorkDirectory) {
+    $desktopExtensionsDirectory = Join-Path (Join-Path $WorkDirectory 'extensions') 'Omrina.Desktop'
+    $developmentImportMarkers = @(
+        'Uno.WinUI.DevServer.targets',
+        'Uno.UI.HotDesign.props',
+        'Uno.UI.HotDesign.targets',
+        'Uno.UI.App.Mcp.targets'
+    )
+
+    foreach ($importFileName in @('Omrina.Desktop.csproj.nuget.g.props', 'Omrina.Desktop.csproj.nuget.g.targets')) {
+        $importPath = Join-Path $desktopExtensionsDirectory $importFileName
+        if (-not (Test-Path -LiteralPath $importPath -PathType Leaf)) {
+            throw "ISOLATED_RELEASE_NUGET_IMPORT_FILE_MISSING:$importFileName"
+        }
+
+        $importContents = Get-Content -LiteralPath $importPath -Raw
+        foreach ($marker in $developmentImportMarkers) {
+            if ($importContents.Contains($marker, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "RELEASE_DEVELOPMENT_IMPORT_PRESENT:$marker"
+            }
+        }
+    }
+}
+
 function Remove-OwnedStagingDirectory([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         return
@@ -340,6 +595,12 @@ try {
     if ($TestPrivacyScanner -and -not [string]::IsNullOrWhiteSpace($AuditExistingPublishDirectory)) {
         throw 'PRIVACY_SCANNER_TEST_AND_AUDIT_ARE_MUTUALLY_EXCLUSIVE'
     }
+    if ($TestPublishDiagnostics -and -not [string]::IsNullOrWhiteSpace($AuditExistingPublishDirectory)) {
+        throw 'PUBLISH_DIAGNOSTICS_TEST_AND_AUDIT_ARE_MUTUALLY_EXCLUSIVE'
+    }
+    if ($TestPrivacyScanner -and $TestPublishDiagnostics) {
+        throw 'PUBLISH_DIAGNOSTICS_TEST_AND_PRIVACY_SCANNER_TEST_ARE_MUTUALLY_EXCLUSIVE'
+    }
 
     $probeDirectory = $null
     if (-not [string]::IsNullOrWhiteSpace($AuditExistingPublishDirectory)) {
@@ -362,7 +623,7 @@ try {
         Assert-NoReparseTree $auditPath
         $probeDirectory = $auditPath
     }
-    elseif (-not $TestPrivacyScanner) {
+    elseif (-not $TestPrivacyScanner -and -not $TestPublishDiagnostics) {
         $driveRoot = [IO.Path]::GetPathRoot($packageRoot)
         $availableBytes = [IO.DriveInfo]::new($driveRoot).AvailableFreeSpace
         if ($availableBytes -lt $minimumFreeBytes) {
@@ -372,7 +633,7 @@ try {
 
     $operationId = [Guid]::NewGuid().ToString('N')
     $stagingPath = Join-Path $packageRoot ".staging-$operationId"
-    $finalPath = Join-Path $packageRoot "omrina-windows-x64-debug-$operationId"
+    $finalPath = Join-Path $packageRoot "omrina-windows-x64-dev-release-$operationId"
     if ((Test-Path -LiteralPath $stagingPath) -or (Test-Path -LiteralPath $finalPath)) {
         throw 'OUTPUT_ALREADY_EXISTS'
     }
@@ -380,6 +641,54 @@ try {
     New-Item -ItemType Directory -Path $stagingPath -ErrorAction Stop | Out-Null
     Assert-PathChainNoReparsePoint $stagingPath
     try {
+        if ($TestPublishDiagnostics) {
+            $syntheticLogPath = Join-Path $stagingPath 'synthetic-publish.log'
+            $syntheticLines = @(
+                "C:\Users\fixture-user\source\repo\apps\desktop\Omrina.Desktop.csproj : warning NU1900: local path $workspaceRoot and marker SYNTHETIC_SECRET_MARKER",
+                "$workspaceRoot\src\Omrina.Scanning\Omrina.Scanning.csproj(27,3): error NETSDK1004: local path C:\Users\fixture-user\source\repo [C:\Users\fixture-user\source\repo\src\Omrina.Scanning\Omrina.Scanning.csproj]",
+                "$workspaceRoot\src\Omrina.Scanning\Omrina.Scanning.csproj(29,3): error WMC9999: Synthetic XAML compile failure; workspace=$workspaceRoot\a.xaml; drive=C:\Users\fixture-user\private.xaml; unc=\\fixture-server\fixture-share\private.xaml; token=SYN_TOKEN; password=SYN_PASS; secret=SYN_SECRET; api-key=SYN_API_KEY; authorization=SYN_AUTH; bearer=SYN_BEARER; cookie=SYN_COOKIE; client_secret=SYN_CLIENT_SECRET; credential=SYN_CREDENTIAL"
+            )
+            [IO.File]::WriteAllLines($syntheticLogPath, $syntheticLines, [Text.UTF8Encoding]::new($false))
+
+            $diagnostics = @(Get-SafePublishDiagnostics $syntheticLogPath $projectNames)
+            $diagnosticSummary = $diagnostics -join "`n"
+            $syntheticSensitiveMarkers = @(
+                'SYN_TOKEN', 'SYN_PASS', 'SYN_SECRET', 'SYN_API_KEY', 'SYN_AUTH',
+                'SYN_BEARER', 'SYN_COOKIE', 'SYN_CLIENT_SECRET', 'SYN_CREDENTIAL'
+            )
+            $unredactedMarkers = @($syntheticSensitiveMarkers | Where-Object { $diagnosticSummary.Contains($_) })
+            if ($diagnostics.Count -ne 3 -or
+                $diagnostics[0] -ne 'PUBLISH_DIAGNOSTIC=ERROR NETSDK1004 project=Omrina.Scanning.csproj' -or
+                -not $diagnostics[1].StartsWith('PUBLISH_DIAGNOSTIC=ERROR WMC9999 project=Omrina.Scanning.csproj message=Synthetic XAML compile failure') -or
+                $diagnostics[2] -ne 'PUBLISH_DIAGNOSTIC=WARNING NU1900 project=Omrina.Desktop.csproj' -or
+                $diagnosticSummary.IndexOf($workspaceRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $diagnosticSummary.Contains('fixture-user') -or
+                $diagnosticSummary.Contains('fixture-server') -or
+                $diagnosticSummary.Contains('SYNTHETIC_SECRET_MARKER') -or
+                $unredactedMarkers.Count -gt 0 -or
+                $diagnostics[1] -match '(?i)(?:[a-z]:[\\/]|\\\\)' -or
+                [regex]::Matches($diagnostics[1], '<redacted>').Count -lt $syntheticSensitiveMarkers.Count) {
+                throw 'PUBLISH_DIAGNOSTICS_SELFTEST_FAILED'
+            }
+
+            $syntheticDetail = "Xaml compile failed in $workspaceRoot\apps\desktop\MainWindow.xaml; cache C:\Users\fixture-user\.nuget\packages\secret\Xaml.dll; token=synthetic-token"
+            $safeDetail = ConvertTo-SafeDiagnosticDetail $syntheticDetail
+            if ($safeDetail.IndexOf($workspaceRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $safeDetail.Contains('fixture-user') -or
+                $safeDetail.Contains('synthetic-token') -or
+                $safeDetail -match '(?i)(?:[a-z]:[\\/]|\\\\)' -or
+                -not $safeDetail.Contains('<WORKSPACE>') -or
+                -not $safeDetail.Contains('<LOCAL_PATH>') -or
+                -not $safeDetail.Contains('<redacted>')) {
+                throw 'PUBLISH_DIAGNOSTIC_REDACTION_SELFTEST_FAILED'
+            }
+
+            Remove-OwnedStagingDirectory $stagingPath
+            $stagingPath = $null
+            Write-Output 'PUBLISH_DIAGNOSTICS_SELFTEST_PASSED'
+            return
+        }
+
         if ($TestPrivacyScanner) {
             $hiddenDirectory = [IO.Directory]::CreateDirectory((Join-Path $stagingPath 'hidden'))
             $hiddenDirectory.Attributes = $hiddenDirectory.Attributes -bor [IO.FileAttributes]::Hidden
@@ -424,42 +733,100 @@ try {
         if ($LASTEXITCODE -ne 0 -or $dotnetVersion -notmatch '^10\.') {
             throw 'DOTNET_SDK_10_REQUIRED'
         }
+        if (-not (Test-Path -LiteralPath $packageCachePath -PathType Container)) {
+            throw 'LOCAL_NUGET_PACKAGE_CACHE_NOT_FOUND'
+        }
+        Assert-PathChainNoReparsePoint $packageCachePath
 
         $appDirectory = Join-Path $stagingPath 'app'
         $workDirectory = Join-Path $stagingPath 'work'
-        $isolatedPathProps = Join-Path $workDirectory 'isolated-paths.props'
+        $isolatedPathProps = Join-Path $workDirectory 'isolated-restore.props'
+        $localFeedDirectory = Join-Path $workDirectory 'local-feed'
+        $nugetConfigPath = Join-Path $workDirectory 'offline-nuget.config'
+        $restoreLogPath = Join-Path $workDirectory 'restore.log'
         $publishLogPath = Join-Path $workDirectory 'publish.log'
         $null = [IO.Directory]::CreateDirectory($appDirectory)
         $null = [IO.Directory]::CreateDirectory($workDirectory)
+        $null = [IO.Directory]::CreateDirectory($localFeedDirectory)
 
-        $projectNames = @('Omrina.Desktop', 'Omrina.Core', 'Omrina.Protocol', 'Omrina.Scanning', 'Omrina.Server', 'Omrina.Platform')
-        $propsLines = [Collections.Generic.List[string]]::new()
-        $propsLines.Add('<Project>')
-        $propsLines.Add('  <PropertyGroup>')
-        foreach ($projectName in $projectNames) {
-            $condition = "'`$(MSBuildProjectName)' == '$projectName'"
-            $propsLines.Add("    <IntermediateOutputPath Condition=`"$condition`">`$(MSBuildThisFileDirectory)intermediate\$projectName\`$(Configuration)\`$(TargetFramework)\</IntermediateOutputPath>")
-            $propsLines.Add("    <OutputPath Condition=`"$condition`">`$(MSBuildThisFileDirectory)build\$projectName\`$(Configuration)\`$(TargetFramework)\</OutputPath>")
-        }
-        $propsLines.Add('  </PropertyGroup>')
-        $propsLines.Add('</Project>')
-        [IO.File]::WriteAllLines($isolatedPathProps, $propsLines, [Text.UTF8Encoding]::new($false))
+        $propsText = @'
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)intermediate/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)extensions/$(MSBuildProjectName)/</MSBuildProjectExtensionsPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)build/$(MSBuildProjectName)/</BaseOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**;**/obj/**;**/bin/**</DefaultItemExcludes>
+    <DefaultItemExcludes Condition="'$(MSBuildProjectName)' == 'Omrina.Desktop'">$(DefaultItemExcludes);tmp/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>
+'@
+        [IO.File]::WriteAllText($isolatedPathProps, $propsText, [Text.UTF8Encoding]::new($false))
+
+        $escapedLocalFeedDirectory = [System.Security.SecurityElement]::Escape($localFeedDirectory)
+        $nugetConfigLines = @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<configuration>',
+            '  <packageSources>',
+            '    <clear />',
+            "    <add key=`"offline-empty`" value=`"$escapedLocalFeedDirectory`" />",
+            '  </packageSources>',
+            '</configuration>'
+        )
+        [IO.File]::WriteAllLines($nugetConfigPath, $nugetConfigLines, [Text.UTF8Encoding]::new($false))
 
         $pathMap = "$workspaceRoot=."
+        $restoreArguments = @(
+            'restore',
+            $projectPath,
+            '--source', $localFeedDirectory,
+            '--configfile', $nugetConfigPath,
+            '--packages', $packageCachePath,
+            '--verbosity', 'minimal',
+            "-p:Configuration=$packageConfiguration",
+            "-p:RuntimeIdentifier=$runtimeIdentifier",
+            '-p:Platform=x64',
+            '-p:Optimize=true',
+            '-p:SelfContained=false',
+            '-p:WindowsAppSDKSelfContained=true',
+            '-p:UnoDisableMCPSupport=true',
+            '-p:UnoDisableHotDesign=true',
+            '-p:UnoDisableHotDesignAgent=true',
+            '-p:HotDesignPreviewsFolder=',
+            '-p:ApplicationPreviewsFolder=.',
+            '-p:HotDesignSolutionDir=.',
+            '-p:NuGetAudit=false',
+            '-p:BuildProjectReferencesInParallel=false',
+            "-p:CustomAfterDirectoryBuildProps=$isolatedPathProps"
+        )
+        & dotnet @restoreArguments *> $restoreLogPath
+        $restoreExitCode = $LASTEXITCODE
+        if ($restoreExitCode -ne 0) {
+            foreach ($diagnostic in @(Get-SafePublishDiagnostics $restoreLogPath $projectNames 'RESTORE')) {
+                [Console]::Error.WriteLine($diagnostic)
+            }
+            throw "RESTORE_FAILED:$restoreExitCode"
+        }
+
+        Assert-RestoredProjectAssets $projectNames $workDirectory $localFeedDirectory
+        Assert-ReleaseDevelopmentImportsExcluded $workDirectory
+
         $publishArguments = @(
             'publish',
             $projectPath,
             '--no-restore',
-            '--configuration', 'Debug',
+            '--configuration', $packageConfiguration,
             '--framework', $targetFramework,
             '--runtime', $runtimeIdentifier,
             '--self-contained', 'false',
+            '-p:Platform=x64',
+            '-p:Optimize=true',
             '-p:SelfContained=false',
             '-p:WindowsAppSDKSelfContained=true',
             '-p:PublishProfile=',
             '-p:DebugSymbols=false',
             '-p:DebugType=None',
             '-p:UnoDisableMCPSupport=true',
+            '-p:UnoDisableHotDesign=true',
             '-p:UnoDisableHotDesignAgent=true',
             '-p:HotDesignPreviewsFolder=',
             '-p:ApplicationPreviewsFolder=.',
@@ -467,7 +834,7 @@ try {
             '-p:NuGetAudit=false',
             '-p:BuildProjectReferences=true',
             '-p:BuildProjectReferencesInParallel=false',
-            "-p:CustomAfterMicrosoftCommonProps=$isolatedPathProps",
+            "-p:CustomAfterDirectoryBuildProps=$isolatedPathProps",
             "-p:PathMap=$pathMap",
             '--output', $appDirectory
         )
@@ -475,6 +842,9 @@ try {
         & dotnet @publishArguments *> $publishLogPath
         $publishExitCode = $LASTEXITCODE
         if ($publishExitCode -ne 0) {
+            foreach ($diagnostic in @(Get-SafePublishDiagnostics $publishLogPath $projectNames 'PUBLISH')) {
+                [Console]::Error.WriteLine($diagnostic)
+            }
             throw "PUBLISH_FAILED:$publishExitCode"
         }
 
@@ -488,10 +858,10 @@ try {
         $packageReadme = @(
             'OMRINA Windows x64 developer validation package',
             '',
-            'This is a local Debug build for development validation. It is not an installer or a signed release.',
-            'Configuration: Debug; target: net10.0-windows10.0.26100.0; RID: win-x64.',
+            'This is a local Release build for development validation. It is not an installer or a signed product release.',
+            'Configuration: Release; target: net10.0-windows10.0.26100.0; RID: win-x64.',
             'The application is .NET framework-dependent. Its runtimeconfig requests:',
-            $runtimeReadmeLines,
+            ($runtimeReadmeLines -join "`n"),
             'Install compatible .NET 10 shared frameworks before launching the application.',
             'WindowsAppSDKSelfContained=true includes the Windows App SDK runtime payload with this package; it does not make the .NET application self-contained.',
             'The package does not install system components, drivers, or an installer. No physical scan/print or clean-machine compatibility validation is implied.',
@@ -552,7 +922,7 @@ try {
 }
 catch {
     $message = $_.Exception.Message
-    if ($message -match '^(PRIVACY_PATH_EMBEDDED|PRIVACY_SCANNER_|PUBLISH_FAILED|REQUIRED_PACKAGE_FILE_MISSING|REQUIRED_PACKAGE_FILE_EMPTY|MANIFEST_PATH_NOT_RELATIVE|MANIFEST_CONTAINS_LOCAL_PATH_OR_ENVIRONMENT_REFERENCE|INSUFFICIENT_DISK_SPACE|OUTPUT_PATH_REPARSE_POINT|OUTPUT_TREE_REPARSE_POINT|OUTPUT_ROOT_NOT_DIRECTORY|OUTPUT_PATH_OUTSIDE_ARTIFACTS|OUTPUT_ALREADY_EXISTS|REFUSED_UNOWNED_STAGING|AUDIT_PATH_MUST_BE_AN_OMRINA_TEMP_PUBLISH_PROBE)') {
+    if ($message -match '^(PRIVACY_PATH_EMBEDDED|PRIVACY_SCANNER_|PUBLISH_DIAGNOSTICS_|RESTORE_FAILED|PUBLISH_FAILED|ISOLATED_RELEASE_|RELEASE_DEVELOPMENT_IMPORT_PRESENT|LOCAL_NUGET_PACKAGE_CACHE_NOT_FOUND|REQUIRED_PACKAGE_FILE_MISSING|REQUIRED_PACKAGE_FILE_EMPTY|MANIFEST_PATH_NOT_RELATIVE|MANIFEST_CONTAINS_LOCAL_PATH_OR_ENVIRONMENT_REFERENCE|INSUFFICIENT_DISK_SPACE|OUTPUT_PATH_REPARSE_POINT|OUTPUT_TREE_REPARSE_POINT|OUTPUT_ROOT_NOT_DIRECTORY|OUTPUT_PATH_OUTSIDE_ARTIFACTS|OUTPUT_ALREADY_EXISTS|REFUSED_UNOWNED_STAGING|AUDIT_PATH_MUST_BE_AN_OMRINA_TEMP_PUBLISH_PROBE)') {
         [Console]::Error.WriteLine("PACKAGE_FAILED:$message")
     }
     else {
