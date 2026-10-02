@@ -4,6 +4,8 @@
 
 公开仓库：[LSCube7/omrina](https://github.com/LSCube7/omrina)
 
+本轮已确定的界面与纸面要求见 [UI/UX 与答题纸设计约定](docs/architecture/ui-ux-and-answer-sheet.md)。该文档区分已确认要求、待定建议和待验收能力，不代表新设计已经实现。
+
 OMRINA 不是面向终端用户的完整答题应用。桌面 UI 主要用于配置、状态查看和需要用户确认的操作；模板、识别、评分与复核能力由本地引擎提供。
 
 ## 当前状态
