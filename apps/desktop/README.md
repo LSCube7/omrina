@@ -36,6 +36,20 @@ dotnet build .\apps\desktop\Omrina.Desktop.csproj -f net10.0-desktop --no-restor
 
 项目设置 `WindowsAppSDKSelfContained=true`，使 Windows App SDK runtime payload 随部署输出提供，避免目标机缺少 Windows App SDK runtime 时启动失败（例如 COM `0x80040154`）。这不是整个 .NET 应用的 self-contained 发布；目标环境仍需要兼容的 .NET runtime。该设置不需要新增 NuGet 包。
 
+### Windows 本地开发验证包
+
+在 Windows、PowerShell 7 和 .NET SDK 10 环境中，可从仓库根目录尝试构建本地 x64 Debug 验证包：
+
+```powershell
+pwsh -NoProfile -File .\scripts\package-windows-dev.ps1
+```
+
+脚本只用已恢复的 NuGet 资产并运行 `dotnet publish --no-restore`，不安装系统组件或联网恢复依赖。每次成功运行会在唯一的 `artifacts/windows-dev/omrina-windows-x64-debug-<id>/` 目录创建新包，不覆盖已有目录；至少需要 1.5 GiB 可用空间。脚本校验主要运行文件、Windows App SDK、NAPS2 与 Skia 资产，检查包内本机路径隐私，并生成只含相对路径的 `SHA256SUMS.txt`。验证失败时以非零状态退出，不会留下假成功包；在可安全清理时会删除暂存目录。
+
+该包是 framework-dependent：当前 `Omrina.Desktop.runtimeconfig.json` 请求 `Microsoft.NETCore.App 10.0.0` 和 `Microsoft.AspNetCore.App 10.0.0`，运行环境必须提供兼容的 .NET 10 共享框架。`WindowsAppSDKSelfContained=true` 只表示 Windows App SDK runtime payload 随包提供，不表示 .NET 本身已 self-contained。输出是本机 Debug 开发验证包，不是安装器或签名发布；依赖许可证完整性仍待核对，也不代表干净设备兼容性或真实扫描/打印验收。
+
+目前 Debug 生成的 `Omrina.Desktop.dll` 仍含本机构建路径，来源包括 Hot Design 生成元数据（`ApplicationPreviewsFolder`、`ServerProcessorPath`）。即使排除 PDB 并关闭相应开发代理，严格隐私门禁仍会拒绝该产物并清理暂存目录；因此此版本尚未生成或验证成功的分发包。修正生成元数据中的路径后，再运行上述命令确认门禁通过。
+
 ## M1 模板预览与 SVG 导出
 
 单窗口导航中的“模板”页支持标题、题数和每题选项数输入，使用 `Omrina.Core` 的同一份毫米几何生成 A4 预览；标题最多 24 个 Unicode 字符，题数为 1–44，每题选项数为 2–6。参数修改后当前预览会失效，重新生成后才可保存、打印或导入图像。主窗口同时提供“状态”“模板”“采集”“设置”“关于”页面，并缓存模板页和采集页实例。
