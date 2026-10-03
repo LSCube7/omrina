@@ -6,6 +6,8 @@
 
 本轮已确定的界面与纸面要求见 [UI/UX 与答题纸设计约定](docs/architecture/ui-ux-and-answer-sheet.md)。学校版式及考试工作流已接入，实纸和界面验收范围见 [验证记录](docs/development/validation.md)。
 
+最新尺寸更正、题组裁切、混排／分区和 Data Matrix 规划见 [学校答题纸下一阶段目标](docs/architecture/answer-sheet-next-targets.md)；尺寸／精度、题组编辑／排版和混排／分区已接入；整组裁切／批阅与 Data Matrix 待实现。
+
 OMRINA 不是面向终端用户的完整答题应用。桌面 UI 主要用于配置、状态查看和需要用户确认的操作；模板、识别、评分与复核能力由本地引擎提供。
 
 ## 当前状态
