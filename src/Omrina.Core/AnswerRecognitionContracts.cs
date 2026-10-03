@@ -61,7 +61,8 @@ public enum RecognitionDiagnosticCode
     BubbleMeasurementsUncertain,
     PageQualityUncertain,
     TemplateAssociationRequired,
-    RecognitionCancelled
+    RecognitionCancelled,
+    CandidateIdentityUncertain
 }
 
 public sealed record RecognitionDiagnostic(
@@ -197,4 +198,6 @@ public sealed class RecognitionResult
     public IReadOnlyList<RecognitionDiagnostic> Diagnostics { get; }
 
     public bool CanScore => Status == RecognitionStatus.Accepted;
+    public SchoolCandidateRecognitionResult? CandidateIdentity { get; init; }
+    public SchoolPageMetadata? SchoolMetadata { get; init; }
 }

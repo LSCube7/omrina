@@ -454,7 +454,8 @@ public sealed class ManualReviewSession
             source.Transform,
             source.Confidence,
             new ReadOnlyCollection<QuestionRecognitionResult>(questions),
-            new ReadOnlyCollection<RecognitionDiagnostic>(diagnostics));
+            new ReadOnlyCollection<RecognitionDiagnostic>(diagnostics))
+        { SchoolMetadata = source.SchoolMetadata, CandidateIdentity = source.CandidateIdentity };
     }
 }
 

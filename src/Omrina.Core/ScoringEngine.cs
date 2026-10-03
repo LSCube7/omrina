@@ -193,6 +193,8 @@ public static class ScoringEngine
         ScoringOptions options,
         ManualReviewSession? review)
     {
+        if (answerKey?.TemplateId is {} templateId && templateId != recognition.TemplateId)
+            throw new ArgumentException("答案表与答题纸版本不匹配。", nameof(answerKey));
         if (recognition.Status == RecognitionStatus.Rejected)
         {
             return new ScoringResult(
@@ -232,10 +234,10 @@ public static class ScoringEngine
         // because a caller supplies an answer key. A ManualReviewSession can
         // resolve its question-level findings explicitly.
         var requiresReview = recognition.Diagnostics.Any(diagnostic =>
-                diagnostic.Code == RecognitionDiagnosticCode.PageQualityUncertain)
+                diagnostic.Code is RecognitionDiagnosticCode.PageQualityUncertain or RecognitionDiagnosticCode.CandidateIdentityUncertain)
             || (review is null && recognition.Status == RecognitionStatus.ReviewRequired);
 
-        for (var questionNumber = 1; questionNumber <= answerKey.QuestionCount; questionNumber++)
+        foreach (var questionNumber in answerKey.Answers.Keys.OrderBy(number => number))
         {
             if (!observations.TryGetValue(questionNumber, out var observation))
             {
@@ -246,7 +248,8 @@ public static class ScoringEngine
             var isCorrect = observation.AnswerLabel is not null
                 && observation.State == QuestionMarkState.Single
                 && string.Equals(observation.AnswerLabel, expectedAnswer, StringComparison.Ordinal);
-            var earnedPoints = isCorrect ? options.PointsPerQuestion : 0m;
+            var maximumPoints = answerKey.MaximumScores.TryGetValue(questionNumber, out var configuredScore) ? configuredScore : options.PointsPerQuestion;
+            var earnedPoints = isCorrect ? maximumPoints : 0m;
             var questionRequiresReview = observation.RequiresReview;
             requiresReview |= questionRequiresReview;
             total += earnedPoints;
@@ -257,7 +260,7 @@ public static class ScoringEngine
                     observation.AnswerLabel,
                     expectedAnswer,
                     earnedPoints,
-                    options.PointsPerQuestion,
+                    maximumPoints,
                     isCorrect,
                     questionRequiresReview,
                     observation.IsManuallyReviewed,
@@ -268,7 +271,7 @@ public static class ScoringEngine
         // explicitly reviewable row instead of silently dropping it.
         foreach (var pair in observations.OrderBy(pair => pair.Key))
         {
-            if (pair.Key >= 1 && pair.Key <= answerKey.QuestionCount)
+            if (answerKey.Answers.ContainsKey(pair.Key))
             {
                 continue;
             }
@@ -292,7 +295,7 @@ public static class ScoringEngine
         var disposition = requiresReview
             ? ScoringDisposition.Provisional
             : ScoringDisposition.Final;
-        var maximumScore = answerKey.QuestionCount * options.PointsPerQuestion;
+        var maximumScore = answerKey.Answers.Keys.Sum(number => answerKey.MaximumScores.TryGetValue(number, out var score) ? score : options.PointsPerQuestion);
         return new ScoringResult(
             recognition,
             answerKey,

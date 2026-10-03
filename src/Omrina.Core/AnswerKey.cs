@@ -28,6 +28,8 @@ public sealed class AnswerKey
 
     /// <summary>Returns the expected option label for each one-based question number.</summary>
     public IReadOnlyDictionary<int, string> Answers => answers;
+    public IReadOnlyDictionary<int, decimal> MaximumScores { get; private init; } = new ReadOnlyDictionary<int, decimal>(new Dictionary<int, decimal>());
+    public string? TemplateId { get; private init; }
 
     public string this[int questionNumber] => answers[questionNumber];
 
@@ -111,6 +113,27 @@ public sealed class AnswerKey
             questionCount,
             optionsPerQuestion,
             new ReadOnlyDictionary<int, string>(copy));
+    }
+
+    public static AnswerKey Create(AnswerSheetLayout layout, IReadOnlyDictionary<int, string> answers)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(answers);
+        if (layout.SchemaVersion != 3) return Create(layout.QuestionCount, layout.OptionsPerQuestion, answers);
+        if (layout.Questions.Count == 0) throw new ArgumentException("本页没有选择题，无需创建选择题答案表。");
+        if (answers.Count != layout.Questions.Count) throw new ArgumentException("答案表必须包含本页全部选择题。");
+        var copy = new Dictionary<int, string>();
+        foreach (var question in layout.Questions)
+        {
+            if (!answers.TryGetValue(question.Number, out var answer) || !IsValidOptionLabel(answer, question.Bubbles.Count)) throw new ArgumentException($"第 {question.Number} 题答案无效。");
+            copy.Add(question.Number, answer);
+        }
+        return new(layout.QuestionCount, layout.OptionsPerQuestion, new ReadOnlyDictionary<int,string>(copy))
+        {
+            TemplateId = layout.TemplateId,
+            MaximumScores = new ReadOnlyDictionary<int, decimal>(layout.SchoolDefinition!.Questions
+                .Where(question => copy.ContainsKey(question.Number)).ToDictionary(question => question.Number, question => question.MaximumScore))
+        };
     }
 
     internal static bool IsValidOptionLabel(string? label, int optionsPerQuestion)

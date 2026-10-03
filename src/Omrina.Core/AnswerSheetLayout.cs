@@ -31,7 +31,12 @@ public sealed record AnswerBubble(
     int OptionIndex,
     string OptionLabel,
     PointMm Center,
-    double RadiusMm);
+    double RadiusMm)
+{
+    public BubbleShape Shape { get; init; } = BubbleShape.Circle;
+    public double HeightMm { get; init; }
+    public LabelPlacement LabelPlacement { get; init; } = LabelPlacement.Outside;
+}
 
 /// <summary>The geometry for one multiple-choice question.</summary>
 public sealed class QuestionGeometry
@@ -275,7 +280,7 @@ public sealed partial class AnswerSheetLayout
     }
 
     /// <summary>Exports this layout as a deterministic, page-sized SVG document.</summary>
-    public string ToSvg() => SvgTemplateExporter.Export(this);
+    public string ToSvg() => SchemaVersion == 3 ? SchoolSvg() : SvgTemplateExporter.Export(this);
 
     private static int CalculateRowsPerColumn()
     {

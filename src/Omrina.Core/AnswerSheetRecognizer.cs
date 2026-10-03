@@ -19,7 +19,7 @@ public interface IAnswerSheetRecognizer
 /// The quality score exposed by this class is an engineering heuristic. It is
 /// deliberately not presented as a probability or a machine-learning score.
 /// </summary>
-public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
+public sealed partial class AnswerSheetRecognizer : IAnswerSheetRecognizer
 {
     private const int AnalysisMaximumDimension = 2400;
     private const byte DarkPixelThreshold = 160;
@@ -67,7 +67,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         }
 
         if (!TrySelectRegistrationMarks(
-                components,
+                layout, components,
                 out var marks,
                 out var registrationScore,
                 out var selectionAmbiguous))
@@ -115,6 +115,9 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
                 [Diagnostic(code, RecognitionDiagnosticSeverity.Error, message, markerScore)]);
         }
 
+        if (layout.SchemaVersion == 3 && !SchoolMachineCode.ValidateExpected(layout, image, transform))
+            return Rejected(layout, [Diagnostic(RecognitionDiagnosticCode.TemplateAssociationRequired, RecognitionDiagnosticSeverity.Error,
+                "考试码缺失或考试、版本、页码与所选答题纸不一致。")]);
         cancellationToken.ThrowIfCancellationRequested();
         var needsReview = registrationScore < 0.60 || markerScore < 0.55;
         return new PageLocationResult(layout.TemplateId, layout.SchemaVersion,
@@ -163,7 +166,11 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
                     1)));
         }
 
-        var status = uncertainQuestionCount == 0 && !qualityNeedsReview
+        var candidateIdentity = layout.SchemaVersion == 3 ? SchoolCandidateRecognition.Read(layout, image, transform) : null;
+        if (candidateIdentity?.RequiresReview == true)
+            diagnostics.Add(Diagnostic(RecognitionDiagnosticCode.CandidateIdentityUncertain, RecognitionDiagnosticSeverity.Warning,
+                "考号未能可靠确认，请检查考号填涂、条码或手动关联考生。"));
+        var status = uncertainQuestionCount == 0 && !qualityNeedsReview && candidateIdentity?.RequiresReview != true
             ? RecognitionStatus.Accepted
             : RecognitionStatus.ReviewRequired;
         var confidence = Math.Clamp(
@@ -179,7 +186,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
             transform,
             confidence,
             questions,
-            diagnostics);
+            diagnostics) { CandidateIdentity = candidateIdentity, SchoolMetadata = layout.SchoolMetadata };
     }
 
     /// <summary>Convenience overload retained for callers that put the image first.</summary>
@@ -320,7 +327,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
     }
 
     private static bool TrySelectRegistrationMarks(
-        IReadOnlyList<DarkComponent> components,
+        AnswerSheetLayout layout, IReadOnlyList<DarkComponent> components,
         out IReadOnlyList<PointPx> marks,
         out double registrationScore,
         out bool ambiguous)
@@ -363,13 +370,13 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
                             continue;
                         }
 
-                        if (!IsPlausibleRegistrationQuadrilateral(ordered))
+                        if (!IsPlausibleRegistrationQuadrilateral(ordered, layout))
                         {
                             continue;
                         }
 
-                        var shapeScore = RegistrationShapeScore(ordered);
-                        var sizeScore = RegistrationSizeScore(ordered);
+                        var shapeScore = RegistrationShapeScore(ordered, layout);
+                        var sizeScore = RegistrationSizeScore(ordered, layout);
                         var areaScore = AreaConsistencyScore(set);
                         var score = 0.52 * shapeScore
                             + 0.22 * sizeScore
@@ -410,7 +417,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         return true;
     }
 
-    private static double RegistrationShapeScore(OrderedCorners corners)
+    private static double RegistrationShapeScore(OrderedCorners corners, AnswerSheetLayout layout)
     {
         var top = Distance(corners.TopLeft.Center, corners.TopRight.Center);
         var bottom = Distance(corners.BottomLeft.Center, corners.BottomRight.Center);
@@ -424,7 +431,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         var horizontalConsistency = Math.Min(top, bottom) / Math.Max(top, bottom);
         var verticalConsistency = Math.Min(left, right) / Math.Max(left, right);
         var aspect = (top + bottom) / Math.Max(1e-9, left + right);
-        var expected = AnswerSheetLayout.PageWidthMm / AnswerSheetLayout.PageHeightMm;
+        var expected = layout.WidthMm / layout.HeightMm;
         var expectedRotated = 1 / expected;
         var aspectError = Math.Min(
             Math.Abs(Math.Log(Math.Max(1e-9, aspect / expected))),
@@ -443,7 +450,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
     /// deliberately a gate rather than another small score contribution: a
     /// bubble or an unrelated black square must not replace a missing corner.
     /// </summary>
-    private static bool IsPlausibleRegistrationQuadrilateral(OrderedCorners corners)
+    private static bool IsPlausibleRegistrationQuadrilateral(OrderedCorners corners, AnswerSheetLayout layout)
     {
         if (!IsConvex(corners))
         {
@@ -466,7 +473,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         // Perspective can make opposite sides different, but a complete page
         // must still remain close to A4's registration-centre aspect ratio.
         var aspect = (top + bottom) / (left + right);
-        var expected = AnswerSheetLayout.PageWidthMm / AnswerSheetLayout.PageHeightMm;
+        var expected = layout.WidthMm / layout.HeightMm;
         var aspectError = Math.Min(
             Math.Abs(Math.Log(aspect / expected)),
             Math.Abs(Math.Log(aspect * expected)));
@@ -481,7 +488,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
             && corners.BottomRight.Width / Math.Max(1, corners.BottomRight.Height) is >= 0.55 and <= 1.8;
     }
 
-    private static double RegistrationSizeScore(OrderedCorners corners)
+    private static double RegistrationSizeScore(OrderedCorners corners, AnswerSheetLayout layout)
     {
         var horizontalSpan = (
             Distance(corners.TopLeft.Center, corners.TopRight.Center)
@@ -495,7 +502,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         }
 
         var expectedMarkWidth = Math.Sqrt(
-            horizontalSpan / 182d * verticalSpan / 269d) * AnswerSheetLayout.RegistrationMarkSizeMm;
+            horizontalSpan / (layout.WidthMm - 28) * verticalSpan / (layout.HeightMm - 28)) * AnswerSheetLayout.RegistrationMarkSizeMm;
         if (!double.IsFinite(expectedMarkWidth) || expectedMarkWidth <= 0)
         {
             return 0;
@@ -607,7 +614,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
                 continue;
             }
 
-            if (!IsPageMappingUsable(image, candidateTransform))
+            if (!IsPageMappingUsable(image, candidateTransform, layout))
             {
                 continue;
             }
@@ -801,10 +808,20 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         PageTransform transform,
         AnswerBubble bubble)
     {
+        if (bubble.HeightMm > 0)
+        {
+            var horizontalSpan = Distance(transform.Map(new(bubble.Center.X-bubble.RadiusMm,bubble.Center.Y)),
+                transform.Map(new(bubble.Center.X+bubble.RadiusMm,bubble.Center.Y)));
+            var verticalSpan = Distance(transform.Map(new(bubble.Center.X,bubble.Center.Y-bubble.HeightMm/2)),
+                transform.Map(new(bubble.Center.X,bubble.Center.Y+bubble.HeightMm/2)));
+            if (!double.IsFinite(horizontalSpan) || !double.IsFinite(verticalSpan) || Math.Min(horizontalSpan,verticalSpan) < 4)
+                return new BubbleMeasurement(0, OptionMarkState.Uncertain, 0);
+        }
         var darkCount = 0;
         var sampleCount = 0;
         var darknessSum = 0d;
-        var radius = bubble.RadiusMm * BubbleSampleRadiusRatio;
+        var sampleRatio = bubble.HeightMm > 0 ? (bubble.Shape == BubbleShape.Rectangle ? .60 : .78) : BubbleSampleRadiusRatio;
+        var radius = bubble.RadiusMm * sampleRatio;
         var radiusSquared = radius * radius;
         for (var row = 0; row < BubbleSampleGridSize; row++)
         {
@@ -813,12 +830,14 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
                 var normalizedX = column / (double)(BubbleSampleGridSize - 1) * 2 - 1;
                 var normalizedY = row / (double)(BubbleSampleGridSize - 1) * 2 - 1;
                 var localX = normalizedX * radius;
-                var localY = normalizedY * radius;
-                if (localX * localX + localY * localY > radiusSquared)
+                var localY = normalizedY * (bubble.Shape == BubbleShape.Rectangle ? bubble.HeightMm / 2 * sampleRatio : radius);
+                if (bubble.Shape == BubbleShape.Circle && localX * localX + localY * localY > radiusSquared)
                 {
                     continue;
                 }
 
+                // The printed glyph is confined to the central box. Sample only its surrounding interior.
+                if (bubble.LabelPlacement == LabelPlacement.Inside && Math.Abs(localX) <= bubble.RadiusMm * .52 && Math.Abs(localY) <= bubble.HeightMm * .32) continue;
                 var mapped = transform.Map(new PointMm(bubble.Center.X + localX, bubble.Center.Y + localY));
                 if (!TrySampleBilinear(image, mapped, out var value))
                 {
@@ -897,7 +916,7 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
         return true;
     }
 
-    private static bool IsPageMappingUsable(GrayImage image, PageTransform transform)
+    private static bool IsPageMappingUsable(GrayImage image, PageTransform transform, AnswerSheetLayout layout)
     {
         var margin = Math.Max(8, Math.Min(image.Width, image.Height) * 0.02);
         var previousCellSigns = new List<double>();
@@ -908,8 +927,8 @@ public sealed class AnswerSheetRecognizer : IAnswerSheetRecognizer
             for (var column = 0; column < gridSize; column++)
             {
                 var pagePoint = new PointMm(
-                    AnswerSheetLayout.PageWidthMm * column / (gridSize - 1d),
-                    AnswerSheetLayout.PageHeightMm * row / (gridSize - 1d));
+                    layout.WidthMm * column / (gridSize - 1d),
+                    layout.HeightMm * row / (gridSize - 1d));
                 var point = transform.Map(pagePoint);
                 if (!double.IsFinite(point.X)
                     || !double.IsFinite(point.Y)

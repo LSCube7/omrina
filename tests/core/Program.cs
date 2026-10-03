@@ -3,6 +3,7 @@ using System.Xml.Linq;
 using Omrina.Core;
 
 var failures = new List<string>();
+if (args.Contains("--school-only")) { SchoolSheetRegression.Run(); Console.WriteLine("PASS: school regression."); return 0; }
 
 Run("valid maximum capacity", failures, VerifyMaximumCapacity);
 Run("option count capacities", failures, VerifyOptionCountCapacities);
@@ -16,6 +17,7 @@ Run("template identity is stable", failures, VerifyTemplateIdentity);
 Run("recognition geometry and mark states", failures, RecognitionRegression.Run);
 Run("subjective grading batches and snapshot restore", failures, SubjectiveGradingRegression.Run);
 Run("mixed template identity, strict definitions and independent page mapping", failures, MixedTemplateRegression.Run);
+Run("school pagination, strict identity, printed labels and machine codes", failures, SchoolSheetRegression.Run);
 
 if (args.Contains("--write-example", StringComparer.Ordinal))
 {
@@ -33,7 +35,7 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: 12 Omrina.Core regression tests.");
+Console.WriteLine("PASS: 13 Omrina.Core regression tests.");
 return 0;
 
 static void Run(string name, List<string> failures, Action test)

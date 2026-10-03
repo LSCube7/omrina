@@ -25,6 +25,12 @@ public sealed class TemplateSubjectiveRegion
     internal string Canonical => string.Create(CultureInfo.InvariantCulture,
         $"subjective|{QuestionNumber}|{MaximumScore:G29}|{Rectangle.X:R}|{Rectangle.Y:R}|{Rectangle.Width:R}|{Rectangle.Height:R}");
 
+    internal static TemplateSubjectiveRegion CreateSchool(int number, decimal score, RectMm rectangle, double width)
+    {
+        if (rectangle.X < 22 || rectangle.Y < 38 || rectangle.Width < 40 || rectangle.Height < 10 || rectangle.X + rectangle.Width > width - 22 || rectangle.Y + rectangle.Height > 275) throw new ArgumentException("答题区域超出纸面。");
+        return new TemplateSubjectiveRegion(number, score, rectangle);
+    }
+
     public static TemplateSubjectiveRegion Create(int questionNumber, decimal maximumScore, RectMm rectangle)
     {
         if (questionNumber <= 0 || maximumScore <= 0 || maximumScore > 1_000_000)
@@ -85,7 +91,7 @@ public sealed partial class AnswerSheetLayout
     private static RectMm PrintedBounds(RectMm rectangle)
         => new(rectangle.X - 0.25, rectangle.Y - 0.25, rectangle.Width + 0.5, rectangle.Height + 0.5);
 
-    public string ToJson() => JsonSerializer.Serialize(new TemplateDocument(SchemaVersion, TemplateId, Title,
+    public string ToJson() => SchemaVersion == 3 ? SchoolJson() : JsonSerializer.Serialize(new TemplateDocument(SchemaVersion, TemplateId, Title,
         QuestionCount, OptionsPerQuestion, SubjectiveRegions.Select(region => new RegionDocument(region.QuestionId,
             region.QuestionNumber, region.MaximumScore, region.Rectangle)).ToArray()), TemplateJsonOptions);
 
@@ -97,6 +103,9 @@ public sealed partial class AnswerSheetLayout
         {
             using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 16 });
             RejectDuplicateProperties(document.RootElement);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) throw new ArgumentException("模板定义必须为对象。", nameof(json));
+            if (document.RootElement.TryGetProperty("schemaVersion", out var schema) && schema.ValueKind == JsonValueKind.Number
+                && schema.TryGetInt32(out var schemaNumber) && schemaNumber == 3) return SchoolFromJson(json);
             var parsed = JsonSerializer.Deserialize<TemplateDocument>(json, TemplateJsonOptions)
                 ?? throw new ArgumentException("模板定义为空。", nameof(json));
             if (parsed.SubjectiveRegions is null || parsed.SubjectiveRegions.Length > 64

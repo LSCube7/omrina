@@ -6,4 +6,7 @@
     <AssemblyName>Omrina.Core</AssemblyName>
     <RootNamespace>Omrina.Core</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
+  </ItemGroup>
 </Project>
