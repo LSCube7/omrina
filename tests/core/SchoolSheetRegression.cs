@@ -53,6 +53,7 @@ internal static class SchoolSheetRegression
         var withBody=SchoolAnswerSheet.Create(basis with{Mode=SchoolContentMode.WithQuestions}).Pages[0];
         Check(withBody.ToSvg().Contains("正文&lt;&amp;&gt;",StringComparison.Ordinal),"body escaped");
         VerifyQuestionGroups(basis);
+        VerifyChoiceColumns(basis);
 
         foreach(var shape in new[]{BubbleShape.Circle,BubbleShape.Rectangle})
             foreach(var placement in new[]{LabelPlacement.Inside,LabelPlacement.Outside})
@@ -60,10 +61,22 @@ internal static class SchoolSheetRegression
                 var definition=basis with{Paper=SchoolPaper.A3Landscape,Columns=3,BubbleShape=shape,LabelPlacement=placement,
                     Questions=new[]{new SchoolQuestionDefinition(7,SchoolQuestionType.Choice,1,"",new[]{"","","",""})}};
                 var page=SchoolAnswerSheet.Create(definition).Pages[0];
-                var qr=SchoolMachineCode.EncodeExam(page.SchoolMetadata!);
-                var qrPixels=new byte[qr.Width*qr.Height*64];
-                for(var py=0;py<qr.Height*8;py++) for(var px=0;px<qr.Width*8;px++) qrPixels[py*qr.Width*8+px]=qr[px/8,py/8]?(byte)0:(byte)255;
-                Check(SchoolMachineCode.DecodeExam(new(qr.Width*8,qr.Height*8,qrPixels))==page.SchoolMetadata,"direct qr decode");
+                var matrix=SchoolMachineCode.EncodeExam(page.SchoolMetadata!);
+                var pageCode=SchoolMachineCode.PageCode(page.SchoolMetadata!);
+                var codeSize=SchoolMachineCode.ExamCodeSizeMm(page.SchoolMetadata!);
+                Check(pageCode.Length==29 && pageCode.StartsWith("OM1",StringComparison.Ordinal) && !pageCode.Contains("exam-2026",StringComparison.Ordinal),"fixed short versioned page payload");
+                Check(matrix.Width==matrix.Height && Math.Abs(codeSize.WidthMm-(matrix.Width+2)*SchoolMachineCode.ExamModuleSizeMm)<1e-9,"square Data Matrix with measurable 0.5mm modules and a one-module quiet zone");
+                Check(page.ExamCodeArea is {} codeArea && Math.Abs(codeArea.Width-codeSize.WidthMm)<1e-9 && Math.Abs(codeArea.Height-codeSize.HeightMm)<1e-9,"machine-code area matches its real printed footprint");
+                var codeImage=RenderExamMatrix(matrix,8);
+                Check(SchoolMachineCode.DecodeExam(codeImage)==pageCode,"direct Data Matrix decode with quiet zone");
+                Check(SchoolMachineCode.DecodeExam(RenderExamMatrix(matrix,2))==pageCode,"low-resolution Data Matrix decode");
+                foreach(var orientation in new[]{PageOrientation.Degrees90,PageOrientation.Degrees180,PageOrientation.Degrees270})
+                {
+                    Check(SchoolMachineCode.DecodeExam(Rotate(codeImage,orientation))==pageCode,$"rotated Data Matrix decode {orientation}");
+                }
+                Check(SchoolMachineCode.ParsePageCode(pageCode[..^1]+"B") is null,"noncanonical short-code bits rejected");
+                var otherPageCode=SchoolAnswerSheet.Create(definition with{ExamId="other-exam"}).Pages[0];
+                Check(SchoolMachineCode.DecodeExam(TwoExamCodes(matrix,SchoolMachineCode.EncodeExam(otherPageCode.SchoolMetadata!))) is null,"multiple page codes are ambiguous");
                 Check(page.Bubbles.Concat(page.CandidateDigits.SelectMany(d=>d.Bubbles)).All(b=>b.Shape==shape && b.LabelPlacement==placement),"letters and digits share style");
                 var blankImage=Render(page,false);
                 var blank=new AnswerSheetRecognizer().Recognize(page,blankImage);
@@ -210,6 +223,78 @@ internal static class SchoolSheetRegression
         Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Questions = longRunQuestions, Groups = [], CandidateIdentity = new(CandidateIdentityMode.Marking, 4) }), "layouts over 64 pages are rejected after group pagination");
     }
 
+    private static void VerifyChoiceColumns(SchoolSheetDefinition basis)
+    {
+        var questions = new SchoolQuestionDefinition[]
+        {
+            new(7, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁"]),
+            new(1, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁"]),
+            new(9, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁"]),
+            new(2, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁"]),
+            new(10, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁"]),
+            new(20, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁"])
+        };
+        var baseDefinition = basis with
+        {
+            Mode = SchoolContentMode.AnswerOnly,
+            Paper = SchoolPaper.A4Portrait,
+            Columns = 1,
+            Questions = questions,
+            Groups =
+            [
+                new("compact", "紧凑客观组", [7, 1, 9, 2, 10]),
+                new("later", "后续题目", [20])
+            ]
+        };
+        var oneColumn = SchoolAnswerSheet.Create(baseDefinition).Pages[0];
+        var twoColumnDefinition = baseDefinition with
+        {
+            Groups = [baseDefinition.Groups[0] with { ChoiceColumns = 2 }, baseDefinition.Groups[1]]
+        };
+        var twoColumns = SchoolAnswerSheet.Create(twoColumnDefinition).Pages[0];
+        var originalGroup = oneColumn.SchoolGroups.Single(group => group.GroupId == "compact");
+        var compactGroup = twoColumns.SchoolGroups.Single(group => group.GroupId == "compact");
+        var followingGroup = twoColumns.SchoolGroups.Single(group => group.GroupId == "later");
+        Check(compactGroup.ChoiceColumns == 2, "group geometry records the number of objective blocks");
+        Check(Math.Abs(compactGroup.RectangleMm.Width - twoColumns.SchoolInformationArea!.Value.Width) < .0001, "compact group still spans the full column");
+        Check(compactGroup.RectangleMm.Height < originalGroup.RectangleMm.Height, "two objective blocks reduce the group to three rows");
+        Check(compactGroup.RectangleMm.Y + compactGroup.RectangleMm.Height <= followingGroup.RectangleMm.Y + 1e-9, "reduced group height does not overlap the next group");
+        Check(twoColumns.Questions.Select(question => question.Number).SequenceEqual(new[] { 7, 1, 9, 2, 10, 20 }), "two-block layout preserves row-major question order");
+        var firstRowFirstBlock = twoColumns.Questions[0].Bubbles[0].Center;
+        var firstRowSecondBlock = twoColumns.Questions[1].Bubbles[0].Center;
+        var secondRowFirstBlock = twoColumns.Questions[2].Bubbles[0].Center;
+        var secondRowSecondBlock = twoColumns.Questions[3].Bubbles[0].Center;
+        var thirdRowFirstBlock = twoColumns.Questions[4].Bubbles[0].Center;
+        Check(firstRowFirstBlock.X < firstRowSecondBlock.X && Math.Abs(firstRowFirstBlock.Y - firstRowSecondBlock.Y) < 1e-9, "first row uses adjacent blocks");
+        Check(Math.Abs(firstRowFirstBlock.X - secondRowFirstBlock.X) < 1e-9 && Math.Abs(firstRowSecondBlock.X - secondRowSecondBlock.X) < 1e-9, "members fill each block in row-major order");
+        Check(secondRowFirstBlock.Y > firstRowFirstBlock.Y && secondRowSecondBlock.Y == secondRowFirstBlock.Y, "second row aligns across blocks");
+        Check(thirdRowFirstBlock.Y > secondRowFirstBlock.Y, "odd group member count ends on a partial row");
+        var restored = AnswerSheetLayout.FromJson(twoColumns.ToJson());
+        Check(restored.SchoolDefinition!.Groups.Single(group => group.Id == "compact").ChoiceColumns == 2, "choice column count survives template serialization");
+        var importedBundle = SchoolTemplateBundle.FromJson(SchoolTemplateBundle.Create(twoColumnDefinition).ToJson());
+        var generatedBundleTemplateIds = SchoolAnswerSheet.Create(twoColumnDefinition).Pages.Select(page => page.SchoolMetadata!.TemplateId);
+        Check(importedBundle.Definition.Groups.Single(group => group.Id == "compact").ChoiceColumns == 2
+            && importedBundle.Pages.Select(page => page.Metadata.TemplateId).SequenceEqual(generatedBundleTemplateIds), "choice column layout and page identities survive offline transfer");
+
+        Reject(() => SchoolAnswerSheet.Create(twoColumnDefinition with { Groups = [baseDefinition.Groups[0] with { ChoiceColumns = 0 }, baseDefinition.Groups[1]] }), "zero objective blocks rejected");
+        Reject(() => SchoolAnswerSheet.Create(twoColumnDefinition with { Groups = [baseDefinition.Groups[0] with { ChoiceColumns = 4 }, baseDefinition.Groups[1]] }), "more than three objective blocks rejected");
+        Reject(() => SchoolAnswerSheet.Create(twoColumnDefinition with
+        {
+            Mode = SchoolContentMode.WithQuestions,
+            Groups = [baseDefinition.Groups[0] with { ChoiceColumns = 2 }, baseDefinition.Groups[1]]
+        }), "multiple blocks with question text rejected");
+        Reject(() => SchoolAnswerSheet.Create(twoColumnDefinition with
+        {
+            Questions = [new SchoolQuestionDefinition(21, SchoolQuestionType.Subjective, 1, "", null, 30)],
+            Groups = [new("subjective", "主观组", [21], 2)]
+        }), "multiple blocks for subjective questions rejected");
+        Reject(() => SchoolAnswerSheet.Create(twoColumnDefinition with
+        {
+            Questions = [new SchoolQuestionDefinition(1, SchoolQuestionType.Choice, 1, "", ["甲", "乙", "丙", "丁", "戊", "己"])],
+            Groups = [new("too-wide", "选项过多", [1], 3)]
+        }), "choices wider than their objective block rejected");
+    }
+
     private static GrayImage Render(AnswerSheetLayout layout,bool filled)
     {
         const double scale=8;
@@ -294,6 +379,41 @@ internal static class SchoolSheetRegression
         }
         return new(width,height,pixels,false);
     }
+
+    private static GrayImage RenderExamMatrix(ZXing.Common.BitMatrix matrix,int scale)
+    {
+        const int quietModules=1;
+        var width=(matrix.Width+quietModules*2)*scale;
+        var height=(matrix.Height+quietModules*2)*scale;
+        var pixels=Enumerable.Repeat((byte)255,width*height).ToArray();
+        for(var y=0;y<matrix.Height;y++) for(var x=0;x<matrix.Width;x++)
+            if(matrix[x,y])
+                for(var py=0;py<scale;py++) for(var px=0;px<scale;px++)
+                    pixels[(y+quietModules)*scale*width+py*width+(x+quietModules)*scale+px]=0;
+        return new(width,height,pixels,false);
+    }
+
+    private static GrayImage TwoExamCodes(ZXing.Common.BitMatrix first,ZXing.Common.BitMatrix second)
+    {
+        const int scale=5;
+        var codeWidth=(first.Width+2)*scale;
+        var codeHeight=(first.Height+2)*scale;
+        var width=codeWidth*2+20;
+        var height=Math.Max(codeHeight,(second.Height+2)*scale)+10;
+        var pixels=Enumerable.Repeat((byte)255,width*height).ToArray();
+        Paint(first,5,5);
+        Paint(second,codeWidth+15,5);
+        return new(width,height,pixels,false);
+
+        void Paint(ZXing.Common.BitMatrix matrix,int left,int top)
+        {
+            for(var y=0;y<matrix.Height;y++) for(var x=0;x<matrix.Width;x++)
+                if(matrix[x,y])
+                    for(var py=0;py<scale;py++) for(var px=0;px<scale;px++)
+                        pixels[(top+(y+1)*scale+py)*width+left+(x+1)*scale+px]=0;
+        }
+    }
+
     private static void Check(bool condition,string message) { if(!condition) throw new InvalidOperationException(message); }
     private static void Reject(Action action,string message) { try{action();}catch(ArgumentException){return;}throw new InvalidOperationException(message); }
 }

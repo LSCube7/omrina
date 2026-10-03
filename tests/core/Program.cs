@@ -18,6 +18,7 @@ Run("recognition geometry and mark states", failures, RecognitionRegression.Run)
 Run("subjective grading batches and snapshot restore", failures, SubjectiveGradingRegression.Run);
 Run("mixed template identity, strict definitions and independent page mapping", failures, MixedTemplateRegression.Run);
 Run("school pagination, strict identity, printed labels and machine codes", failures, SchoolSheetRegression.Run);
+Run("offline school template bundle integrity and page identity round trip", failures, SchoolTemplateBundleRegression.Run);
 
 if (args.Contains("--write-example", StringComparer.Ordinal))
 {
@@ -35,7 +36,7 @@ if (failures.Count > 0)
     return 1;
 }
 
-Console.WriteLine("PASS: 13 Omrina.Core regression tests.");
+Console.WriteLine("PASS: 14 Omrina.Core regression tests.");
 return 0;
 
 static void Run(string name, List<string> failures, Action test)

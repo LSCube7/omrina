@@ -21,9 +21,9 @@ public sealed record SchoolQuestionDefinition([property: JsonRequired] int Numbe
     [property: JsonRequired] decimal MaximumScore = 1, [property: JsonRequired] string Body = "",
     [property: JsonRequired] IReadOnlyList<string>? Options = null, [property: JsonRequired] double SubjectiveHeightMm = 30);
 public sealed record SchoolQuestionGroupDefinition([property: JsonRequired] string Id, [property: JsonRequired] string Title,
-    [property: JsonRequired] IReadOnlyList<int> QuestionNumbers);
+    [property: JsonRequired] IReadOnlyList<int> QuestionNumbers, [property: JsonRequired] int ChoiceColumns = 1);
 public enum SchoolLayoutOrder { Mixed, Separated }
-public sealed record SchoolQuestionGroupGeometry(string GroupId, string Title, IReadOnlyList<int> QuestionNumbers, RectMm RectangleMm);
+public sealed record SchoolQuestionGroupGeometry(string GroupId, string Title, IReadOnlyList<int> QuestionNumbers, RectMm RectangleMm, int ChoiceColumns = 1);
 public sealed record SchoolSheetDefinition
 {
     [JsonRequired] public string ExamId { get; init; } = "";
@@ -119,7 +119,7 @@ public sealed partial class AnswerSheetLayout
         foreach (var q in questions)
             if (q.Number <= 0 || !Enum.IsDefined(q.Type) || q.MaximumScore is <= 0 or > 1000000 || q.Body is null || q.Body.Length > 8000 || (q.Type == SchoolQuestionType.Choice && (q.Options is null || q.Options.Count is < 2 or > 6 || q.Options.Any(o => o is null || o.Length > 1000))) || (q.Type == SchoolQuestionType.Subjective && (!double.IsFinite(q.SubjectiveHeightMm) || q.SubjectiveHeightMm is < 10 or > 230)))
                 throw new ArgumentException($"第 {q.Number} 题定义无效或答题区过大。");
-        var groups = NormalizeSchoolGroups(input.Groups, questions);
+        var groups = NormalizeSchoolGroups(input.Groups, questions, input.Mode);
         var definition = input with
         {
             Questions = Array.AsReadOnly(questions),
@@ -158,16 +158,20 @@ public sealed partial class AnswerSheetLayout
         }
         var choicePitch = wideBubble ? bubbleWidthMm + 3 : 12;
         var contentWidth = columnWidth - 8;
+        var choiceColumnsByQuestion = groups
+            .SelectMany(group => group.QuestionNumbers.Select(number => (number, group.ChoiceColumns)))
+            .ToDictionary(item => item.number, item => item.ChoiceColumns);
         foreach (var question in questions.Where(question => question.Type == SchoolQuestionType.Choice))
         {
             var choiceStart = wideBubble ? Math.Max(10, bubbleWidthMm / 2 + 2) : 10;
             var labelSpace = definition.LabelPlacement == LabelPlacement.Outside ? 2.4 : 0;
             var compactChoice = definition.Mode == SchoolContentMode.AnswerOnly;
+            var blockWidth = compactChoice ? contentWidth / choiceColumnsByQuestion[question.Number] : contentWidth;
             var optionSpan = (question.Options!.Count - 1) * choicePitch + bubbleWidthMm / 2 + labelSpace;
-            var rowStart = compactChoice ? contentWidth - optionSpan : choiceStart;
+            var rowStart = compactChoice ? blockWidth - optionSpan : choiceStart;
             var requiredChoiceWidth = choiceStart + optionSpan;
             if (rowStart - bubbleWidthMm / 2 < 0 || (!compactChoice && requiredChoiceWidth > contentWidth))
-                throw new ArgumentException($"第 {question.Number} 题的填涂框或选项标签超出当前栏宽，请减小矩形宽度或减少选项数。");
+                throw new ArgumentException($"第 {question.Number} 题的填涂框或选项标签超出题号块宽度，请减少题号块数或选项数，或减小填涂框宽度。");
             if (compactChoice && rowStart - bubbleWidthMm / 2 < EstimateSchoolTextWidth($"{question.Number}. ({question.MaximumScore.ToString(CultureInfo.InvariantCulture)} 分)") + 2)
                 throw new ArgumentException($"第 {question.Number} 题的题号和选项填涂框无法在紧凑行内排开，请减少选项数或缩短分值格式。");
         }
@@ -192,7 +196,11 @@ public sealed partial class AnswerSheetLayout
             }).ToArray();
             var titleLines = WrapSchoolText(group.Title, contentWidth).ToArray();
             var headerHeight = 1 + titleLines.Length * 4.5;
-            return new PreparedSchoolQuestionGroup(group, Array.AsReadOnly(groupQuestions), headerHeight, headerHeight + groupQuestions.Sum(question => question.TotalHeight) - 3 + 4);
+            var compactChoiceGroup = groupQuestions[0].CompactChoice;
+            var questionHeight = compactChoiceGroup
+                ? Math.Ceiling((double)groupQuestions.Length / group.ChoiceColumns) * 6
+                : groupQuestions.Sum(question => question.TotalHeight);
+            return new PreparedSchoolQuestionGroup(group, Array.AsReadOnly(groupQuestions), headerHeight, headerHeight + questionHeight + 1);
         }).ToArray();
         if (definition.LayoutOrder == SchoolLayoutOrder.Separated)
             orderedGroups = orderedGroups.OrderBy(group => questionByNumber[group.Definition.QuestionNumbers[0]].Type).ToArray();
@@ -234,18 +242,24 @@ public sealed partial class AnswerSheetLayout
                     if (y + group.TotalHeight > bottom) break;
                     var groupRectangle = new RectMm(x, y, columnWidth, group.TotalHeight);
                     var groupGeometry = new SchoolQuestionGroupGeometry(group.Definition.Id, group.Definition.Title,
-                        Array.AsReadOnly(group.Definition.QuestionNumbers.ToArray()), groupRectangle);
+                        Array.AsReadOnly(group.Definition.QuestionNumbers.ToArray()), groupRectangle, group.Definition.ChoiceColumns);
                     schoolGroups.Add(groupGeometry);
                     var titleLines = WrapSchoolText(group.Definition.Title, contentWidth).ToArray();
                     for (var line = 0; line < titleLines.Length; line++) texts.Add(new(new(x + 4, y + 3 + line * 4.5), titleLines[line], 3));
                     var questionY = y + group.HeaderHeight;
-                    foreach (var prepared in group.Questions)
+                    var compactBlockWidth = contentWidth / group.Definition.ChoiceColumns;
+                    for (var memberIndex = 0; memberIndex < group.Questions.Count; memberIndex++)
                     {
+                        var prepared = group.Questions[memberIndex];
                         var q = prepared.Definition;
-                        texts.Add(new(new(x + 4, questionY + (prepared.CompactChoice ? 4.5 : 4)), $"{q.Number}. ({q.MaximumScore.ToString(CultureInfo.InvariantCulture)} 分)", 3));
-                        for (var line = 0; line < prepared.BodyLines.Count; line++) texts.Add(new(new(x + 4, questionY + 9 + line * 4.5), prepared.BodyLines[line], 3));
+                        var compactColumn = prepared.CompactChoice ? memberIndex % group.Definition.ChoiceColumns : 0;
+                        var compactRow = prepared.CompactChoice ? memberIndex / group.Definition.ChoiceColumns : 0;
+                        var memberX = x + 4 + (prepared.CompactChoice ? compactColumn * compactBlockWidth : 0);
+                        var memberY = questionY + (prepared.CompactChoice ? compactRow * 6 : 0);
+                        texts.Add(new(new(memberX, memberY + (prepared.CompactChoice ? 4.5 : 4)), $"{q.Number}. ({q.MaximumScore.ToString(CultureInfo.InvariantCulture)} 分)", 3));
+                        for (var line = 0; line < prepared.BodyLines.Count; line++) texts.Add(new(new(memberX, memberY + 9 + line * 4.5), prepared.BodyLines[line], 3));
                         var bodyHeight = prepared.BodyLines.Count * 4.5;
-                        var answerY = questionY + (prepared.CompactChoice ? 2 : 7 + bodyHeight);
+                        var answerY = memberY + (prepared.CompactChoice ? 2 : 7 + bodyHeight);
                         if (q.Type == SchoolQuestionType.Subjective)
                             regions.Add(TemplateSubjectiveRegion.CreateSchool(q.Number, q.MaximumScore, new(x, answerY, columnWidth, prepared.AnswerHeight), width));
                         else
@@ -253,14 +267,19 @@ public sealed partial class AnswerSheetLayout
                             var baseChoiceStart = wideBubble ? Math.Max(10, bubbleWidthMm / 2 + 2) : 10;
                             var labelSpace = definition.LabelPlacement == LabelPlacement.Outside ? 2.4 : 0;
                             var choiceStart = prepared.CompactChoice
-                                ? contentWidth - ((q.Options!.Count - 1) * choicePitch + bubbleWidthMm / 2 + labelSpace)
+                                ? compactColumn * compactBlockWidth + compactBlockWidth - ((q.Options!.Count - 1) * choicePitch + bubbleWidthMm / 2 + labelSpace)
                                 : baseChoiceStart;
-                            var bubbleCenterY = prepared.CompactChoice ? questionY + 3 : answerY + prepared.AnswerHeight / 2;
+                            var bubbleCenterY = prepared.CompactChoice ? memberY + 3 : answerY + prepared.AnswerHeight / 2;
                             var choices = Enumerable.Range(0, q.Options!.Count).Select(option => NewBubble(q.Number, option + 1, ((char)('A' + option)).ToString(), new(x + 4 + choiceStart + option * choicePitch, bubbleCenterY), definition)).ToArray();
-                            geometry.Add(new(q.Number, column + 1, ++row, new(x + 4, answerY + prepared.AnswerHeight / 2), Array.AsReadOnly(choices))); bubbles.AddRange(choices);
+                            geometry.Add(new(q.Number, column + 1, ++row, new(memberX, answerY + prepared.AnswerHeight / 2), Array.AsReadOnly(choices))); bubbles.AddRange(choices);
                         }
-                        questionY += prepared.TotalHeight;
+                        if (!prepared.CompactChoice)
+                        {
+                            questionY += prepared.TotalHeight;
+                        }
                     }
+                    if (group.Questions[0].CompactChoice)
+                        questionY += Math.Ceiling((double)group.Questions.Count / group.Definition.ChoiceColumns) * 6;
                     y += group.TotalHeight;
                     groupIndex++;
                     placedAnyGroup = true;
@@ -268,15 +287,28 @@ public sealed partial class AnswerSheetLayout
             }
             if (!placedAnyGroup) throw new ArgumentException($"题组“{orderedGroups[groupIndex].Definition.Title}”无法放入当前纸张栏位。");
             var id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{documentHash}|page:{pageIndex}"))).ToLowerInvariant();
+            var metadata = new SchoolPageMetadata(definition.ExamId, definition.LayoutDocumentId, definition.Version, pageIndex + 1, side, id);
+            var codeSize = SchoolMachineCode.ExamCodeSizeMm(metadata);
+            const double reservedCodeSizeMm = 24;
+            if (codeSize.WidthMm > reservedCodeSizeMm || codeSize.HeightMm > reservedCodeSizeMm)
+                throw new ArgumentException("页面 Data Matrix 编码密度超过信息区预留空间，无法按最小模块尺寸排版。");
+            var codeArea = new RectMm(
+                left + columnWidth - 16 - codeSize.WidthMm / 2,
+                top + 15 - codeSize.HeightMm / 2,
+                codeSize.WidthMm,
+                codeSize.HeightMm);
             var marks = new[] { new RegistrationMark("registration-top-left",new(10,10),8), new RegistrationMark("registration-top-right",new(width-18,10),8), new RegistrationMark("registration-bottom-left",new(10,279),8), new RegistrationMark("registration-bottom-right",new(width-18,279),8) };
             var layout = new AnswerSheetLayout(definition.Title, geometry.Count, geometry.Count == 0 ? 2 : geometry.Max(q => q.Bubbles.Count),id,$"AS3-{pageIndex+1}-{id[..8]}",new(width/2,21),geometry.Count,Array.AsReadOnly(marks),new("orientation",new(width/2-2,10),4,4),Array.Empty<OptionHeader>(),geometry.AsReadOnly(),bubbles.AsReadOnly(),3,regions.AsReadOnly())
-            { WidthMm=width, SchoolDefinition=definition, SchoolPageIndex=pageIndex, SchoolMetadata=new(definition.ExamId,definition.LayoutDocumentId,definition.Version,pageIndex+1,side,id), SchoolInformationArea=info, CandidateArea=candidateArea, ExamCodeArea=new(left+columnWidth-28,top+3,24,24), CandidateDigits=digits.AsReadOnly(), SchoolTexts=texts.AsReadOnly(), SchoolGroups=schoolGroups.AsReadOnly() };
+            { WidthMm=width, SchoolDefinition=definition, SchoolPageIndex=pageIndex, SchoolMetadata=metadata, SchoolInformationArea=info, CandidateArea=candidateArea, ExamCodeArea=codeArea, CandidateDigits=digits.AsReadOnly(), SchoolTexts=texts.AsReadOnly(), SchoolGroups=schoolGroups.AsReadOnly() };
             pages.Add(layout);
         }
         return pages.AsReadOnly();
     }
 
-    private static SchoolQuestionGroupDefinition[] NormalizeSchoolGroups(IReadOnlyList<SchoolQuestionGroupDefinition>? inputGroups, IReadOnlyList<SchoolQuestionDefinition> questions)
+    private static SchoolQuestionGroupDefinition[] NormalizeSchoolGroups(
+        IReadOnlyList<SchoolQuestionGroupDefinition>? inputGroups,
+        IReadOnlyList<SchoolQuestionDefinition> questions,
+        SchoolContentMode mode)
     {
         if (inputGroups is null) throw new ArgumentException("题组列表不能为空。");
         if (inputGroups.Count == 0)
@@ -291,8 +323,9 @@ public sealed partial class AnswerSheetLayout
         {
             var group = inputGroups[groupIndex];
             if (!IsValidSchoolGroupId(group.Id) || !groupIds.Add(group.Id) || string.IsNullOrWhiteSpace(group.Title) || group.Title.Length > 80
+                || group.ChoiceColumns is < 1 or > 3
                 || group.Title.IndexOfAny(['\n', '\r', '\t']) >= 0 || group.QuestionNumbers is null || group.QuestionNumbers.Count is < 1 or > 500)
-                throw new ArgumentException("题组 ID、标题或成员无效。");
+                throw new ArgumentException("题组 ID、标题、客观题块数或成员无效。");
 
             SchoolQuestionType? groupType = null;
             var memberNumbers = group.QuestionNumbers.ToArray();
@@ -304,6 +337,8 @@ public sealed partial class AnswerSheetLayout
                     throw new ArgumentException($"题组“{group.Title}”不能混合客观题和主观题。");
                 groupType = question.Type;
             }
+            if (group.ChoiceColumns > 1 && (mode != SchoolContentMode.AnswerOnly || groupType != SchoolQuestionType.Choice))
+                throw new ArgumentException("多个题号块仅支持不含题目正文的客观题组；主观题组和含正文模式必须使用一个题号块。");
             normalizedGroups[groupIndex] = group with { QuestionNumbers = Array.AsReadOnly(memberNumbers) };
         }
         if (coveredQuestions.Count != questions.Count) throw new ArgumentException("题组成员必须完整覆盖所有题目。");
