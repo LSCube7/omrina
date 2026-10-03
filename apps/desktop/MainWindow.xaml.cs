@@ -17,6 +17,9 @@ public sealed partial class MainWindow : Window
     private readonly IFileDialogService _fileDialogService;
     private readonly TemplatePrintController? _printController;
     private readonly StatusPage _statusPage;
+    private readonly SchoolExamStore _examStore;
+    private readonly SchoolExamPage _examPage;
+    private readonly ExamAnswerKeyPage _answerKeyPage;
     private readonly TemplatePage _templatePage;
     private readonly CapturePage _capturePage;
     private readonly RecognitionPage _recognitionPage;
@@ -24,14 +27,19 @@ public sealed partial class MainWindow : Window
     private readonly SettingsPage _settingsPage;
     private readonly AboutPage _aboutPage;
     private bool _isClosed;
+    private SchoolSheetDefinition? _activeExam;
 
     public MainWindow()
     {
         InitializeComponent();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
+        ConfigureSystemBackdrop();
 
         _statusPage = new StatusPage();
+        _examStore = new SchoolExamStore(_captureStore.RootDirectory);
+        _examPage = new SchoolExamPage(_examStore.ListDefinitions);
+        _answerKeyPage = new ExamAnswerKeyPage(_examStore.ReadAnswerKey, _examStore.SaveAnswerKey);
         _aboutPage = new AboutPage();
         _fileDialogService = DesktopPlatformFactory.CreateFileDialogs(this);
         _scannerService = new SerializedScannerService(
@@ -52,7 +60,8 @@ public sealed partial class MainWindow : Window
         _templatePage = new TemplatePage(
             SaveSvgAsync,
             _printController is null ? null : PrintAsync,
-            () => _printController?.IsBusy == true);
+            () => _printController?.IsBusy == true,
+            _printController is null ? null : PrintDocumentAsync);
         _capturePage = new CapturePage(
             _scannerService,
             PickImageAsync,
@@ -66,7 +75,17 @@ public sealed partial class MainWindow : Window
             exportRunner: ExportResultAsync,
             saveTextAsync: SaveTextAsync);
         _templatePage.CaptureRequested += TemplatePage_CaptureRequested;
+        _templatePage.SchoolDocumentGenerated += TemplatePage_SchoolDocumentGenerated;
         _capturePage.RecognitionRequested += CapturePage_RecognitionRequested;
+        _capturePage.LayoutSelectionRequested += () => SelectNavigationItem("template");
+        _capturePage.CaptureSelected += SetRecognitionCapture;
+        _answerKeyPage.AnswersSaved += () =>
+        {
+            if (_recognitionPage.CurrentCapture is { } capture) SetSharedAnswerKey(capture);
+        };
+        _examPage.NewExamRequested += CreateNewExam;
+        _examPage.ExamSelected += OpenExam;
+        _examPage.NavigationRequested += SelectNavigationItem;
 
         try
         {
@@ -88,7 +107,7 @@ public sealed partial class MainWindow : Window
                 $"{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。");
         }
 
-        NavigationFrame.Content = _statusPage;
+        NavigationFrame.Content = _examPage;
         AppNavigationView.SelectedItem = AppNavigationView.MenuItems[0];
         Closed += MainWindow_Closed;
     }
@@ -126,6 +145,13 @@ public sealed partial class MainWindow : Window
 
         switch (tag)
         {
+            case "exams":
+                _examPage.Refresh();
+                NavigateTo(_examPage, "考试");
+                break;
+            case "answer-key":
+                NavigateTo(_answerKeyPage, "答案与评分");
+                break;
             case "status":
                 NavigateTo(_statusPage, "状态");
                 break;
@@ -141,7 +167,7 @@ public sealed partial class MainWindow : Window
                 if (latestCapture is not null
                     && !ReferenceEquals(_recognitionPage.CurrentCapture, latestCapture))
                 {
-                    _recognitionPage.SetCapture(latestCapture);
+                    SetRecognitionCapture(latestCapture);
                 }
 
                 NavigateTo(_recognitionPage, "识别 / 复核");
@@ -167,7 +193,106 @@ public sealed partial class MainWindow : Window
             NavigationFrame.Content = page;
         }
 
-        TitleBarPageText.Text = title;
+    }
+
+    private void CreateNewExam()
+    {
+        if (!CanChangeExam()) return;
+        if (!_subjectiveReviewPage.CanChangeExam(null))
+        {
+            SelectNavigationItem("subjective-review");
+            return;
+        }
+        var definition = new SchoolSheetDefinition
+        {
+            ExamId = Guid.NewGuid().ToString("N"),
+            LayoutDocumentId = Guid.NewGuid().ToString("N"),
+            Title = "新考试",
+            Questions = [
+                new(1, SchoolQuestionType.Choice, 2, "", ["", "", "", ""]),
+                new(2, SchoolQuestionType.Choice, 2, "", ["", "", "", ""]),
+                new(3, SchoolQuestionType.Choice, 2, "", ["", "", "", ""]),
+                new(4, SchoolQuestionType.Choice, 2, "", ["", "", "", ""]),
+                new(5, SchoolQuestionType.Subjective, 10, SubjectiveHeightMm: 60),
+                new(6, SchoolQuestionType.Subjective, 10, SubjectiveHeightMm: 60)
+            ]
+        };
+        _templatePage.LoadSchoolDefinition(definition, isSaved: false);
+        SelectNavigationItem("template");
+    }
+
+    private void OpenExam(SchoolSheetDefinition definition)
+    {
+        try
+        {
+            if (!CanChangeExam()) return;
+            if (!_subjectiveReviewPage.CanChangeExam(definition.ExamId))
+            {
+                SelectNavigationItem("subjective-review");
+                return;
+            }
+            _templatePage.LoadSchoolDefinition(definition);
+            if (_templatePage.CurrentDocument is { } document)
+                TemplatePage_SchoolDocumentGenerated(definition, document);
+            SelectNavigationItem("template");
+        }
+        catch (Exception exception)
+        {
+            _statusPage.SetConnectionStatus($"考试无法打开，请刷新列表后重试。调试信息：{exception.GetType().Name}（0x{exception.HResult:X8}）。");
+            SelectNavigationItem("status");
+        }
+    }
+
+    private void TemplatePage_SchoolDocumentGenerated(SchoolSheetDefinition definition, SchoolAnswerSheet document)
+    {
+        var contextChanged = _activeExam is null || _activeExam.ExamId != definition.ExamId
+            || _activeExam.LayoutDocumentId != definition.LayoutDocumentId || _activeExam.Version != definition.Version;
+        if (contextChanged)
+        {
+            if (!CanChangeExam()) throw new InvalidOperationException("请先保存当前考试的标准答案，再切换考试。");
+        }
+        if (!_subjectiveReviewPage.CanChangeExam(definition.ExamId))
+            throw new InvalidOperationException("请先保存或取消当前主观题批阅的修改，再切换考试。");
+        var canonical = _examStore.SaveDefinition(definition);
+        _answerKeyPage.SetExam(canonical);
+        if (contextChanged) _recognitionPage.ClearCapture();
+        _activeExam = canonical;
+        _examPage.SetCurrentExam(canonical);
+        _capturePage.SetDocument(document);
+        RefreshExamCaptures();
+    }
+
+    private bool CanChangeExam()
+    {
+        if (_answerKeyPage.CanChangeExam()) return true;
+        SelectNavigationItem("answer-key");
+        return false;
+    }
+
+    private void RefreshExamCaptures()
+    {
+        if (_activeExam is null) return;
+        var items = new List<CaptureRecord>();
+        string? cursor = null;
+        do
+        {
+            var page = _captureStore.LoadPage(cursor: cursor);
+            if (page.Diagnostics.Count > 0)
+            {
+                _statusPage.SetConnectionStatus($"答卷历史中有 {page.Diagnostics.Count} 条记录无法读取，请检查本地数据。错误代码：{page.Diagnostics[0].Code}。");
+            }
+            items.AddRange(page.Items.Where(capture => capture.TemplateLayout?.SchoolMetadata is { } metadata
+                && metadata.ExamId == _activeExam.ExamId
+                && metadata.LayoutDocumentId == _activeExam.LayoutDocumentId
+                && metadata.Version == _activeExam.Version));
+            cursor = page.NextCursor;
+        }
+        while (cursor is not null);
+        _capturePage.SetCaptures(items);
+        if (!_subjectiveReviewPage.SetExam(_activeExam.ExamId, items.Select(item => item.Manifest.CaptureId).ToArray()))
+        {
+            _statusPage.SetConnectionStatus("主观题批阅中有未保存的修改，请保存或取消后再切换考试。");
+        }
     }
 
     private void TemplatePage_CaptureRequested(AnswerSheetLayout layout)
@@ -178,13 +303,35 @@ public sealed partial class MainWindow : Window
 
     private void CapturePage_RecognitionRequested(object? sender, CaptureRecord capture)
     {
-        _recognitionPage.SetCapture(capture);
+        SetRecognitionCapture(capture);
         SelectNavigationItem("recognition");
+    }
+
+    private void SetRecognitionCapture(CaptureRecord capture)
+    {
+        _recognitionPage.SetCapture(capture);
+        SetSharedAnswerKey(capture);
+    }
+
+    private void SetSharedAnswerKey(CaptureRecord capture)
+    {
+        if (capture.TemplateLayout?.SchoolDefinition is { } definition)
+        {
+            try
+            {
+                _recognitionPage.SetExamAnswerKey(definition.ExamId, _examStore.ReadAnswerKey(definition));
+            }
+            catch (Exception exception)
+            {
+                _recognitionPage.SetExamAnswerKey(definition.ExamId, null);
+                _statusPage.SetConnectionStatus($"标准答案读取失败，请检查考试版本后重试。调试信息：{exception.GetType().Name}（0x{exception.HResult:X8}）。");
+            }
+        }
     }
 
     private void SelectNavigationItem(string tag)
     {
-        foreach (var item in AppNavigationView.MenuItems.OfType<NavigationViewItem>())
+        foreach (var item in AppNavigationView.MenuItems.Concat(AppNavigationView.FooterMenuItems).OfType<NavigationViewItem>())
         {
             if (string.Equals(item.Tag as string, tag, StringComparison.Ordinal))
             {
@@ -219,6 +366,15 @@ public sealed partial class MainWindow : Window
         }
 
         await _printController.RequestPrintAsync(layout);
+    }
+
+    private async Task PrintDocumentAsync(IReadOnlyList<AnswerSheetLayout> pages)
+    {
+        if (_printController is null)
+        {
+            throw new InvalidOperationException("系统打印服务不可用。");
+        }
+        await _printController.RequestPrintAsync(pages);
     }
 
     private async Task<SvgSaveResult> SaveSvgAsync(AnswerSheetLayout layout)
@@ -268,7 +424,7 @@ public sealed partial class MainWindow : Window
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var key = AnswerKey.Create(layout.QuestionCount, layout.OptionsPerQuestion, answerKey);
+        var key = AnswerKey.Create(layout, PageAnswers(layout, answerKey));
         var scoring = ScoringEngine.Score(review, key);
         return Task.FromResult<RecognitionScoreView?>(CreateScoreView(scoring));
     }
@@ -302,7 +458,7 @@ public sealed partial class MainWindow : Window
         AnswerKey? key = null;
         if (answerKey is not null)
         {
-            key = AnswerKey.Create(layout.QuestionCount, layout.OptionsPerQuestion, answerKey);
+            key = AnswerKey.Create(layout, PageAnswers(layout, answerKey));
         }
 
         // Keep a score snapshot even when the user has not supplied an answer key;
@@ -328,16 +484,13 @@ public sealed partial class MainWindow : Window
     {
         cancellationToken.ThrowIfCancellationRequested();
         AnswerKey? answerKey = null;
-        if (Enumerable.Range(1, request.Layout.QuestionCount).All(
+        if (request.Layout.Questions.Count > 0 && request.Layout.Questions.Select(question => question.Number).All(
                 questionNumber => request.AnswerKey.TryGetValue(questionNumber, out var answer)
                     && !string.IsNullOrWhiteSpace(answer)))
         {
-            var answerValues = Enumerable.Range(1, request.Layout.QuestionCount)
+            var answerValues = request.Layout.Questions.Select(question => question.Number)
                 .ToDictionary(questionNumber => questionNumber, questionNumber => request.AnswerKey[questionNumber]!);
-            answerKey = AnswerKey.Create(
-                request.Layout.QuestionCount,
-                request.Layout.OptionsPerQuestion,
-                answerValues);
+            answerKey = AnswerKey.Create(request.Layout, answerValues);
         }
 
         var scoring = ScoringEngine.Score(request.Review, answerKey);
@@ -346,6 +499,10 @@ public sealed partial class MainWindow : Window
             : Omrina.Core.ResultExportFormat.Csv;
         return Task.FromResult<string?>(ResultExporter.Export(scoring, coreFormat, indented: true));
     }
+
+    private static IReadOnlyDictionary<int, string> PageAnswers(AnswerSheetLayout layout, IReadOnlyDictionary<int, string> answers)
+        => layout.Questions.ToDictionary(question => question.Number, question => answers.TryGetValue(question.Number, out var answer)
+            ? answer : throw new ArgumentException($"标准答案缺少第 {question.Number} 题。"));
 
     private static RecognitionScoreView CreateScoreView(ScoringResult scoring)
     {
@@ -404,13 +561,19 @@ public sealed partial class MainWindow : Window
         return Task.FromResult<IInputImageFile>(new LocalInputImageFile(path));
     }
 
-    private Task<CaptureRecord> PersistCaptureAsync(
+    private async Task<CaptureRecord> PersistCaptureAsync(
         AnswerSheetLayout layout,
         IInputImageFile file,
         CaptureSourceType sourceType,
         CancellationToken cancellationToken)
     {
-        return _captureStore.ImportAsync(layout, file, sourceType, cancellationToken);
+        var capture = await _captureStore.ImportAsync(layout, file, sourceType, cancellationToken);
+        try { RefreshExamCaptures(); }
+        catch (Exception exception)
+        {
+            _statusPage.SetConnectionStatus($"答卷已保存，但历史列表刷新失败，请重新打开考试。调试信息：{exception.GetType().Name}（0x{exception.HResult:X8}）。");
+        }
+        return capture;
     }
 
     private async void MainWindow_Closed(object sender, WindowEventArgs args)

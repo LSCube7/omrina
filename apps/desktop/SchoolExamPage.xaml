@@ -1,0 +1,31 @@
+<Page
+    x:Class="Omrina.Desktop.SchoolExamPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16">
+            <TextBlock Text="考试" Style="{StaticResource TitleTextBlockStyle}" />
+            <TextBlock Text="选择已保存的考试，或新建考试并编排答题卡。" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="新建考试" Click="NewExam_Click" />
+                <Button Content="刷新列表" Click="Refresh_Click" />
+            </StackPanel>
+            <TextBlock x:Name="CurrentExamText" Text="尚未选择考试。" TextWrapping="Wrap" FontWeight="SemiBold" />
+            <ListView x:Name="ExamList" SelectionChanged="ExamList_SelectionChanged" MaxHeight="420">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Spacing="4" Padding="8">
+                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+            <TextBlock x:Name="ExamStatusText" TextWrapping="Wrap" />
+            <TextBlock Text="准备答题卡与评分规则 → 收集学生答卷 → 复核与批阅" TextWrapping="Wrap" />
+            <Button Content="编排答题卡" Click="Template_Click" HorizontalAlignment="Left" />
+            <Button Content="设置答案与评分" Click="AnswerKey_Click" HorizontalAlignment="Left" />
+            <Button Content="扫描或导入学生答卷" Click="Capture_Click" HorizontalAlignment="Left" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>
