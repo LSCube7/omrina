@@ -156,6 +156,11 @@ export type SchoolCaptureSummary = {
   candidateId: string | null;
   identityStatus: SchoolIdentityStatus;
 };
+export type SchoolScanCaptureSummary = SchoolCaptureSummary & {
+  dpi: number;
+  pageSize: "A4" | "A3";
+  flatbed: boolean;
+};
 export type SchoolRecognitionTaskResult = {
   resultId: string;
   version: number;

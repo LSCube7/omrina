@@ -123,6 +123,34 @@ internal static class SchoolIntegrationRegression
             var page = result.GetProperty("pages")[0];
             Check(page.GetProperty("schemaVersion").GetInt32() == 3 && page.GetProperty("widthMm").GetDouble() == 420, "SDK template should expose page dimensions");
             Check(page.GetProperty("side").GetString() == "Front", "SDK side should be a string");
+            var scanOperations = new DesktopLocalAgentOperations(captures, new FixtureScanner(root, layout), new SkiaAnswerSheetRecognitionService(), _ => { });
+            using (var scanSnapshot = JsonDocument.Parse(layout.ToJson()))
+                await scanOperations.RunAsync(new("scan-grant", TaskOperation.Template,
+                    JsonSerializer.SerializeToElement(new { schoolDefinition = scanSnapshot.RootElement.GetProperty("definition") })), null, default);
+            var scanned = await scanOperations.RunAsync(new("scan-grant", TaskOperation.Scan,
+                JsonSerializer.SerializeToElement(new { templateId = layout.TemplateId, deviceId = "fixture-scanner", dpi = 300 })), null, default);
+            Check(scanned.GetProperty("schoolMetadata").GetProperty("examId").GetString() == definition.ExamId
+                && scanned.GetProperty("schoolMetadata").GetProperty("side").GetString() == "Front"
+                && scanned.GetProperty("candidateId").GetString() == "0123"
+                && scanned.GetProperty("identityStatus").GetString() == "Identified"
+                && scanned.GetProperty("pageSize").GetString() == "A3",
+                "school scan summary must match upload metadata and candidate association");
+            var oversizedDefinition = definition with
+            {
+                ExamId = "large-school-result", Paper = SchoolPaper.A4Portrait, Columns = 1,
+                CandidateIdentity = new(CandidateIdentityMode.Barcode, 4),
+                Questions = Enumerable.Range(1, 64).Select(number => new SchoolQuestionDefinition(number,
+                    SchoolQuestionType.Subjective, 5, SubjectiveHeightMm: 100)).ToArray()
+            };
+            var oversizedPages = SchoolAnswerSheet.Create(oversizedDefinition).Pages;
+            Check(oversizedPages.Count == 64, "oversized result fixture should stay within supported page count");
+            using (var largeSnapshot = JsonDocument.Parse(oversizedPages[0].ToJson()))
+            {
+                await ExpectAsync<LocalOperationException>(() => operations.RunAsync(new("large-grant", TaskOperation.Template,
+                    JsonSerializer.SerializeToElement(new { schoolDefinition = largeSnapshot.RootElement.GetProperty("definition") })), null, default), "TEMPLATE_DOCUMENT_TOO_LARGE");
+            }
+            await ExpectAsync<LocalOperationException>(() => operations.RunAsync(new("large-grant", TaskOperation.Scan,
+                JsonSerializer.SerializeToElement(new { templateId = oversizedPages[0].TemplateId, deviceId = "none", dpi = 300 })), null, default), "TEMPLATE_NOT_FOUND");
             var invalid = JsonSerializer.SerializeToElement(new { schoolDefinition = new { examId = "sdk-exam", layoutDocumentId = "sdk-layout", localPath = imagePath, questions = Array.Empty<object>() } });
             await ExpectAsync<LocalOperationException>(() => operations.RunAsync(new("grant-a", TaskOperation.Template, invalid), null, default), "INVALID_PARAMETERS");
             var manifestJson = File.ReadAllText(capture.ManifestFilePath);
@@ -169,6 +197,22 @@ internal static class SchoolIntegrationRegression
         catch (T exception) when (exception is CaptureException capture && capture.Code == code || exception is LocalOperationException operation && operation.Code == code) { return; }
         throw new InvalidOperationException($"Expected {typeof(T).Name}: {code}");
     }
+    private sealed class FixtureScanner(string root, AnswerSheetLayout layout) : IScannerService
+    {
+        public Task<IReadOnlyList<ScannerDevice>> GetDevicesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ScannerDevice>>([new("fixture-scanner", "Synthetic scanner", "fixture")]);
+        public Task<ScanResult> ScanAsync(ScannerDevice device, ScanOptions options, CancellationToken cancellationToken = default)
+        {
+            Check(options.PageSize == "A3" && options.Flatbed, "school scan must request the actual A3 paper");
+            var directory = Path.Combine(root, "pending-scans");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "synthetic-school.png");
+            Render(layout, path);
+            return Task.FromResult(new ScanResult(path, options.Dpi, options.PageSize, options.Flatbed));
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private sealed class NoScanner : IScannerService
     {
         public Task<IReadOnlyList<ScannerDevice>> GetDevicesAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<ScannerDevice>>(Array.Empty<ScannerDevice>());

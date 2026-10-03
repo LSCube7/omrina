@@ -83,3 +83,7 @@ upload/scan 的 capture 摘要及 recognize 外层结果增加 `schoolMetadata,c
 scan 纸张由关联页模板决定，NAPS2 请求 A4 210×297 或 A3 420×297 mm 平板扫描，禁止尺寸拉伸/裁切及回退 A4；实际设备/驱动可能拒绝 A3，未验证能力不声明为支持。导入 A3 不依赖设备。
 
 `node tests/integration/school-sdk-e2e.mjs` 使用真实 loopback HTTP 与已构建 SDK，对合成 A3 纸执行配对、生成、导入、可靠考号、识别、非连续题号复核、错误考试拒绝和撤销授权；测试 host 不运行扫描硬件，也不扩大生产批准边界。
+
+学校模板文档的完整任务结果（包括所有页 SVG）沿用 1 MiB UTF-8 JSON 上限。服务端在注册任何页面模板之前检查该大小；超限返回 `TEMPLATE_DOCUMENT_TOO_LARGE`，当前授权不会遗留该次生成的页模板。最多 64 页是布局上限，不保证包含预览的结果能进入 1 MiB；较长文档需减少页数或正文后重新生成。
+
+学校扫描结果包含与上传一致的 `schoolMetadata/candidateId/identityStatus`，并保留 `dpi/pageSize/flatbed` 扫描信息；SDK 导出 `SchoolScanCaptureSummary` 表达完整返回类型。

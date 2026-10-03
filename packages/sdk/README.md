@@ -192,3 +192,7 @@ const task = await client.createSchoolTemplateTask({
 扫描沿用 `{templateId,deviceId,dpi}`，纸张从模板获得。当前适配器只请求平板扫描：A4 纵向或 A3 横向，不拉伸/裁切为请求尺寸，不回退 A4；设备能力未经过验证时不会声明支持 A3。实际扫描须设备和驱动支持，请用实纸验收；导入不需要扫描设备。
 
 离线学校真实 HTTP SDK 回归：先离线构建 SDK 和 `tests/m3-desktop`，再运行 `node tests/integration/school-sdk-e2e.mjs`。脚本启动临时 loopback 测试 host，使用合成纸验证生成、采集、考号、识别、非连续题号复核、错考试拒绝和授权隔离；不会扫描真实设备。测试 host 的批准入口仅在测试进程标准输入，生产 API 不增加自动批准。
+
+学校模板文档的完整任务结果（包括所有页 SVG）沿用 1 MiB UTF-8 JSON 上限。服务端在注册任何页面模板之前检查该大小；超限返回 `TEMPLATE_DOCUMENT_TOO_LARGE`，当前授权不会遗留该次生成的页模板。最多 64 页是布局上限，不保证包含预览的结果能进入 1 MiB；较长文档需减少页数或正文后重新生成。
+
+学校扫描结果包含与上传一致的 `schoolMetadata/candidateId/identityStatus`，并保留 `dpi/pageSize/flatbed` 扫描信息；SDK 导出 `SchoolScanCaptureSummary` 表达完整返回类型。

@@ -19,6 +19,7 @@ namespace Omrina.Desktop;
 public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalAgentSubjectiveImages
 {
     private const int MaximumUploadBytes = 20 * 1024 * 1024;
+    private const int MaximumResultBytes = 1024 * 1024;
     private const int MaximumRevokedGrantMarkers = 4096;
     private static readonly TimeSpan RevokedGrantMarkerLifetime = TimeSpan.FromHours(8) + TimeSpan.FromMinutes(5);
 
@@ -192,18 +193,19 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                 throw new LocalOperationException("INVALID_PARAMETERS", "学校答题纸定义不能与旧版模板参数混用。");
             var definition = ReadSchoolDefinition(schoolInput);
             var pages = SchoolAnswerSheet.Create(definition).Pages;
-            foreach (var page in pages)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                grantResources.AddTemplate(page);
-            }
-            return ToJsonElement(new
+            var result = ToJsonElement(new
             {
                 documentId = definition.LayoutDocumentId,
                 examId = definition.ExamId,
                 version = definition.Version,
                 pages = pages.Select(ToTemplateSummary).ToArray()
             });
+            // Match LocalAgentHost's UTF-8 result bound before publishing any page resource.
+            if (Encoding.UTF8.GetByteCount(result.GetRawText()) > MaximumResultBytes)
+                throw new LocalOperationException("TEMPLATE_DOCUMENT_TOO_LARGE", "答题纸页面和预览内容过大，请减少页数或题目正文后重试。");
+            cancellationToken.ThrowIfCancellationRequested();
+            grantResources.AddTemplates(pages);
+            return result;
         }
         var title = ReadString(parameters, "title");
         var questionCount = ReadPositiveInt(parameters, "questionCount");
@@ -299,7 +301,10 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                 byteLength = capture.Manifest.ByteLength,
                 dpi = scan.Dpi,
                 pageSize = scan.PageSize,
-                flatbed = scan.Flatbed
+                flatbed = scan.Flatbed,
+                schoolMetadata = ToSchoolMetadata(capture.Manifest.SchoolMetadata),
+                candidateId = capture.Manifest.CandidateId,
+                identityStatus = capture.Manifest.IdentityStatus
             });
         }
         catch (LocalOperationException)
@@ -817,7 +822,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
     private static JsonElement EnsureSubjectiveResultSize(JsonElement result)
     {
-        if (Encoding.UTF8.GetByteCount(result.GetRawText()) > 1024 * 1024)
+        if (Encoding.UTF8.GetByteCount(result.GetRawText()) > MaximumResultBytes)
         {
             throw SubjectiveReviewTooLarge();
         }
@@ -1525,6 +1530,15 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             {
                 ThrowIfRevoked();
                 _templates[layout.TemplateId] = layout;
+            }
+        }
+
+        public void AddTemplates(IReadOnlyList<AnswerSheetLayout> pages)
+        {
+            lock (_gate)
+            {
+                ThrowIfRevoked();
+                foreach (var page in pages) _templates[page.TemplateId] = page;
             }
         }
 
