@@ -10,8 +10,6 @@ namespace Omrina.Desktop;
 
 internal sealed class TemplatePrintController : IDisposable
 {
-    private const double A4WidthDips = AnswerSheetLayout.PageWidthMm * TemplateRenderer.DipsPerMillimetre;
-    private const double A4HeightDips = AnswerSheetLayout.PageHeightMm * TemplateRenderer.DipsPerMillimetre;
     private const double PageSizeToleranceDips = 2;
 
     private readonly DispatcherQueue _dispatcherQueue;
@@ -20,8 +18,8 @@ internal sealed class TemplatePrintController : IDisposable
     private readonly PrintDocument _printDocument;
     private readonly IPrintDocumentSource _documentSource;
     private readonly IntPtr _windowHandle;
-    private AnswerSheetLayout? _printLayout;
-    private Canvas? _printPage;
+    private IReadOnlyList<AnswerSheetLayout>? _printLayouts;
+    private readonly List<Canvas> _printPages = [];
     private PrintTask? _activeTask;
     private bool _printSessionActive;
     private bool _disposed;
@@ -48,10 +46,13 @@ internal sealed class TemplatePrintController : IDisposable
 
     public Task WaitForIdleAsync() => _printIdle.Task;
 
-    public async Task RequestPrintAsync(AnswerSheetLayout layout)
+    public Task RequestPrintAsync(AnswerSheetLayout layout) => RequestPrintAsync(new[] { layout });
+
+    public async Task RequestPrintAsync(IReadOnlyList<AnswerSheetLayout> layouts)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(layouts);
+        if (layouts.Count == 0) throw new ArgumentException("没有可打印页面。", nameof(layouts));
         if (_printSessionActive)
         {
             throw new InvalidOperationException("打印会话正在进行，请等待系统打印窗口结束后再试。");
@@ -59,9 +60,9 @@ internal sealed class TemplatePrintController : IDisposable
 
         _printSessionActive = true;
         _printIdle = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _printLayout = layout;
-        _printPage = null;
-        ReportStatus("正在打开系统打印设置。请在系统窗口中选择 A4 纵向纸张。");
+        _printLayouts = layouts.ToArray();
+        _printPages.Clear();
+        ReportStatus("正在打开系统打印设置。请确认所选纸张和方向与答题卡一致；输出使用真实毫米尺寸。");
 
         try
         {
@@ -96,7 +97,7 @@ internal sealed class TemplatePrintController : IDisposable
 
     private void PrintManager_PrintTaskRequested(PrintManager sender, PrintTaskRequestedEventArgs args)
     {
-        if (_disposed || !_printSessionActive || _printLayout is null)
+        if (_disposed || !_printSessionActive || _printLayouts is null)
         {
             return;
         }
@@ -112,6 +113,13 @@ internal sealed class TemplatePrintController : IDisposable
                 _activeTask.Completed -= PrintTask_Completed;
             }
 
+            var first = _printLayouts[0];
+            printTask.Options.MediaSize = first.WidthMm > 210 ? PrintMediaSize.IsoA3 : PrintMediaSize.IsoA4;
+            printTask.Options.Orientation = first.WidthMm > 210 ? PrintOrientation.Landscape : PrintOrientation.Portrait;
+            if (first.SchoolDefinition?.Duplex == true)
+                printTask.Options.Duplex = first.WidthMm > 210
+                    ? PrintDuplex.TwoSidedShortEdge
+                    : PrintDuplex.TwoSidedLongEdge;
             _activeTask = printTask;
             _activeTask.Completed += PrintTask_Completed;
         }
@@ -126,48 +134,43 @@ internal sealed class TemplatePrintController : IDisposable
     {
         try
         {
-            var layout = _printLayout ?? throw new InvalidOperationException("没有可打印的模板。");
-            var description = args.PrintTaskOptions.GetPageDescription(0);
-            ValidateA4PortraitPage(description);
-            ValidatePrintableArea(description.ImageableRect, TemplateRenderer.GetContentBounds(layout, TemplateRenderer.DipsPerMillimetre));
-
-            _printPage = new Canvas
+            var layouts = _printLayouts ?? throw new InvalidOperationException("没有可打印的模板。");
+            _printPages.Clear();
+            for (var index = 0; index < layouts.Count; index++)
             {
-                Width = A4WidthDips,
-                Height = A4HeightDips
-            };
-            TemplateRenderer.Render(layout, _printPage, TemplateRenderer.DipsPerMillimetre, showPageOutline: false);
-            _printPage.Measure(new Size(A4WidthDips, A4HeightDips));
-            _printPage.Arrange(new Rect(0, 0, A4WidthDips, A4HeightDips));
-            _printDocument.SetPreviewPageCount(1, PreviewPageCountType.Final);
+                var layout = layouts[index];
+                var width = layout.WidthMm * TemplateRenderer.DipsPerMillimetre;
+                var height = layout.HeightMm * TemplateRenderer.DipsPerMillimetre;
+                var description = args.PrintTaskOptions.GetPageDescription((uint)index);
+                ValidatePage(description, width, height);
+                ValidatePrintableArea(description.ImageableRect, TemplateRenderer.GetContentBounds(layout, TemplateRenderer.DipsPerMillimetre));
+                var page = new Canvas { Width = width, Height = height };
+                TemplateRenderer.Render(layout, page, TemplateRenderer.DipsPerMillimetre, showPageOutline: false);
+                page.Measure(new Size(width, height));
+                page.Arrange(new Rect(0, 0, width, height));
+                _printPages.Add(page);
+            }
+            _printDocument.SetPreviewPageCount(_printPages.Count, PreviewPageCountType.Final);
         }
         catch (Exception exception)
         {
-            _printPage = null;
+            _printPages.Clear();
             _printDocument.SetPreviewPageCount(0, PreviewPageCountType.Final);
             var rootCause = exception.GetBaseException();
-            ReportStatus($"无法打印：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请确认 A4 纵向纸张和可打印边距。");
+            ReportStatus($"无法打印：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请确认纸张、方向和可打印边距。");
         }
     }
 
     private void PrintDocument_GetPreviewPage(object sender, GetPreviewPageEventArgs args)
     {
-        if (args.PageNumber == 1 && _printPage is not null)
-        {
-            _printDocument.SetPreviewPage(1, _printPage);
-        }
+        if (args.PageNumber >= 1 && args.PageNumber <= _printPages.Count)
+            _printDocument.SetPreviewPage(args.PageNumber, _printPages[args.PageNumber - 1]);
     }
 
     private void PrintDocument_AddPages(object sender, AddPagesEventArgs args)
     {
-        if (_printPage is null)
-        {
-            ReportStatus("无法打印：当前纸张或可打印边距不支持该 A4 模板。");
-            _printDocument.AddPagesComplete();
-            return;
-        }
-
-        _printDocument.AddPage(_printPage);
+        if (_printPages.Count == 0) ReportStatus("无法打印：当前纸张或边距不支持所选答题卡。");
+        foreach (var page in _printPages) _printDocument.AddPage(page);
         _printDocument.AddPagesComplete();
     }
 
@@ -184,13 +187,13 @@ internal sealed class TemplatePrintController : IDisposable
         ReportStatus(status);
     }
 
-    private static void ValidateA4PortraitPage(PrintPageDescription description)
+    private static void ValidatePage(PrintPageDescription description, double width, double height)
     {
         var pageSize = description.PageSize;
-        if (Math.Abs(pageSize.Width - A4WidthDips) > PageSizeToleranceDips
-            || Math.Abs(pageSize.Height - A4HeightDips) > PageSizeToleranceDips)
+        if (Math.Abs(pageSize.Width - width) > PageSizeToleranceDips
+            || Math.Abs(pageSize.Height - height) > PageSizeToleranceDips)
         {
-            throw new InvalidOperationException("请在系统打印设置中选择 A4 纵向纸张；模板不会自动缩放到其他纸张。");
+            throw new InvalidOperationException("请在系统打印设置中选择匹配的纸张和方向；答题卡不会自动缩放。");
         }
     }
 
@@ -236,8 +239,8 @@ internal sealed class TemplatePrintController : IDisposable
         }
 
         _printSessionActive = false;
-        _printLayout = null;
-        _printPage = null;
+        _printLayouts = null;
+        _printPages.Clear();
         _printIdle.TrySetResult(true);
     }
 

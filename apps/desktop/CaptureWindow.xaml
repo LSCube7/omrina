@@ -10,41 +10,15 @@
         <StackPanel Padding="24" Spacing="16">
             <StackPanel Spacing="4">
                 <TextBlock Text="OMRINA 图像采集" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
-                <TextBlock Text="选择模板参数后导入一张 PNG 或 JPEG 图像。图像会保存在应用本地数据中，并记录模板关联。" TextWrapping="Wrap" />
+                <TextBlock Text="选择考试答题卡后导入一张 PNG 或 JPEG 图像。图像会保存在应用本地数据中，并记录模板关联。" TextWrapping="Wrap" />
             </StackPanel>
 
             <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                 <StackPanel Spacing="8">
-                    <TextBlock Text="模板参数" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBox
-                        x:Name="TitleBox"
-                        Header="标题"
-                        Text="答题纸"
-                        PlaceholderText="最多 24 个字符，不能换行"
-                        TextChanged="TitleBox_TextChanged"
-                        automation:AutomationProperties.Name="模板标题" />
-                    <NumberBox
-                        x:Name="QuestionCountBox"
-                        Header="题数"
-                        Value="20"
-                        Minimum="1"
-                        Maximum="44"
-                        SpinButtonPlacementMode="Inline"
-                        ValueChanged="NumberBox_ValueChanged"
-                        automation:AutomationProperties.Name="题数" />
-                    <NumberBox
-                        x:Name="OptionsPerQuestionBox"
-                        Header="每题选项数"
-                        Value="4"
-                        Minimum="2"
-                        Maximum="6"
-                        SpinButtonPlacementMode="Inline"
-                        ValueChanged="NumberBox_ValueChanged"
-                        automation:AutomationProperties.Name="每题选项数" />
-                    <Button x:Name="GenerateTemplateButton" Click="GenerateTemplateButton_Click" HorizontalAlignment="Left">
-                        <TextBlock Text="确认模板参数" />
-                    </Button>
-                    <TextBlock x:Name="TemplateIdText" Text="尚未确认模板参数。" TextWrapping="Wrap" />
+                    <TextBlock Text="当前答题卡" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <ComboBox x:Name="DocumentPagePicker" Header="采集页" SelectionChanged="DocumentPagePicker_SelectionChanged" />
+                    <Button x:Name="ChooseTemplateButton" Click="ChooseTemplateButton_Click" Content="选择考试答题卡" HorizontalAlignment="Left" />
+                    <TextBlock x:Name="TemplateIdText" Text="先选择考试答题卡。" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
 
@@ -99,7 +73,12 @@
                 </StackPanel>
             </Border>
 
-            <TextBlock x:Name="CaptureStatusText" Text="请先确认模板参数。" TextWrapping="Wrap" />
+            <TextBlock Text="已保存答卷" Style="{StaticResource SubtitleTextBlockStyle}" />
+            <ListView x:Name="CaptureHistoryList" MaxHeight="200" SelectionChanged="CaptureHistoryList_SelectionChanged">
+                <ListView.ItemTemplate><DataTemplate><TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" /></DataTemplate></ListView.ItemTemplate>
+            </ListView>
+            <TextBlock x:Name="CaptureHistoryStatus" Text="尚无已保存答卷。" TextWrapping="Wrap" />
+            <TextBlock x:Name="CaptureStatusText" Text="先选择考试答题卡。" TextWrapping="Wrap" />
             <Button
                 x:Name="OpenRecognitionButton"
                 Visibility="Collapsed"

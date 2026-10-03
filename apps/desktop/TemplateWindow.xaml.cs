@@ -1,441 +1,247 @@
 using Omrina.Core;
 using System.Collections.ObjectModel;
-using System.Globalization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace Omrina.Desktop;
 
-/// <summary>
-/// Cached template page hosted by <see cref="MainWindow"/>.
-/// File picking, printing and navigation are supplied by the host so this page
-/// never needs a native window handle.
-/// </summary>
 public sealed partial class TemplatePage : Page
 {
-    private const double PreviewScale = 2;
-    private const int MaximumSubjectiveRegionCount = 64;
-
     private readonly Func<AnswerSheetLayout, Task<SvgSaveResult>>? _saveSvgAsync;
     private readonly Func<AnswerSheetLayout, Task>? _printAsync;
+    private readonly Func<IReadOnlyList<AnswerSheetLayout>, Task>? _printDocumentAsync;
     private readonly Func<bool>? _isPrintBusy;
-    private readonly ObservableCollection<TemplateSubjectiveRegionPickerItem> _subjectiveRegionItems = [];
-    private readonly List<TemplateSubjectiveRegion> _subjectiveRegions = [];
-    private AnswerSheetLayout? _layout;
-    private bool _previewMatchesInputs;
-    private bool _printUiLocked;
+    private readonly ObservableCollection<SchoolQuestionItem> _questions = [];
     private bool _isInitializing = true;
+    private bool _loadingQuestion;
+    private bool _previewMatchesInputs;
+    private bool _busy;
+    private bool _isRegistered;
+    private string _documentId = Guid.NewGuid().ToString("N");
+    private AnswerSheetLayout? _layout;
+    private SchoolQuestionItem? _editingItem;
+    public SchoolSheetDefinition? CurrentSchoolDefinition { get; private set; }
+    public SchoolAnswerSheet? CurrentDocument { get; private set; }
+    public AnswerSheetLayout? CurrentLayout => _layout;
+    public bool HasValidPreview => _layout is not null && _previewMatchesInputs;
+    public event Action<AnswerSheetLayout>? CaptureRequested;
+    public event Action<SchoolSheetDefinition, SchoolAnswerSheet>? SchoolDocumentGenerated;
 
-    public TemplatePage()
-        : this(null, null, null)
-    {
-    }
-
-    public TemplatePage(
-        Func<AnswerSheetLayout, Task<SvgSaveResult>>? saveSvgAsync,
-        Func<AnswerSheetLayout, Task>? printAsync,
-        Func<bool>? isPrintBusy)
+    public TemplatePage() : this(null, null, null) { }
+    public TemplatePage(Func<AnswerSheetLayout, Task<SvgSaveResult>>? saveSvgAsync,
+        Func<AnswerSheetLayout, Task>? printAsync, Func<bool>? isPrintBusy,
+        Func<IReadOnlyList<AnswerSheetLayout>, Task>? printDocumentAsync = null)
     {
         InitializeComponent();
-        _isInitializing = false;
         _saveSvgAsync = saveSvgAsync;
         _printAsync = printAsync;
         _isPrintBusy = isPrintBusy;
-        SubjectiveRegionList.ItemsSource = _subjectiveRegionItems;
-        SaveSvgButton.IsEnabled = false;
-        PrintButton.IsEnabled = false;
-        ImportButton.IsEnabled = false;
-        SubjectiveQuestionNumberBox.Text = GetSuggestedQuestionNumber();
-        GenerateLayout();
+        _printDocumentAsync = printDocumentAsync;
+        ExamIdBox.Text = Guid.NewGuid().ToString("N");
+        QuestionList.ItemsSource = _questions;
+        for (var number = 1; number <= 20; number++)
+            _questions.Add(new(new(number, SchoolQuestionType.Choice, Options: new[] { "", "", "", "" })));
+        _isInitializing = false;
+        QuestionList.SelectedIndex = 0;
+        UpdateActions();
+        TemplateStatusText.Text = "设置题目后生成预览。";
     }
 
-    /// <summary>Raised when the current layout should be used on the capture page.</summary>
-    public event Action<AnswerSheetLayout>? CaptureRequested;
-
-    public AnswerSheetLayout? CurrentLayout => _layout;
-
-    public bool HasValidPreview => _layout is not null && _previewMatchesInputs;
-
-    public void ReportPlatformStatus(string message)
+    public void LoadSchoolDefinition(SchoolSheetDefinition definition, bool isSaved = true)
     {
-        SetStatus(message);
-    }
-
-    private void GenerateButton_Click(object sender, RoutedEventArgs e)
-    {
-        GenerateLayout();
-    }
-
-    private void TitleBox_TextChanged(object sender, TextChangedEventArgs e)
-    {
-        MarkPreviewOutdated();
-    }
-
-    private void NumberBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-    {
-        if (_isInitializing)
-        {
-            return;
-        }
-
-        if (sender == QuestionCountBox && _subjectiveRegions.Count == 0)
-        {
-            SubjectiveQuestionNumberBox.Text = GetSuggestedQuestionNumber();
-        }
-
-        MarkPreviewOutdated();
-    }
-
-    private void SubjectiveRegionInput_TextChanged(object sender, TextChangedEventArgs e) => MarkPreviewOutdated();
-
-    private void AddSubjectiveRegionButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_subjectiveRegions.Count >= MaximumSubjectiveRegionCount)
-        {
-            SetStatus($"每张答题纸最多定义 {MaximumSubjectiveRegionCount} 个主观题区域。");
-            return;
-        }
-
-        if (!SubjectiveReviewInputParser.TryParseInteger(
-                SubjectiveQuestionNumberBox.Text,
-                1,
-                int.MaxValue,
-                out var questionNumber))
-        {
-            SetStatus("主观题题号必须是正整数。");
-            SubjectiveQuestionNumberBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (!TryReadChoiceQuestionCount(out var choiceQuestionCount))
-        {
-            SetStatus("请先填写有效的选择题题数。");
-            QuestionCountBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (questionNumber <= choiceQuestionCount)
-        {
-            SetStatus($"主观题题号必须大于选择题题数 {choiceQuestionCount}。");
-            SubjectiveQuestionNumberBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (_subjectiveRegions.Any(region => region.QuestionNumber == questionNumber))
-        {
-            SetStatus("这个题号已经有区域，请换一个题号。");
-            SubjectiveQuestionNumberBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (!SubjectiveReviewInputParser.TryParseMaximumScore(
-                SubjectiveMaximumScoreBox.Text,
-                CultureInfo.CurrentCulture,
-                out var maximumScore))
-        {
-            SetStatus("满分必须大于 0 且不超过 1,000,000；小数请使用当前语言的分隔符。");
-            SubjectiveMaximumScoreBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
-        if (!SubjectiveReviewInputParser.TryParseMillimetres(SubjectiveRegionXBox.Text, 10, 200, CultureInfo.CurrentCulture, out var x)
-            || !SubjectiveReviewInputParser.TryParseMillimetres(SubjectiveRegionYBox.Text, 52, 275, CultureInfo.CurrentCulture, out var y)
-            || !SubjectiveReviewInputParser.TryParseMillimetres(SubjectiveRegionWidthBox.Text, 40, 190, CultureInfo.CurrentCulture, out var width)
-            || !SubjectiveReviewInputParser.TryParseMillimetres(SubjectiveRegionHeightBox.Text, 10, 223, CultureInfo.CurrentCulture, out var height))
-        {
-            SetStatus("区域坐标和尺寸必须是有效的毫米数；宽至少 40 毫米、高至少 10 毫米。");
-            SubjectiveRegionXBox.Focus(FocusState.Programmatic);
-            return;
-        }
-
+        ArgumentNullException.ThrowIfNull(definition);
+        _isRegistered = isSaved;
+        _isInitializing = true;
         try
         {
-            var region = TemplateSubjectiveRegion.Create(
-                questionNumber,
-                maximumScore,
-                new RectMm(x, y, width, height));
-            _subjectiveRegions.Add(region);
-            RefreshSubjectiveRegionList();
-            SubjectiveQuestionNumberBox.Text = GetSuggestedQuestionNumber();
-            MarkPreviewOutdated();
-            SetStatus("主观题区域已添加。生成预览时会检查区域是否与选择题或其他区域重叠。");
+            _documentId = definition.LayoutDocumentId;
+            ExamIdBox.Text = definition.ExamId; TitleBox.Text = definition.Title; VersionBox.Value = definition.Version;
+            PaperBox.SelectedIndex = definition.Paper == SchoolPaper.A3Landscape ? 1 : 0;
+            ColumnsBox.SelectedIndex = definition.Columns == 3 ? 1 : 0;
+            ModeBox.SelectedIndex = definition.Mode == SchoolContentMode.WithQuestions ? 1 : 0;
+            DuplexBox.IsChecked = definition.Duplex; RepeatIdentityBox.IsChecked = definition.RepeatBackIdentity;
+            IdentityBox.SelectedIndex = definition.CandidateIdentity.Mode == CandidateIdentityMode.Marking ? 1 : 0;
+            DigitsBox.Value = definition.CandidateIdentity.Digits; CandidateIdBox.Text = definition.CandidateIdentity.CandidateId ?? "";
+            ShapeBox.SelectedIndex = definition.BubbleShape == BubbleShape.Rectangle ? 1 : 0;
+            LabelBox.SelectedIndex = definition.LabelPlacement == LabelPlacement.Inside ? 1 : 0;
+            BubbleWidthBox.Value = definition.BubbleWidthMm; BubbleHeightBox.Value = definition.BubbleHeightMm;
+            _editingItem = null;
+            _questions.Clear(); foreach (var question in definition.Questions) _questions.Add(new(question));
         }
-        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
-        {
-            SetStatus($"主观题区域无效：{exception.Message}");
-        }
+        finally { _isInitializing = false; }
+        QuestionList.SelectedIndex = 0;
+        GenerateLayout(false);
     }
 
-    private void RemoveSubjectiveRegionButton_Click(object sender, RoutedEventArgs e)
+    public void ReportPlatformStatus(string message) { TemplateStatusText.Text = message; if (_isPrintBusy?.Invoke() != true) _busy = false; UpdateActions(); }
+    private void InputChanged(object sender, TextChangedEventArgs e) => MarkOutdated();
+    private void NumberChanged(NumberBox sender, NumberBoxValueChangedEventArgs e) => MarkOutdated();
+    private void SelectionChanged(object sender, SelectionChangedEventArgs e) => MarkOutdated();
+    private void CheckChanged(object sender, RoutedEventArgs e) => MarkOutdated();
+    private void MarkOutdated()
     {
-        if (SubjectiveRegionList.SelectedItem is not TemplateSubjectiveRegionPickerItem selected)
-        {
-            return;
-        }
-
-        _subjectiveRegions.Remove(selected.Region);
-        RefreshSubjectiveRegionList();
-        MarkPreviewOutdated();
-        SetStatus("已移除主观题区域，请重新生成预览。");
+        if (_isInitializing || _loadingQuestion) return;
+        _previewMatchesInputs = false;
+        TemplateStatusText.Text = "参数已变更，请重新生成并保存版式。";
+        UpdateActions();
     }
-
-    private void SubjectiveRegionList_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
-        UpdateSubjectiveRegionControls();
-
-    private void GenerateLayout()
+    private void UpdateActions()
     {
-        GenerateButton.IsEnabled = false;
-        TemplateStatusText.Text = "正在生成模板预览。";
-
-        try
-        {
-            var questionCount = ReadInteger(QuestionCountBox, "题数");
-            var optionsPerQuestion = ReadInteger(OptionsPerQuestionBox, "每题选项数");
-            var layout = AnswerSheetLayout.Create(
-                TitleBox.Text,
-                questionCount,
-                optionsPerQuestion,
-                _subjectiveRegions);
-
-            RenderLayout(layout);
-            _layout = layout;
-            _previewMatchesInputs = true;
-            SaveSvgButton.IsEnabled = _saveSvgAsync is not null;
-            PrintButton.IsEnabled = _printAsync is not null && !IsPrintBusy();
-            ImportButton.IsEnabled = true;
-            var subjectiveSummary = layout.SubjectiveRegions.Count == 0
-                ? "未添加主观题区域"
-                : $"含 {layout.SubjectiveRegions.Count} 个主观题区域";
-            SetStatus($"已生成 {layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项的 A4 模板，{subjectiveSummary}。编号：{layout.TemplateNumber}。");
-        }
-        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
-        {
-            _layout = null;
-            _previewMatchesInputs = false;
-            SaveSvgButton.IsEnabled = false;
-            PrintButton.IsEnabled = false;
-            ImportButton.IsEnabled = false;
-            PreviewCanvas.Children.Clear();
-            SetStatus($"模板版式无效：{exception.Message} 请调整区域或选择题题数后重新生成。");
-        }
-        catch (Exception exception)
-        {
-            _layout = null;
-            _previewMatchesInputs = false;
-            SaveSvgButton.IsEnabled = false;
-            PrintButton.IsEnabled = false;
-            ImportButton.IsEnabled = false;
-            PreviewCanvas.Children.Clear();
-            var rootCause = exception.GetBaseException();
-            SetStatus($"模板生成失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请检查标题、题数和选项数。");
-        }
-        finally
-        {
-            GenerateButton.IsEnabled = true;
-        }
+        if (_isInitializing) return;
+        var ready = !_busy && HasValidPreview;
+        SettingsPanel.IsEnabled = !_busy; QuestionPanel.IsEnabled = !_busy; QuestionList.IsEnabled = !_busy;
+        AddQuestionButton.IsEnabled = !_busy; RemoveQuestionButton.IsEnabled = !_busy && QuestionList.SelectedItem is SchoolQuestionItem;
+        GenerateButton.IsEnabled = !_busy;
+        SaveSvgButton.IsEnabled = ready && _saveSvgAsync is not null;
+        PrintButton.IsEnabled = ready && _isRegistered && (_printDocumentAsync is not null || _printAsync is not null) && _isPrintBusy?.Invoke() != true;
+        ImportButton.IsEnabled = ready && _isRegistered; PagePicker.IsEnabled = !_busy;
+        ColumnsBox.IsEnabled = !_busy && PaperBox.SelectedIndex == 1;
+        RepeatIdentityBox.IsEnabled = !_busy && DuplexBox.IsChecked == true;
     }
-
-    private async void SaveSvgButton_Click(object sender, RoutedEventArgs e)
+    private void QuestionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_layout is null || !_previewMatchesInputs || _saveSvgAsync is null)
+        if (_isInitializing || _loadingQuestion || QuestionList.SelectedItem is not SchoolQuestionItem item) return;
+        if (_editingItem is not null && _questions.Contains(_editingItem) && !ReferenceEquals(_editingItem, item))
         {
-            SetStatus("参数已变更或文件保存不可用，请先重新生成预览后再保存。");
-            return;
-        }
-
-        var layout = _layout;
-        GenerateButton.IsEnabled = false;
-        SaveSvgButton.IsEnabled = false;
-        try
-        {
-            SetStatus("正在选择 SVG 保存位置。");
-            var result = await _saveSvgAsync(layout);
-            SetStatus(result.Cancelled
-                ? "已取消保存 SVG。"
-                : $"SVG 已保存：{result.Path ?? "已选择文件"}");
-        }
-        catch (Exception exception)
-        {
-            var rootCause = exception.GetBaseException();
-            SetStatus($"保存 SVG 失败：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请重新选择位置后再试。");
-        }
-        finally
-        {
-            GenerateButton.IsEnabled = true;
-            SaveSvgButton.IsEnabled = ReferenceEquals(_layout, layout) && _previewMatchesInputs;
-        }
-    }
-
-    private async void PrintButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_layout is null || !_previewMatchesInputs || _printAsync is null)
-        {
-            SetStatus("参数已变更或系统打印不可用，请先生成预览后再试。");
-            return;
-        }
-
-        var layout = _layout;
-        _printUiLocked = true;
-        SetControlsEnabled(false);
-        try
-        {
-            await _printAsync(layout);
-        }
-        catch (Exception exception)
-        {
-            var rootCause = exception.GetBaseException();
-            SetStatus($"无法打开系统打印：{rootCause.GetType().Name}（0x{rootCause.HResult:X8}）。请检查打印机后重试。");
-        }
-        finally
-        {
-            if (ReferenceEquals(_layout, layout) && _previewMatchesInputs && !IsPrintBusy())
+            try { ApplyQuestion(_editingItem, false); }
+            catch (Exception error) when (error is ArgumentException or OverflowException)
             {
-                _printUiLocked = false;
-                SetControlsEnabled(true);
+                _loadingQuestion = true;
+                try { QuestionList.SelectedItem = _editingItem; }
+                finally { _loadingQuestion = false; }
+                TemplateStatusText.Text = $"请先修正当前题目：{error.Message}";
+                return;
             }
         }
-    }
-
-    private void ImportButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_layout is null || !_previewMatchesInputs)
+        _editingItem = item;
+        _loadingQuestion = true;
+        try
         {
-            SetStatus("参数已变更，请先重新生成预览后再导入图像。");
-            return;
+            var question = item.Question;
+            QuestionNumberBox.Value = question.Number; QuestionTypeBox.SelectedIndex = question.Type == SchoolQuestionType.Subjective ? 1 : 0;
+            ScoreBox.Value = (double)question.MaximumScore; BodyBox.Text = question.Body;
+            OptionCountBox.Value = question.Options?.Count ?? 4; OptionsBox.Text = string.Join("\n", question.Options ?? Array.Empty<string>());
+            HeightBox.Value = question.SubjectiveHeightMm;
         }
-
-        CaptureRequested?.Invoke(_layout);
+        finally { _loadingQuestion = false; }
+        UpdateActions();
     }
-
-    private void RenderLayout(AnswerSheetLayout layout)
+    private static int ReadInteger(NumberBox box, string label)
     {
-        TemplateRenderer.Render(layout, PreviewCanvas, PreviewScale, showPageOutline: true);
+        if (!double.IsFinite(box.Value) || box.Value != Math.Truncate(box.Value)) throw new ArgumentException($"{label}必须是整数。");
+        return checked((int)box.Value);
     }
-
-    private static int ReadInteger(NumberBox numberBox, string name)
+    private void ApplyQuestion(SchoolQuestionItem? editingItem = null, bool selectUpdated = true)
     {
-        if (double.IsNaN(numberBox.Value)
-            || double.IsInfinity(numberBox.Value)
-            || numberBox.Value != Math.Truncate(numberBox.Value))
+        var item = editingItem ?? QuestionList.SelectedItem as SchoolQuestionItem;
+        if (item is null) return;
+        var number = ReadInteger(QuestionNumberBox, "题号");
+        if (number < 1 || _questions.Any(other => !ReferenceEquals(other, item) && other.Question.Number == number)) throw new ArgumentException("题号必须为正整数且不能重复。");
+        var score = ScoreBox.Value;
+        if (!double.IsFinite(score) || score <= 0 || score > 1000000) throw new ArgumentException("满分必须大于零且不超过 1,000,000。");
+        var count = ReadInteger(OptionCountBox, "选项数");
+        if (count is < 2 or > 6) throw new ArgumentException("选项数须为 2–6。");
+        var lines = OptionsBox.Text.Replace("\r", "").Split('\n');
+        if (lines.Length > count && lines.Skip(count).Any(line => line.Length > 0)) throw new ArgumentException("选项正文行数超过选项数，请调整后重试。");
+        var options = Enumerable.Range(0, count).Select(index => index < lines.Length ? lines[index] : "").ToArray();
+        var definition = new SchoolQuestionDefinition(number, QuestionTypeBox.SelectedIndex == 1 ? SchoolQuestionType.Subjective : SchoolQuestionType.Choice,
+            (decimal)score, BodyBox.Text, options, HeightBox.Value);
+        var index = _questions.IndexOf(item); _loadingQuestion = true;
+        try
         {
-            throw new ArgumentException($"{name}必须是整数。", name);
+            _questions[index] = new(definition);
+            if (selectUpdated) { QuestionList.SelectedIndex = index; _editingItem = _questions[index]; }
         }
-
-        return checked((int)numberBox.Value);
+        finally { _loadingQuestion = false; }
     }
-
-    private void MarkPreviewOutdated()
+    private void ApplyQuestion_Click(object sender, RoutedEventArgs e)
     {
-        if (!_previewMatchesInputs)
+        try { ApplyQuestion(); MarkOutdated(); } catch (Exception error) when (error is ArgumentException or OverflowException) { TemplateStatusText.Text = error.Message; }
+    }
+    private void AddQuestion_Click(object sender, RoutedEventArgs e)
+    {
+        if (_questions.Count >= 500) { TemplateStatusText.Text = "最多支持 500 道题。"; return; }
+        _questions.Add(new(new(_questions.Count == 0 ? 1 : _questions.Max(item => item.Question.Number) + 1, SchoolQuestionType.Choice, Options: new[] { "", "", "", "" })));
+        QuestionList.SelectedIndex = _questions.Count - 1; MarkOutdated();
+    }
+    private void RemoveQuestion_Click(object sender, RoutedEventArgs e)
+    { if (QuestionList.SelectedItem is SchoolQuestionItem item) { _questions.Remove(item); QuestionList.SelectedIndex = _questions.Count > 0 ? 0 : -1; MarkOutdated(); } }
+    private void GenerateButton_Click(object sender, RoutedEventArgs e) => GenerateLayout(true);
+    private void GenerateLayout(bool save)
+    {
+        _busy = true; _previewMatchesInputs = false; UpdateActions();
+        TemplateStatusText.Text = "正在排版答题卡。";
+        try
         {
-            return;
+            if (save) ApplyQuestion();
+            var definition = new SchoolSheetDefinition
+            {
+                ExamId = ExamIdBox.Text.Trim(), LayoutDocumentId = _documentId, Version = ReadInteger(VersionBox, "版本"), Title = TitleBox.Text.Trim(),
+                Paper = PaperBox.SelectedIndex == 1 ? SchoolPaper.A3Landscape : SchoolPaper.A4Portrait,
+                Columns = PaperBox.SelectedIndex == 1 ? ColumnsBox.SelectedIndex + 2 : 1,
+                Mode = ModeBox.SelectedIndex == 1 ? SchoolContentMode.WithQuestions : SchoolContentMode.AnswerOnly,
+                Duplex = DuplexBox.IsChecked == true, RepeatBackIdentity = RepeatIdentityBox.IsChecked == true,
+                CandidateIdentity = new(IdentityBox.SelectedIndex == 1 ? CandidateIdentityMode.Marking : CandidateIdentityMode.Barcode, ReadInteger(DigitsBox, "考号位数"), string.IsNullOrWhiteSpace(CandidateIdBox.Text) ? null : CandidateIdBox.Text.Trim()),
+                BubbleShape = ShapeBox.SelectedIndex == 1 ? BubbleShape.Rectangle : BubbleShape.Circle,
+                LabelPlacement = LabelBox.SelectedIndex == 1 ? LabelPlacement.Inside : LabelPlacement.Outside,
+                BubbleWidthMm = BubbleWidthBox.Value, BubbleHeightMm = BubbleHeightBox.Value,
+                Questions = _questions.Select(item => item.Question).ToArray()
+            };
+            var document = SchoolAnswerSheet.Create(definition);
+            CurrentSchoolDefinition = definition; CurrentDocument = document;
+            PagePicker.ItemsSource = document.Pages.Select(page => $"第 {page.SchoolMetadata!.PageNumber} 页 · {(page.SchoolMetadata.Side == SchoolPageSide.Back ? "反面" : "正面")}").ToArray();
+            PagePicker.SelectedIndex = 0; ShowPage(0);
+            _previewMatchesInputs = true;
+            SummaryText.Text = $"共 {definition.Questions.Count} 题 · 总分 {definition.Questions.Sum(question => question.MaximumScore)} · {document.Pages.Count} 页 · 版本 {definition.Version}";
+            if (save)
+            {
+                _isRegistered = false;
+                SchoolDocumentGenerated?.Invoke(definition, document);
+                _isRegistered = true;
+            }
+            TemplateStatusText.Text = _isRegistered ? "预览与已保存版式一致，可打印整份或采集选中页。" : "预览已生成。请点击生成并保存版式，保存后才能打印和采集。";
         }
-
-        _previewMatchesInputs = false;
-        SaveSvgButton.IsEnabled = false;
-        PrintButton.IsEnabled = false;
-        ImportButton.IsEnabled = false;
-        SetStatus("参数已变更，请重新生成预览。");
-    }
-
-    private void SetControlsEnabled(bool enabled)
-    {
-        TitleBox.IsEnabled = enabled;
-        QuestionCountBox.IsEnabled = enabled;
-        OptionsPerQuestionBox.IsEnabled = enabled;
-        SubjectiveQuestionNumberBox.IsEnabled = enabled;
-        SubjectiveMaximumScoreBox.IsEnabled = enabled;
-        SubjectiveRegionXBox.IsEnabled = enabled;
-        SubjectiveRegionYBox.IsEnabled = enabled;
-        SubjectiveRegionWidthBox.IsEnabled = enabled;
-        SubjectiveRegionHeightBox.IsEnabled = enabled;
-        AddSubjectiveRegionButton.IsEnabled = enabled;
-        SubjectiveRegionList.IsEnabled = enabled;
-        RemoveSubjectiveRegionButton.IsEnabled = enabled
-            && SubjectiveRegionList.SelectedItem is TemplateSubjectiveRegionPickerItem;
-        GenerateButton.IsEnabled = enabled;
-        SaveSvgButton.IsEnabled = enabled && _saveSvgAsync is not null && _layout is not null && _previewMatchesInputs;
-        PrintButton.IsEnabled = enabled
-            && _printAsync is not null
-            && _layout is not null
-            && _previewMatchesInputs
-            && !IsPrintBusy();
-        ImportButton.IsEnabled = enabled && _layout is not null && _previewMatchesInputs;
-    }
-
-    private void SetStatus(string message)
-    {
-        TemplateStatusText.Text = message;
-        if (_printUiLocked && !IsPrintBusy())
+        catch (Exception error)
         {
-            _printUiLocked = false;
-            SetControlsEnabled(true);
+            _previewMatchesInputs = false; _layout = null; PreviewCanvas.Children.Clear();
+            TemplateStatusText.Text = $"版式生成或保存失败：{error.Message}。请调整后重试。";
         }
+        finally { _busy = false; UpdateActions(); }
     }
-
-    private bool IsPrintBusy() => _isPrintBusy?.Invoke() == true;
-
-    private bool TryReadChoiceQuestionCount(out int questionCount)
+    private void ShowPage(int index)
     {
-        questionCount = default;
-        if (double.IsNaN(QuestionCountBox.Value)
-            || double.IsInfinity(QuestionCountBox.Value)
-            || QuestionCountBox.Value != Math.Truncate(QuestionCountBox.Value)
-            || QuestionCountBox.Value < 1
-            || QuestionCountBox.Value > int.MaxValue)
-        {
-            return false;
-        }
-
-        questionCount = (int)QuestionCountBox.Value;
-        return true;
+        if (CurrentDocument is null || index < 0 || index >= CurrentDocument.Pages.Count) return;
+        _layout = CurrentDocument.Pages[index]; TemplateRenderer.Render(_layout, PreviewCanvas, 2, true);
     }
-
-    private string GetSuggestedQuestionNumber()
+    private void PagePicker_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (!_isInitializing) ShowPage(PagePicker.SelectedIndex); }
+    private void EditorGrid_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        var minimum = TryReadChoiceQuestionCount(out var count) ? count : 0;
-        if (_subjectiveRegions.Count > 0)
-        {
-            minimum = Math.Max(minimum, _subjectiveRegions.Max(region => region.QuestionNumber));
-        }
-
-        return minimum == int.MaxValue
-            ? string.Empty
-            : (minimum + 1).ToString(CultureInfo.InvariantCulture);
+        if (_isInitializing) return;
+        var narrow = e.NewSize.Width < 800;
+        EditorGrid.ColumnDefinitions[0].Width = narrow ? new GridLength(1, GridUnitType.Star) : new GridLength(340);
+        EditorGrid.ColumnDefinitions[1].Width = narrow ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+        Grid.SetColumn(PreviewPanel, narrow ? 0 : 1); Grid.SetRow(PreviewPanel, narrow ? 1 : 0);
     }
-
-    private void RefreshSubjectiveRegionList()
+    private async void SaveSvgButton_Click(object sender, RoutedEventArgs e)
     {
-        _subjectiveRegionItems.Clear();
-        foreach (var region in _subjectiveRegions.OrderBy(region => region.QuestionNumber))
-        {
-            _subjectiveRegionItems.Add(new TemplateSubjectiveRegionPickerItem(region));
-        }
-
-        SubjectiveRegionStatusText.Text = _subjectiveRegions.Count == 0
-            ? "尚未添加主观题区域。"
-            : $"已添加 {_subjectiveRegions.Count} 个区域；生成预览时会校验题号和区域冲突。";
-        UpdateSubjectiveRegionControls();
+        if (!HasValidPreview || _saveSvgAsync is null || _layout is null) return;
+        _busy = true; UpdateActions();
+        try { var result = await _saveSvgAsync(_layout); TemplateStatusText.Text = result.Cancelled ? "已取消保存。" : "当前页 SVG 已保存。"; }
+        catch (Exception error) { TemplateStatusText.Text = $"保存失败：{error.GetBaseException().GetType().Name}。请重试。"; }
+        finally { _busy = false; UpdateActions(); }
     }
-
-    private void UpdateSubjectiveRegionControls()
+    private async void PrintButton_Click(object sender, RoutedEventArgs e)
     {
-        RemoveSubjectiveRegionButton.IsEnabled = !_printUiLocked
-            && SubjectiveRegionList.SelectedItem is TemplateSubjectiveRegionPickerItem;
+        if (!HasValidPreview || !_isRegistered || CurrentDocument is null || _layout is null) return;
+        _busy = true; UpdateActions();
+        try { if (_printDocumentAsync is not null) await _printDocumentAsync(CurrentDocument.Pages); else if (_printAsync is not null) await _printAsync(_layout); }
+        catch (Exception error) { TemplateStatusText.Text = $"系统打印无法打开：{error.GetBaseException().GetType().Name}。请检查平台和打印机。"; }
+        finally { _busy = _isPrintBusy?.Invoke() == true; UpdateActions(); }
     }
+    private void ImportButton_Click(object sender, RoutedEventArgs e) { if (HasValidPreview && _isRegistered && _layout is not null) CaptureRequested?.Invoke(_layout); }
 }
-
 public sealed record SvgSaveResult(bool Cancelled, string? Path);
-
-public sealed record TemplateSubjectiveRegionPickerItem(TemplateSubjectiveRegion Region)
+public sealed record SchoolQuestionItem(SchoolQuestionDefinition Question)
 {
-    public string DisplayText => string.Format(
-        CultureInfo.CurrentCulture,
-        "第 {0} 题 · 满分 {1} · X={2:0.##}、Y={3:0.##}、宽 {4:0.##}、高 {5:0.##} 毫米",
-        Region.QuestionNumber,
-        Region.MaximumScore,
-        Region.Rectangle.X,
-        Region.Rectangle.Y,
-        Region.Rectangle.Width,
-        Region.Rectangle.Height);
+    public string DisplayText => $"第 {Question.Number} 题 · {(Question.Type == SchoolQuestionType.Choice ? "选择题" : "解答题")} · {Question.MaximumScore} 分";
 }

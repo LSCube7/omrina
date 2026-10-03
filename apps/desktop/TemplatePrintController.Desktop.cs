@@ -34,6 +34,13 @@ internal sealed class TemplatePrintController : IDisposable
             new PlatformNotSupportedException(message));
     }
 
+    public Task RequestPrintAsync(IReadOnlyList<AnswerSheetLayout> layouts)
+    {
+        ArgumentNullException.ThrowIfNull(layouts);
+        if (layouts.Count == 0) throw new ArgumentException("没有可打印页面。", nameof(layouts));
+        return RequestPrintAsync(layouts[0]);
+    }
+
     public void Dispose()
     {
         _disposed = true;

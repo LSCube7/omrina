@@ -35,8 +35,10 @@ public sealed partial class CapturePage : Page
     private bool _scanInProgress;
     private TaskCompletionSource<bool>? _activeOperationCompletion;
     private bool _isClosed;
-    private bool _updatingLayoutInputs;
     private CaptureRecord? _latestCapture;
+    private SchoolAnswerSheet? _document;
+    private bool _settingDocument;
+    private bool _settingHistory;
 
     public CapturePage()
         : this(null, null, null, null, null, null)
@@ -66,9 +68,6 @@ public sealed partial class CapturePage : Page
 
         if (initialLayout is not null)
         {
-            TitleBox.Text = initialLayout.Title;
-            QuestionCountBox.Value = initialLayout.QuestionCount;
-            OptionsPerQuestionBox.Value = initialLayout.OptionsPerQuestion;
             SetLayout(initialLayout);
         }
         else
@@ -97,23 +96,19 @@ public sealed partial class CapturePage : Page
         ArgumentNullException.ThrowIfNull(layout);
         _layout = layout;
         _templateMatchesInputs = true;
-        _updatingLayoutInputs = true;
-        try
-        {
-            TitleBox.Text = layout.Title;
-            QuestionCountBox.Value = layout.QuestionCount;
-            OptionsPerQuestionBox.Value = layout.OptionsPerQuestion;
-        }
-        finally
-        {
-            _updatingLayoutInputs = false;
-        }
         var template = CaptureTemplateReference.FromLayout(layout);
-        TemplateIdText.Text = $"模板 ID：{template.TemplateId}";
-        var subjectiveSummary = layout.SubjectiveRegions.Count == 0
-            ? "无主观题区域"
-            : $"含 {layout.SubjectiveRegions.Count} 个主观题区域";
-        CaptureStatusText.Text = $"模板参数已确认：{layout.QuestionCount} 题、每题 {layout.OptionsPerQuestion} 个选项，{subjectiveSummary}。";
+        var pageSummary = layout.SchoolMetadata is { } metadata
+            ? $" · 第 {metadata.PageNumber} 页 · {(metadata.Side == SchoolPageSide.Back ? "反面" : "正面")} · 版本 {metadata.Version}"
+            : "";
+        TemplateIdText.Text = $"{layout.Title} · {(layout.WidthMm > 210 ? "A3 横向" : "A4 纵向")}{pageSummary} · 模板 {template.TemplateId}";
+        if (_document is not null)
+        {
+            var index = _document.Pages.ToList().FindIndex(page => page.TemplateId == layout.TemplateId);
+            _settingDocument = true;
+            try { DocumentPagePicker.SelectedIndex = index; }
+            finally { _settingDocument = false; }
+        }
+        CaptureStatusText.Text = "已关联选中答题卡页面。导入和扫描将保留这一版式。";
         UpdateImportButtonState();
         UpdateScanCaptureButtonState();
     }
@@ -122,6 +117,7 @@ public sealed partial class CapturePage : Page
     public void SetExistingCapture(CaptureRecord capture)
     {
         ArgumentNullException.ThrowIfNull(capture);
+        if (capture.TemplateLayout is not null) SetLayout(capture.TemplateLayout);
         _latestCapture = capture;
         OpenRecognitionButton.Visibility = Visibility.Visible;
         CaptureStatusText.Text =
@@ -147,63 +143,59 @@ public sealed partial class CapturePage : Page
         await idle.ConfigureAwait(true);
     }
 
-    private void GenerateTemplateButton_Click(object sender, RoutedEventArgs e)
-    {
-        GenerateLayout();
-    }
+    public event Action? LayoutSelectionRequested;
+    public event Action<CaptureRecord>? CaptureSelected;
 
-    private void TitleBox_TextChanged(object sender, TextChangedEventArgs e)
+    public void SetDocument(SchoolAnswerSheet document)
     {
-        MarkTemplateOutdated();
-    }
-
-    private void NumberBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-    {
-        MarkTemplateOutdated();
-    }
-
-    private void GenerateLayout()
-    {
-        if (IsBusy)
+        ArgumentNullException.ThrowIfNull(document);
+        var previous = _document?.Pages.FirstOrDefault()?.SchoolMetadata;
+        var next = document.Pages.FirstOrDefault()?.SchoolMetadata;
+        if (previous?.ExamId != next?.ExamId || previous?.LayoutDocumentId != next?.LayoutDocumentId || previous?.Version != next?.Version)
         {
-            return;
+            _latestCapture = null;
+            OpenRecognitionButton.Visibility = Visibility.Collapsed;
         }
-
-        GenerateTemplateButton.IsEnabled = false;
-        CaptureStatusText.Text = "正在确认模板参数。";
-
+        _document = document;
+        _settingDocument = true;
         try
         {
-            var questionCount = ReadInteger(QuestionCountBox, "题数");
-            var optionsPerQuestion = ReadInteger(OptionsPerQuestionBox, "每题选项数");
-            var layout = _layout is { SubjectiveRegions.Count: > 0 } existingLayout
-                ? AnswerSheetLayout.Create(
-                    TitleBox.Text,
-                    questionCount,
-                    optionsPerQuestion,
-                    existingLayout.SubjectiveRegions)
-                : AnswerSheetLayout.Create(TitleBox.Text, questionCount, optionsPerQuestion);
-            SetLayout(layout);
+            DocumentPagePicker.ItemsSource = document.Pages.Select((page, index) => $"第 {index + 1} 页 · {(page.SchoolMetadata?.Side == SchoolPageSide.Back ? "反面" : "正面")}").ToArray();
+            DocumentPagePicker.SelectedIndex = 0;
         }
-        catch (Exception exception)
-        {
-            _templateMatchesInputs = false;
-            TemplateIdText.Text = "模板参数无效。";
-            CaptureStatusText.Text = FormatFailure("模板参数确认失败", exception, "请检查标题、题数和选项数后重试。");
-            UpdateImportButtonState();
-            UpdateScanCaptureButtonState();
-        }
-        finally
-        {
-            GenerateTemplateButton.IsEnabled = !_isClosed;
-        }
+        finally { _settingDocument = false; }
+        if (document.Pages.Count > 0) SetLayout(document.Pages[0]);
     }
+
+    public void SetCaptures(IReadOnlyList<CaptureRecord> captures)
+    {
+        _settingHistory = true;
+        try { CaptureHistoryList.ItemsSource = captures.Select(record => new CaptureHistoryItem(record)).ToArray(); }
+        finally { _settingHistory = false; }
+        CaptureHistoryStatus.Text = captures.Count == 0 ? "尚无已保存答卷。" : $"已保存 {captures.Count} 张答卷。选择一张继续识别和批阅。";
+    }
+
+    private void DocumentPagePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_settingDocument || IsBusy || _document is null) return;
+        var index = DocumentPagePicker.SelectedIndex;
+        if (index >= 0 && index < _document.Pages.Count) SetLayout(_document.Pages[index]);
+    }
+
+    private void CaptureHistoryList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_settingHistory || IsBusy || CaptureHistoryList.SelectedItem is not CaptureHistoryItem item) return;
+        SetExistingCapture(item.Record);
+        CaptureSelected?.Invoke(item.Record);
+    }
+
+    private void ChooseTemplateButton_Click(object sender, RoutedEventArgs e) => LayoutSelectionRequested?.Invoke();
 
     private async void ImportButton_Click(object sender, RoutedEventArgs e)
     {
         if (_layout is null || !_templateMatchesInputs || _pickImageAsync is null || _persistCaptureAsync is null)
         {
-            CaptureStatusText.Text = "请先确认有效的模板参数。";
+            CaptureStatusText.Text = "先选择考试答题卡。";
             UpdateImportButtonState();
             return;
         }
@@ -337,7 +329,7 @@ public sealed partial class CapturePage : Page
             || _persistCaptureAsync is null
             || ScannerList.SelectedItem is not CaptureScannerDeviceItem selectedDevice)
         {
-            CaptureStatusText.Text = "请先确认模板参数并选择扫描设备。";
+            CaptureStatusText.Text = "请先选择考试答题卡和扫描设备。";
             UpdateScanCaptureButtonState();
             return;
         }
@@ -360,14 +352,14 @@ public sealed partial class CapturePage : Page
         SetScanBusy(true);
         SetBusy(true);
         CaptureStatusText.Text =
-            $"正在使用 {selectedDevice.Name} 扫描首张答题纸（平板、A4、{dpi} DPI）。";
+            $"正在使用 {selectedDevice.Name} 扫描首张答题纸（平板、{(layout.WidthMm > 210 ? "A3 横向" : "A4 纵向")}、{dpi} DPI）。";
 
         string? temporaryPath = null;
         try
         {
             var scan = await _scannerService.ScanAsync(
                 selectedDevice.Device,
-                new ScanOptions(dpi),
+                new ScanOptions(dpi, PageSize: layout.WidthMm > 210 ? "A3" : "A4"),
                 _scanCancellation.Token);
             temporaryPath = scan.ImagePath;
             var scanFile = await _openScanImageAsync(temporaryPath, _scanCancellation.Token);
@@ -394,7 +386,7 @@ public sealed partial class CapturePage : Page
         }
         catch (Exception exception)
         {
-            CaptureStatusText.Text = FormatFailure("扫描保存失败", exception, "请检查设备、测试纸和分辨率后重试。");
+            CaptureStatusText.Text = FormatFailure("扫描保存失败", exception, "请检查设备是否支持所选纸张和方向，或改用导入图像。");
         }
         finally
         {
@@ -426,31 +418,11 @@ public sealed partial class CapturePage : Page
         _scanCancellation.Cancel();
     }
 
-    private void SetLayoutFromTemplate(AnswerSheetLayout layout)
-    {
-        SetLayout(layout);
-    }
-
-    private void MarkTemplateOutdated()
-    {
-        if (_updatingLayoutInputs || _layout is null || !_templateMatchesInputs)
-        {
-            return;
-        }
-
-        _templateMatchesInputs = false;
-        TemplateIdText.Text = "参数已变更，请重新确认模板参数。";
-        CaptureStatusText.Text = "参数已变更，请重新确认模板参数。";
-        UpdateImportButtonState();
-        UpdateScanCaptureButtonState();
-    }
-
     private void SetBusy(bool busy)
     {
-        GenerateTemplateButton.IsEnabled = !busy && !_isClosed;
-        TitleBox.IsEnabled = !busy && !_isClosed;
-        QuestionCountBox.IsEnabled = !busy && !_isClosed;
-        OptionsPerQuestionBox.IsEnabled = !busy && !_isClosed;
+        ChooseTemplateButton.IsEnabled = !busy && !_isClosed;
+        DocumentPagePicker.IsEnabled = !busy && !_isClosed;
+        CaptureHistoryList.IsEnabled = !busy && !_isClosed;
         ImportButton.IsEnabled = !busy && !_isClosed && _layout is not null && _templateMatchesInputs;
         CancelImportButton.IsEnabled = busy && _importCancellation is not null && !_isClosed;
         RefreshScannerButton.IsEnabled = !busy
@@ -604,4 +576,9 @@ public sealed record CaptureScannerDeviceItem(ScannerDevice Device)
     public string Driver => Device.Driver.ToUpperInvariant();
 
     public string Name => Device.Name;
+}
+
+public sealed record CaptureHistoryItem(CaptureRecord Record)
+{
+    public string DisplayText => $"{Record.Manifest.CreatedAtUtc.ToLocalTime():g} · {Record.Manifest.PixelWidth}×{Record.Manifest.PixelHeight} · {Record.Manifest.TemplateId}";
 }

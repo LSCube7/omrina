@@ -14,7 +14,7 @@
             </StackPanel>
 
             <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                <Grid ColumnSpacing="16" RowSpacing="8" ColumnDefinitions="*,320" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+                <Grid ColumnSpacing="16" RowSpacing="8" ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
                     <TextBlock Grid.ColumnSpan="2" Text="当前采集记录" Style="{StaticResource SubtitleTextBlockStyle}" />
                     <TextBlock Grid.Row="1" Text="模板关联" />
                     <TextBlock x:Name="TemplateAssociationText" Grid.Row="1" Grid.Column="1" Text="尚未选择采集记录。" TextWrapping="Wrap" />
@@ -61,20 +61,16 @@
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="local:RecognitionQuestionRow">
                                 <Border Padding="8" Margin="0,0,0,8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="4">
-                                    <Grid ColumnSpacing="12" RowSpacing="4" ColumnDefinitions="48,*,150,190" RowDefinitions="Auto,Auto,Auto">
+                                    <StackPanel Spacing="6">
                                         <TextBlock Text="{x:Bind QuestionLabel}" FontWeight="SemiBold" />
-                                        <TextBlock Grid.Column="1" Text="{x:Bind StateText}" TextWrapping="Wrap" />
-                                        <TextBlock Grid.Column="2" Text="{x:Bind SelectedText}" TextWrapping="Wrap" />
-                                        <TextBlock Grid.Column="3" Text="{x:Bind ConfidenceText}" TextWrapping="Wrap" />
-                                        <TextBlock Grid.Row="1" Grid.ColumnSpan="4" Text="{x:Bind ReviewText}" TextWrapping="Wrap" Opacity="0.78" />
-                                        <Grid Grid.Row="2" Grid.ColumnSpan="4" ColumnSpacing="12" ColumnDefinitions="Auto,160,Auto,220,*">
-                                            <TextBlock Text="标准答案" VerticalAlignment="Center" />
-                                            <ComboBox Grid.Column="1" ItemsSource="{x:Bind AnswerChoices}" SelectedItem="{x:Bind ExpectedAnswer, Mode=TwoWay}" SelectionChanged="ExpectedAnswer_SelectionChanged" />
-                                            <TextBlock Grid.Column="2" Text="人工修订" VerticalAlignment="Center" />
-                                            <ComboBox Grid.Column="3" ItemsSource="{x:Bind ReviewChoices}" SelectedItem="{x:Bind ReviewChoice, Mode=TwoWay}" SelectionChanged="ReviewChoice_SelectionChanged" />
-                                            <TextBox Grid.Column="4" Header="修订原因（必填）" Text="{x:Bind ReviewReason, Mode=TwoWay}" />
-                                        </Grid>
-                                    </Grid>
+                                        <TextBlock Text="{x:Bind StateText}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind SelectedText}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind ConfidenceText}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind ReviewText}" TextWrapping="Wrap" />
+                                        <ComboBox Header="标准答案" ItemsSource="{x:Bind AnswerChoices}" IsEnabled="{x:Bind IsAnswerEditable}" SelectedItem="{x:Bind ExpectedAnswer, Mode=TwoWay}" SelectionChanged="ExpectedAnswer_SelectionChanged" HorizontalAlignment="Stretch" />
+                                        <ComboBox Header="人工修订" ItemsSource="{x:Bind ReviewChoices}" SelectedItem="{x:Bind ReviewChoice, Mode=TwoWay}" SelectionChanged="ReviewChoice_SelectionChanged" HorizontalAlignment="Stretch" />
+                                        <TextBox Header="修订原因（必填）" Text="{x:Bind ReviewReason, Mode=TwoWay}" TextWrapping="Wrap" />
+                                    </StackPanel>
                                 </Border>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -85,7 +81,7 @@
             <Border x:Name="WorkflowBorder" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Visibility="Collapsed">
                 <StackPanel Spacing="10">
                     <TextBlock Text="答案键、评分与人工复核" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock Text="标准答案必须由用户逐题设置；识别结果不会自动作为答案键。空白、多选和低置信题目可以先复核再评分。" TextWrapping="Wrap" />
+                    <TextBlock Text="学校答卷使用考试统一设置的标准答案；空白、多选和低置信题目请先对照原图复核。" TextWrapping="Wrap" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button x:Name="ScoreButton" IsEnabled="False" Click="ScoreButton_Click" automation:AutomationProperties.Name="按标准答案评分">
                             <TextBlock Text="按标准答案评分" />

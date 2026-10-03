@@ -106,6 +106,8 @@ public sealed partial class SubjectiveReviewPage : Page
     private bool _isExporting;
     private bool _isInitializing = true;
     private Task? _shutdownTask;
+    private string? _examId;
+    private HashSet<string>? _examCaptureIds;
 
     public SubjectiveReviewPage()
         : this(null, null)
@@ -134,6 +136,59 @@ public sealed partial class SubjectiveReviewPage : Page
                 InfoBarSeverity.Error);
         }
     }
+
+    public bool CanChangeExam(string? examId)
+    {
+        if (_isCreatingReview || _isMutatingReview || _isReadingReview || _isExporting || HasUnsavedGrade())
+        {
+            ShowInfo("当前批阅仍有未保存内容或正在处理请求。请先保存草稿并等待处理结束，再切换考试或答题卡版本。", InfoBarSeverity.Warning);
+            return false;
+        }
+        return true;
+    }
+
+    private bool HasUnsavedGrade()
+    {
+        if (_selectedQuestion is null) return false;
+        var question = _selectedQuestion;
+        var scoreText = QuestionScoreBox.Text.Trim();
+        var scoreMatches = question.Score is null ? scoreText.Length == 0
+            : SubjectiveReviewInputParser.TryParseScore(scoreText, question.MaximumScore, CultureInfo.CurrentCulture, out var score) && score == question.Score;
+        return !scoreMatches || !string.Equals(NormalizeComment(QuestionCommentBox.Text), question.Comment, StringComparison.Ordinal);
+    }
+
+    public bool SetExam(string examId, IReadOnlyCollection<string> captureIds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(examId);
+        ArgumentNullException.ThrowIfNull(captureIds);
+        var ids = new HashSet<string>(captureIds, StringComparer.OrdinalIgnoreCase);
+        if (_examId == examId && _examCaptureIds?.SetEquals(ids) == true) return true;
+        if (!CanChangeExam(examId)) return false;
+        _examId = examId; _examCaptureIds = ids;
+        CancelRequest(_captureListCancellation); CancelRequest(_reviewListCancellation);
+        CancelRequest(_documentCancellation); CancelRequest(_captureImageCancellation); CancelRequest(_questionImageCancellation);
+        _captureListGeneration.Invalidate(); _reviewListGeneration.Invalidate(); _documentGeneration.Invalidate();
+        _captureImageGeneration.Invalidate(); _questionImageGeneration.Invalidate();
+        _isLoadingCaptureList = false; _isLoadingReviewList = false;
+        _isUpdatingCapturePicker = true; _isUpdatingReviewPicker = true; _isUpdatingQuestionList = true;
+        try
+        {
+            _captureItems.Clear(); _reviewItems.Clear(); _questionItems.Clear();
+            CapturePicker.SelectedItem = null; ReviewPicker.SelectedItem = null; SubjectiveQuestionList.SelectedItem = null;
+        }
+        finally { _isUpdatingCapturePicker = false; _isUpdatingReviewPicker = false; _isUpdatingQuestionList = false; }
+        _selectedCapture = null; _document = null; _selectedQuestion = null;
+        _captureCursor = null; _reviewCursor = null; _hasLoadedOnNavigation = false;
+        _captureDiagnostics.Clear(); _reviewDiagnostics.Clear();
+        OriginalCaptureImage.Source = null; QuestionRegionImage.Source = null; _isCaptureImageAvailable = false;
+        PopulateEditor(null); ReviewEditorBorder.Visibility = Visibility.Collapsed;
+        CaptureListStatusText.Text = "当前考试答卷将在进入本页时加载。";
+        ReviewListStatusText.Text = "尚未加载当前考试批阅记录。";
+        UpdateActionStates();
+        return true;
+    }
+
+    private bool BelongsToCurrentExam(string captureId) => _examCaptureIds is null || _examCaptureIds.Contains(captureId);
 
     /// <summary>Called by MainWindow only after the user navigates to this page.</summary>
     public async Task ActivateAsync()
@@ -223,6 +278,14 @@ public sealed partial class SubjectiveReviewPage : Page
             return;
         }
 
+        if (HasUnsavedGrade() && (CapturePicker.SelectedItem as SubjectiveCapturePickerItem)?.Summary.CaptureId != _selectedCapture?.CaptureId)
+        {
+            _isUpdatingCapturePicker = true;
+            try { CapturePicker.SelectedItem = _captureItems.FirstOrDefault(item => item.Summary.CaptureId == _selectedCapture?.CaptureId); }
+            finally { _isUpdatingCapturePicker = false; }
+            ShowInfo("请先保存当前题目的草稿，再切换答卷。", InfoBarSeverity.Warning);
+            return;
+        }
         _selectedCapture = (CapturePicker.SelectedItem as SubjectiveCapturePickerItem)?.Summary;
         if (_selectedCapture is null)
         {
@@ -255,6 +318,14 @@ public sealed partial class SubjectiveReviewPage : Page
             return;
         }
 
+        if (HasUnsavedGrade())
+        {
+            _isUpdatingReviewPicker = true;
+            try { ReviewPicker.SelectedItem = _reviewItems.FirstOrDefault(previous => previous.Summary.ReviewId == _document?.ReviewId); }
+            finally { _isUpdatingReviewPicker = false; }
+            ShowInfo("请先保存当前题目的草稿，再切换批阅记录。", InfoBarSeverity.Warning);
+            return;
+        }
         _ = RunTrackedOperationAsync(
             "批阅记录读取失败",
             () => LoadReviewAsync(item.Summary.ReviewId, preserveEditorInput: false),
@@ -280,6 +351,14 @@ public sealed partial class SubjectiveReviewPage : Page
             return;
         }
 
+        if (HasUnsavedGrade())
+        {
+            _isUpdatingQuestionList = true;
+            try { SubjectiveQuestionList.SelectedItem = _questionItems.FirstOrDefault(previous => previous.Question.QuestionId == _selectedQuestion?.QuestionId); }
+            finally { _isUpdatingQuestionList = false; }
+            ShowInfo("请先保存当前题目的草稿，再选择其他题目。", InfoBarSeverity.Warning);
+            return;
+        }
         if (SubjectiveQuestionList.SelectedItem is not SubjectiveQuestionPickerItem item)
         {
             _selectedQuestion = null;
@@ -375,7 +454,7 @@ public sealed partial class SubjectiveReviewPage : Page
                     _captureItems.Clear();
                 }
 
-                foreach (var summary in page.Items)
+                foreach (var summary in page.Items.Where(summary => BelongsToCurrentExam(summary.CaptureId)))
                 {
                     if (!_captureItems.Any(item => string.Equals(
                             item.Summary.CaptureId,
@@ -414,7 +493,7 @@ public sealed partial class SubjectiveReviewPage : Page
                 _isUpdatingCapturePicker = false;
             }
 
-            UpdateDiagnostics(_captureDiagnostics, page.Diagnostics, append);
+            UpdateDiagnostics(_captureDiagnostics, page.Diagnostics.Where(diagnostic => BelongsToCurrentExam(diagnostic.ResourceId)).ToArray(), append);
             SetCaptureDiagnostics(_captureDiagnostics);
             if (_captureItems.Count == 0 && _captureDiagnostics.Count == 0)
             {
@@ -478,7 +557,7 @@ public sealed partial class SubjectiveReviewPage : Page
                     _reviewItems.Clear();
                 }
 
-                foreach (var summary in page.Items)
+                foreach (var summary in page.Items.Where(summary => BelongsToCurrentExam(summary.CaptureId)))
                 {
                     UpsertReviewItem(summary, select: false);
                 }
@@ -497,7 +576,7 @@ public sealed partial class SubjectiveReviewPage : Page
                 _isUpdatingReviewPicker = false;
             }
 
-            UpdateDiagnostics(_reviewDiagnostics, page.Diagnostics, append);
+            UpdateDiagnostics(_reviewDiagnostics, _examCaptureIds is null ? page.Diagnostics : page.Diagnostics.Where(diagnostic => _reviewItems.Any(item => item.Summary.ReviewId.ToString("N") == diagnostic.ResourceId)).ToArray(), append);
             SetReviewDiagnostics(_reviewDiagnostics);
             if (_reviewItems.Count == 0 && _reviewDiagnostics.Count == 0)
             {

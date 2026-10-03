@@ -106,9 +106,10 @@ public sealed class RecognitionQuestionRow : INotifyPropertyChanged
     private string _reviewChoice;
     private string _reviewReason = string.Empty;
 
-    public RecognitionQuestionRow(QuestionRecognitionResult result, int optionsPerQuestion)
+    public RecognitionQuestionRow(QuestionRecognitionResult result, int optionsPerQuestion, bool isAnswerEditable = true)
     {
         Result = result ?? throw new ArgumentNullException(nameof(result));
+        IsAnswerEditable = isAnswerEditable;
         if (optionsPerQuestion is < AnswerSheetLayout.MinOptionsPerQuestion or > AnswerSheetLayout.MaxOptionsPerQuestion)
         {
             throw new ArgumentOutOfRangeException(nameof(optionsPerQuestion));
@@ -165,6 +166,8 @@ public sealed class RecognitionQuestionRow : INotifyPropertyChanged
     public bool NeedsReview => Result.State is not QuestionMarkState.Single
         || Result.Confidence < 0.75
         || Result.Options.Any(option => option.State == OptionMarkState.Uncertain);
+
+    public bool IsAnswerEditable { get; }
 
     public IReadOnlyList<string> AnswerChoices { get; }
 
@@ -272,6 +275,8 @@ public sealed partial class RecognitionPage : Page
     private TaskCompletionSource<bool>? _idleCompletion;
     private int _activeOperations;
     private bool _isClosed;
+    private string? _answerKeyExamId;
+    private IReadOnlyDictionary<int, string> _examAnswers = new Dictionary<int, string>();
 
     public RecognitionPage()
         : this(null, null, null, null, null)
@@ -308,6 +313,50 @@ public sealed partial class RecognitionPage : Page
 
     public Task WaitForIdleAsync() => _idleCompletion?.Task ?? Task.CompletedTask;
 
+    /// <summary>Loads an exam-scoped key. School rows display this shared key without changing it per student.</summary>
+    public void SetExamAnswerKey(string examId, IReadOnlyDictionary<int, string>? answers)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(examId);
+        _answerKeyExamId = examId;
+        _examAnswers = answers is null ? new Dictionary<int, string>() : new Dictionary<int, string>(answers);
+        _scoreCancellation?.Cancel();
+        _reviewCancellation?.Cancel();
+        _score = null;
+        foreach (var row in _questionRows) row.ExpectedAnswer = ReadSharedAnswer(row);
+        if (_layout?.SchoolMetadata?.ExamId == examId)
+            WorkflowStatusText.Text = "已载入考试共享答案；如有变更，请重新评分。";
+        UpdateWorkflowButtons();
+    }
+
+    private string ReadSharedAnswer(RecognitionQuestionRow row) =>
+        _layout?.SchoolMetadata?.ExamId == _answerKeyExamId
+        && _examAnswers.TryGetValue(row.Result.QuestionNumber, out var answer)
+        && row.AnswerChoices.Contains(answer) ? answer : "未设置";
+
+    public void ClearCapture()
+    {
+        _recognitionCancellation?.Cancel(); _scoreCancellation?.Cancel(); _reviewCancellation?.Cancel();
+        _capture = null; _layout = null; _recognitionResult = null; _reviewSession = null; _score = null;
+        _answerKeyExamId = null; _examAnswers = new Dictionary<int, string>();
+        _auditTrail.Clear(); _questionRows.Clear(); OriginalImage.Source = null;
+        RecognitionResultsBorder.Visibility = Visibility.Collapsed; WorkflowBorder.Visibility = Visibility.Collapsed;
+        RecognitionProgressBar.Visibility = Visibility.Collapsed;
+        RunRecognitionButton.IsEnabled = false; CancelRecognitionButton.IsEnabled = false;
+        TemplateAssociationText.Text = "尚未选择答卷。"; ImageMetadataText.Text = "—"; ImagePathText.Text = "—";
+        AssociationStatusText.Text = "请先从当前考试选择答卷。";
+        RecognitionProgressText.Text = "请先选择答卷。"; WorkflowStatusText.Text = "请先选择答卷并完成识别。";
+        RecognitionSummaryText.Text = "—"; RecognitionDiagnosticsText.Text = ""; ReviewAuditText.Text = "";
+        ExportStatusText.Text = "请先选择答卷。";
+        SetInfo("尚未选择答卷", "请从当前考试的学生答卷中选择一张，继续识别与复核。", InfoBarSeverity.Informational);
+        UpdateWorkflowButtons();
+    }
+
+    private bool RequiresCandidateAssociation => _layout?.SchoolDefinition is not null
+        && (_recognitionResult?.CandidateIdentity is not { RequiresReview: false, CandidateId: not null });
+    private string CandidateAssociationNotice => RequiresCandidateAssociation
+        ? " 考生身份尚未确认，请先核实考号及页面归属；当前页分数不能作为学生最终成绩。"
+        : _layout?.SchoolDefinition is not null ? " 当前分数仅为本页选择题小计；完整成绩仍须核对全部页面并完成主观题批阅。" : "";
+
     /// <summary>Loads and validates the template-linked layout and original image.</summary>
     public void SetCapture(CaptureRecord capture)
     {
@@ -315,6 +364,11 @@ public sealed partial class RecognitionPage : Page
         _recognitionCancellation?.Cancel();
         _scoreCancellation?.Cancel();
         _reviewCancellation?.Cancel();
+        if (capture.TemplateLayout?.SchoolMetadata?.ExamId != _answerKeyExamId)
+        {
+            _answerKeyExamId = null;
+            _examAnswers = new Dictionary<int, string>();
+        }
         _capture = capture;
         _layout = null;
         _recognitionResult = null;
@@ -352,7 +406,12 @@ public sealed partial class RecognitionPage : Page
         AssociationStatusText.Text = "已验证模板关联信息和原图。";
         SetInfo("已载入采集记录", "识别将使用已关联的模板，不会从原图自行判断模板。", InfoBarSeverity.Informational);
         LoadOriginalImage(capture.ImageFilePath);
-        RunRecognitionButton.IsEnabled = _recognitionRunner is not null && !_isClosed;
+        RunRecognitionButton.IsEnabled = _recognitionRunner is not null && !_isClosed && layout!.QuestionCount > 0;
+        if (layout!.QuestionCount == 0)
+        {
+            RecognitionProgressText.Text = "当前页没有选择题，请到主观题批阅页处理答卷。";
+            SetInfo("当前页没有选择题", "原图与版式关联已验证，可继续主观题批阅。", InfoBarSeverity.Informational);
+        }
         if (_recognitionRunner is null)
         {
             RecognitionProgressText.Text = "本地识别适配器尚未连接。";
@@ -388,8 +447,10 @@ public sealed partial class RecognitionPage : Page
         _questionRows.Clear();
         foreach (var question in result.Questions.OrderBy(question => question.QuestionNumber))
         {
-            var row = new RecognitionQuestionRow(question, _layout!.OptionsPerQuestion);
-            if (previousAnswerKey.TryGetValue(question.QuestionNumber, out var expected))
+            var optionCount = _layout!.Questions.FirstOrDefault(item => item.Number == question.QuestionNumber)?.Bubbles.Count ?? _layout.OptionsPerQuestion;
+            var row = new RecognitionQuestionRow(question, optionCount, _layout.SchoolDefinition is null);
+            if (_layout.SchoolDefinition is not null) row.ExpectedAnswer = ReadSharedAnswer(row);
+            if (_layout.SchoolDefinition is null && previousAnswerKey.TryGetValue(question.QuestionNumber, out var expected))
             {
                 row.ExpectedAnswer = expected;
             }
@@ -407,6 +468,9 @@ public sealed partial class RecognitionPage : Page
             RecognitionStatus.ReviewRequired => "识别完成但仍需复核；设置完整标准答案后可生成待复核评分。",
             _ => "当前识别结果已拒绝，不能评分；请检查原图和模板关联后重新识别。"
         };
+        if (_layout.SchoolDefinition is not null && result.Status != RecognitionStatus.Rejected)
+            WorkflowStatusText.Text = "已使用考试共享答案。缺少答案时，请到考试的答案与评分页补充；本页保留人工复核。";
+        WorkflowStatusText.Text += CandidateAssociationNotice;
         RecognitionProgressText.Text = "本地识别完成。";
         RecognitionProgressBar.Visibility = Visibility.Collapsed;
         SetInfo(
@@ -414,7 +478,9 @@ public sealed partial class RecognitionPage : Page
             result.Status == RecognitionStatus.Accepted
                 ? "题目结果已载入；置信指标是启发式质量指标，不代表准确率。"
                 : "结果包含定位、方向或填涂诊断，请对照原图处理后再评分。",
-            result.Status == RecognitionStatus.Accepted ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+            result.Status == RecognitionStatus.Accepted && !RequiresCandidateAssociation ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+        if (RequiresCandidateAssociation)
+            SetInfo("考生身份待确认", CandidateAssociationNotice.Trim(), InfoBarSeverity.Warning);
         UpdateWorkflowButtons();
     }
 
@@ -454,7 +520,10 @@ public sealed partial class RecognitionPage : Page
 
         try
         {
-            var progress = new Progress<RecognitionProgressUpdate>(UpdateRecognitionProgress);
+            var progress = new Progress<RecognitionProgressUpdate>(update =>
+            {
+                if (ReferenceEquals(_capture, activeCapture) && !cancellation.IsCancellationRequested) UpdateRecognitionProgress(update);
+            });
             var result = await _recognitionRunner(context, progress, cancellation.Token);
             if (!_isClosed && ReferenceEquals(_capture, activeCapture))
             {
@@ -463,6 +532,7 @@ public sealed partial class RecognitionPage : Page
         }
         catch (OperationCanceledException)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             if (!_isClosed)
             {
                 RecognitionProgressText.Text = "识别已取消，未生成新的评分结果。";
@@ -471,6 +541,7 @@ public sealed partial class RecognitionPage : Page
         }
         catch (Exception exception)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             RecognitionProgressBar.Visibility = Visibility.Collapsed;
             RecognitionProgressText.Text = FormatFailure("本地识别失败", exception, "请检查原图和模板关联后重试。");
             SetInfo("本地识别失败", RecognitionProgressText.Text, InfoBarSeverity.Error);
@@ -518,6 +589,7 @@ public sealed partial class RecognitionPage : Page
 
         _scoreCancellation = new CancellationTokenSource();
         var cancellation = _scoreCancellation;
+        var activeCapture = _capture;
         BeginOperation();
         ScoreButton.IsEnabled = false;
         UpdateWorkflowButtons();
@@ -525,22 +597,27 @@ public sealed partial class RecognitionPage : Page
         try
         {
             var score = await _scoreRunner(_layout!, _reviewSession!, answerKey, cancellation.Token);
+            if (_isClosed || cancellation.IsCancellationRequested || !ReferenceEquals(_capture, activeCapture)) return;
             _score = score;
             WorkflowStatusText.Text = score is null
                 ? "评分没有返回结果。"
-                : $"评分完成：{score.Summary}";
+                : _layout?.SchoolDefinition is not null
+                    ? $"本页选择题小计：{score.TotalScore}/{score.MaxScore} 分。{CandidateAssociationNotice}"
+                    : $"评分完成：{score.Summary}";
             SetInfo(
                 "评分完成",
                 "评分使用的是你逐题设置的标准答案，未把本张填涂自动当作答案。"
-                + (score?.Source?.IsProvisional == true ? " 当前结果仍有题目需要复核。" : string.Empty),
-                score?.Source?.IsProvisional == true ? InfoBarSeverity.Warning : InfoBarSeverity.Success);
+                + (score?.Source?.IsProvisional == true ? " 当前结果仍有题目需要复核。" : string.Empty) + CandidateAssociationNotice,
+                score?.Source?.IsProvisional == true || RequiresCandidateAssociation ? InfoBarSeverity.Warning : InfoBarSeverity.Success);
         }
         catch (OperationCanceledException)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             WorkflowStatusText.Text = "评分已取消。";
         }
         catch (Exception exception)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             WorkflowStatusText.Text = FormatFailure("评分失败", exception, "请检查标准答案后重试。");
             SetInfo("评分失败", WorkflowStatusText.Text, InfoBarSeverity.Error);
         }
@@ -576,6 +653,7 @@ public sealed partial class RecognitionPage : Page
 
         _reviewCancellation = new CancellationTokenSource();
         var cancellation = _reviewCancellation;
+        var activeCapture = _capture;
         BeginOperation();
         ApplyReviewButton.IsEnabled = false;
         UpdateWorkflowButtons();
@@ -589,6 +667,7 @@ public sealed partial class RecognitionPage : Page
                 hasAnswerKey ? answerKey : null,
                 edits,
                 cancellation.Token);
+            if (_isClosed || cancellation.IsCancellationRequested || !ReferenceEquals(_capture, activeCapture)) return;
             if (review is null)
             {
                 WorkflowStatusText.Text = "人工修订没有返回结果。";
@@ -606,16 +685,18 @@ public sealed partial class RecognitionPage : Page
 
                 RenderAuditTrail();
                 WorkflowStatusText.Text =
-                    $"已应用 {_auditTrail.Count} 条人工修订；原识别结果仍保留在审计信息中。";
+                    $"已应用 {_auditTrail.Count} 条人工修订；原识别结果仍保留在审计信息中。{CandidateAssociationNotice}";
                 SetInfo("人工修订已保存", "后续导出会同时保留原识别、修订结果和修订原因。", InfoBarSeverity.Success);
             }
         }
         catch (OperationCanceledException)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             WorkflowStatusText.Text = "人工修订已取消，原识别结果未改变。";
         }
         catch (Exception exception)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             WorkflowStatusText.Text = FormatFailure("人工修订失败", exception, "请检查修订原因后重试。");
             SetInfo("人工修订失败", WorkflowStatusText.Text, InfoBarSeverity.Error);
         }
@@ -664,10 +745,12 @@ public sealed partial class RecognitionPage : Page
             return;
         }
 
+        var activeCapture = _capture;
         try
         {
             var request = CreateExportRequest();
             var content = await _exportRunner(request, format, CancellationToken.None);
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             if (content is null)
             {
                 ExportStatusText.Text = "导出服务没有返回内容。";
@@ -676,16 +759,18 @@ public sealed partial class RecognitionPage : Page
 
             var extension = format == RecognitionExportFormat.Json ? ".json" : ".csv";
             var saveResult = await _saveTextAsync(
-                $"omrina-recognition-{_capture.Manifest.CaptureId[..Math.Min(12, _capture.Manifest.CaptureId.Length)]}",
+                $"omrina-recognition-{activeCapture.Manifest.CaptureId[..Math.Min(12, activeCapture.Manifest.CaptureId.Length)]}",
                 extension,
                 content,
                 CancellationToken.None);
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             ExportStatusText.Text = saveResult.Cancelled
                 ? "已取消导出，未写入文件。"
                 : $"已导出 {format.ToString().ToUpperInvariant()}：{saveResult.Path ?? "已选择文件"}";
         }
         catch (Exception exception)
         {
+            if (_isClosed || !ReferenceEquals(_capture, activeCapture)) return;
             ExportStatusText.Text = FormatFailure("导出失败", exception, "请重新选择保存位置后重试。");
         }
     }
@@ -731,7 +816,7 @@ public sealed partial class RecognitionPage : Page
 
     private void SetRecognitionBusy(bool busy)
     {
-        RunRecognitionButton.IsEnabled = !busy && !_isClosed && _recognitionRunner is not null && _layout is not null;
+        RunRecognitionButton.IsEnabled = !busy && !_isClosed && _recognitionRunner is not null && _layout is { QuestionCount: > 0 };
         CancelRecognitionButton.IsEnabled = busy && !_isClosed;
         QuestionList.IsEnabled = !busy
             && !_isClosed
@@ -780,7 +865,7 @@ public sealed partial class RecognitionPage : Page
         out string error)
     {
         var values = new Dictionary<int, string>();
-        if (_layout is null || _questionRows.Count != _layout.QuestionCount)
+        if (_layout is null || _layout.QuestionCount == 0 || _questionRows.Count != _layout.QuestionCount)
         {
             answerKey = values;
             error = "识别结果未覆盖模板的全部题目，不能评分。";
@@ -878,7 +963,7 @@ public sealed partial class RecognitionPage : Page
     {
         layout = null;
         var manifest = capture.Manifest;
-        if (manifest.TemplateSchemaVersion is not (AnswerSheetLayout.TemplateSchemaVersion or AnswerSheetLayout.MixedTemplateSchemaVersion))
+        if (manifest.TemplateSchemaVersion is not (AnswerSheetLayout.TemplateSchemaVersion or AnswerSheetLayout.MixedTemplateSchemaVersion or AnswerSheetLayout.SchoolTemplateSchemaVersion))
         {
             message = "关联模板版本与当前支持版本不一致。";
             return false;

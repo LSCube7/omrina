@@ -1,3 +1,4 @@
+using System.Xml.Linq;
 using Omrina.Core;
 using Microsoft.UI;
 using Microsoft.UI.Text;
@@ -27,6 +28,11 @@ internal static class TemplateRenderer
             throw new ArgumentOutOfRangeException(nameof(unitsPerMillimetre));
         }
 
+        if (layout.SchoolDefinition is not null)
+        {
+            RenderSchool(layout, canvas, unitsPerMillimetre, showPageOutline);
+            return;
+        }
         canvas.Children.Clear();
         canvas.Width = AnswerSheetLayout.PageWidthMm * unitsPerMillimetre;
         canvas.Height = AnswerSheetLayout.PageHeightMm * unitsPerMillimetre;
@@ -140,6 +146,8 @@ internal static class TemplateRenderer
             throw new ArgumentOutOfRangeException(nameof(unitsPerMillimetre));
         }
 
+        if (layout.SchoolDefinition is not null)
+            return SchoolBounds(layout, unitsPerMillimetre);
         var minimumX = double.MaxValue;
         var minimumY = double.MaxValue;
         var maximumX = double.MinValue;
@@ -218,6 +226,72 @@ internal static class TemplateRenderer
             minimumY * unitsPerMillimetre,
             (maximumX - minimumX) * unitsPerMillimetre,
             (maximumY - minimumY) * unitsPerMillimetre);
+    }
+
+    // Read the engine's controlled SVG so paper preview, print and export share geometry.
+    private static IEnumerable<XElement> SchoolElements(AnswerSheetLayout layout) =>
+        XDocument.Parse(layout.ToSvg()).Root!.Elements();
+    private static double Attribute(XElement element, string name, double fallback = 0) =>
+        double.TryParse((string?)element.Attribute(name), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : fallback;
+    private static Brush? SvgBrush(string? value) => value switch
+    {
+        "none" => null,
+        "white" or "#ffffff" => WhiteBrush,
+        _ => BlackBrush
+    };
+    private static Rect ElementBounds(XElement element)
+    {
+        var kind = element.Name.LocalName;
+        if (kind == "circle") { var radius = Attribute(element, "r"); return new(Attribute(element, "cx") - radius, Attribute(element, "cy") - radius, radius * 2, radius * 2); }
+        if (kind == "text")
+        {
+            var size = Attribute(element, "font-size", 3); var width = EstimateTextWidthMm(element.Value, size);
+            var x = Attribute(element, "x"); var anchor = (string?)element.Attribute("text-anchor");
+            if (anchor == "middle") x -= width / 2; else if (anchor == "end") x -= width;
+            return new(x, Attribute(element, "y") - size, width, size * 1.3);
+        }
+        if (kind == "line") return new(Math.Min(Attribute(element, "x1"), Attribute(element, "x2")), Math.Min(Attribute(element, "y1"), Attribute(element, "y2")), Math.Abs(Attribute(element, "x2") - Attribute(element, "x1")), Math.Abs(Attribute(element, "y2") - Attribute(element, "y1")));
+        return new(Attribute(element, "x"), Attribute(element, "y"), Attribute(element, "width"), Attribute(element, "height"));
+    }
+    private static Rect SchoolBounds(AnswerSheetLayout layout, double scale)
+    {
+        double left = double.MaxValue, top = double.MaxValue, right = double.MinValue, bottom = double.MinValue;
+        foreach (var element in SchoolElements(layout))
+        {
+            if (element.Name.LocalName is not ("rect" or "circle" or "text" or "line")) continue;
+            if ((string?)element.Attribute("fill") == "white" && Attribute(element, "width") == layout.WidthMm) continue;
+            var bounds = ElementBounds(element); var stroke = Attribute(element, "stroke-width") / 2;
+            left = Math.Min(left, bounds.Left - stroke); top = Math.Min(top, bounds.Top - stroke);
+            right = Math.Max(right, bounds.Right + stroke); bottom = Math.Max(bottom, bounds.Bottom + stroke);
+        }
+        return new(left * scale, top * scale, (right - left) * scale, (bottom - top) * scale);
+    }
+    private static void RenderSchool(AnswerSheetLayout layout, Canvas canvas, double scale, bool outline)
+    {
+        canvas.Children.Clear(); canvas.Width = layout.WidthMm * scale; canvas.Height = layout.HeightMm * scale; canvas.Background = WhiteBrush;
+        foreach (var element in SchoolElements(layout))
+        {
+            var kind = element.Name.LocalName;
+            if (kind is "metadata" or "title") continue;
+            var bounds = ElementBounds(element);
+            if (kind == "text")
+            {
+                AddText(canvas, element.Value, bounds.Left, bounds.Top, bounds.Width, Attribute(element, "font-size", 3), TextAlignment.Left, scale);
+                continue;
+            }
+            if (kind == "line")
+            {
+                AddShape(canvas, new Line { X1 = Attribute(element, "x1") * scale, X2 = Attribute(element, "x2") * scale, Y1 = Attribute(element, "y1") * scale, Y2 = Attribute(element, "y2") * scale, Stroke = BlackBrush, StrokeThickness = Attribute(element, "stroke-width", .2) * scale }, 0, 0);
+                continue;
+            }
+            Shape shape = kind switch { "rect" => new Rectangle(), "circle" => new Ellipse(), _ => throw new InvalidOperationException($"答题卡包含暂不支持的图形：{kind}。") };
+            shape.Width = bounds.Width * scale; shape.Height = bounds.Height * scale;
+            shape.Fill = SvgBrush((string?)element.Attribute("fill"));
+            shape.Stroke = element.Attribute("stroke") is null ? null : SvgBrush((string?)element.Attribute("stroke"));
+            shape.StrokeThickness = Attribute(element, "stroke-width", .2) * scale;
+            AddShape(canvas, shape, bounds.Left * scale, bounds.Top * scale);
+        }
+        if (outline) AddShape(canvas, new Rectangle { Width = canvas.Width, Height = canvas.Height, Stroke = BlackBrush, StrokeThickness = 1 }, 0, 0);
     }
 
     private static double EstimateTextWidthMm(string text, double fontSizeMillimetres)

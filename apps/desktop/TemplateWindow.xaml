@@ -1,126 +1,94 @@
-<Page
-    x:Class="Omrina.Desktop.TemplatePage"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:automation="using:Microsoft.UI.Xaml.Automation"
-    NavigationCacheMode="Required">
-
-    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-        <StackPanel Padding="24" Spacing="16">
-            <StackPanel Spacing="4">
-                <TextBlock Text="OMRINA 模板" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
-                <TextBlock Text="设置题数和选项，预览并保存可打印的 A4 答题纸。" TextWrapping="Wrap" />
-            </StackPanel>
-
-            <StackPanel Spacing="8">
-                <TextBox x:Name="TitleBox" Header="标题" Text="答题纸" PlaceholderText="最多 24 个字符，不能换行" TextChanged="TitleBox_TextChanged" automation:AutomationProperties.Name="标题" />
-                <NumberBox x:Name="QuestionCountBox" Header="题数" Value="20" Minimum="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberBox_ValueChanged" automation:AutomationProperties.Name="题数" />
-                <NumberBox x:Name="OptionsPerQuestionBox" Header="每题选项数" Value="4" Minimum="2" Maximum="6" SpinButtonPlacementMode="Inline" ValueChanged="NumberBox_ValueChanged" automation:AutomationProperties.Name="每题选项数" />
-            </StackPanel>
-
-            <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                <StackPanel Spacing="10">
-                    <TextBlock Text="主观题区域（可选）" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock
-                        Text="在 A4 纸面上用毫米定义题目框。坐标原点在左上角；题号需排在选择题之后，区域不能重叠。生成预览后，保存和打印都使用同一版式。"
-                        TextWrapping="Wrap" />
-                    <Grid ColumnSpacing="12" RowSpacing="8" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto">
-                        <TextBox
-                            x:Name="SubjectiveQuestionNumberBox"
-                            Header="主观题题号"
-                            Text="21"
-                            MaxLength="10"
-                            TextChanged="SubjectiveRegionInput_TextChanged"
-                            automation:AutomationProperties.Name="主观题题号" />
-                        <TextBox
-                            x:Name="SubjectiveMaximumScoreBox"
-                            Grid.Column="1"
-                            Header="满分"
-                            Text="10"
-                            MaxLength="32"
-                            TextChanged="SubjectiveRegionInput_TextChanged"
-                            automation:AutomationProperties.Name="主观题满分" />
-                        <TextBox
-                            x:Name="SubjectiveRegionXBox"
-                            Grid.Row="1"
-                            Header="左上角 X（毫米）"
-                            PlaceholderText="例如 12.5"
-                            MaxLength="32"
-                            TextChanged="SubjectiveRegionInput_TextChanged"
-                            automation:AutomationProperties.Name="主观题区域左上角 X 毫米" />
-                        <TextBox
-                            x:Name="SubjectiveRegionYBox"
-                            Grid.Row="1"
-                            Grid.Column="1"
-                            Header="左上角 Y（毫米）"
-                            PlaceholderText="例如 100"
-                            MaxLength="32"
-                            TextChanged="SubjectiveRegionInput_TextChanged"
-                            automation:AutomationProperties.Name="主观题区域左上角 Y 毫米" />
-                        <TextBox
-                            x:Name="SubjectiveRegionWidthBox"
-                            Grid.Row="2"
-                            Header="宽度（毫米）"
-                            PlaceholderText="至少 40"
-                            MaxLength="32"
-                            TextChanged="SubjectiveRegionInput_TextChanged"
-                            automation:AutomationProperties.Name="主观题区域宽度毫米" />
-                        <TextBox
-                            x:Name="SubjectiveRegionHeightBox"
-                            Grid.Row="2"
-                            Grid.Column="1"
-                            Header="高度（毫米）"
-                            PlaceholderText="至少 10"
-                            MaxLength="32"
-                            TextChanged="SubjectiveRegionInput_TextChanged"
-                            automation:AutomationProperties.Name="主观题区域高度毫米" />
-                    </Grid>
+<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="Omrina.Desktop.TemplatePage" NavigationCacheMode="Required">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="24" Spacing="12">
+            <TextBlock Text="编排答题卡" Style="{StaticResource TitleTextBlockStyle}"/>
+            <Grid x:Name="EditorGrid" ColumnSpacing="16" RowSpacing="16" SizeChanged="EditorGrid_SizeChanged" ColumnDefinitions="340,*" RowDefinitions="Auto,Auto">
+                <StackPanel x:Name="EditorPanel" Spacing="10">
+                    <Expander Header="考试与纸张" IsExpanded="True" HorizontalAlignment="Stretch">
+                        <ContentControl x:Name="SettingsPanel" HorizontalContentAlignment="Stretch">
+                            <StackPanel Spacing="8">
+                                <TextBox x:Name="ExamIdBox" Header="考试编号" Text="" TextChanged="InputChanged"/>
+                                <TextBox x:Name="TitleBox" Header="考试标题" Text="答题纸" TextChanged="InputChanged"/>
+                                <NumberBox x:Name="VersionBox" Header="版式版本" Value="1" Minimum="1" Maximum="1000000" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                                <ComboBox x:Name="PaperBox" Header="纸张" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                    <ComboBoxItem Content="A4 纵向"/>
+                                    <ComboBoxItem Content="A3 横向"/>
+                                </ComboBox>
+                                <ComboBox x:Name="ColumnsBox" Header="A3 分栏" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                    <ComboBoxItem Content="两栏"/>
+                                    <ComboBoxItem Content="三栏"/>
+                                </ComboBox>
+                                <ComboBox x:Name="ModeBox" Header="内容模式" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                    <ComboBoxItem Content="独立答题卡"/>
+                                    <ComboBoxItem Content="包含题目正文"/>
+                                </ComboBox>
+                                <CheckBox x:Name="DuplexBox" Content="双面打印" Checked="CheckChanged" Unchecked="CheckChanged"/>
+                                <CheckBox x:Name="RepeatIdentityBox" Content="反面重复考生身份区" IsChecked="True" Checked="CheckChanged" Unchecked="CheckChanged"/>
+                                <ComboBox x:Name="IdentityBox" Header="考号填写" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                    <ComboBoxItem Content="条码"/>
+                                    <ComboBoxItem Content="涂卡"/>
+                                </ComboBox>
+                                <NumberBox x:Name="DigitsBox" Header="考号位数" Value="8" Minimum="1" Maximum="20" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                                <TextBox x:Name="CandidateIdBox" Header="预印考号（条码可选）" Text="" TextChanged="InputChanged"/>
+                                <ComboBox x:Name="ShapeBox" Header="填涂框" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                    <ComboBoxItem Content="圆形"/>
+                                    <ComboBoxItem Content="矩形"/>
+                                </ComboBox>
+                                <ComboBox x:Name="LabelBox" Header="字母和数字位置" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                    <ComboBoxItem Content="框外"/>
+                                    <ComboBoxItem Content="框内"/>
+                                </ComboBox>
+                                <NumberBox x:Name="BubbleWidthBox" Header="圆框直径 / 矩形宽（毫米）" Value="1.8" Minimum="0.1" Maximum="2" SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                                <NumberBox x:Name="BubbleHeightBox" Header="矩形高（毫米）" Value="1.8" Minimum="0.1" Maximum="4" SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                            </StackPanel>
+                        </ContentControl>
+                    </Expander>
+                    <TextBlock Text="题目" Style="{StaticResource SubtitleTextBlockStyle}"/>
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button x:Name="AddSubjectiveRegionButton" Click="AddSubjectiveRegionButton_Click" automation:AutomationProperties.Name="添加主观题区域">
-                            <TextBlock Text="添加主观题区域" />
-                        </Button>
-                        <Button x:Name="RemoveSubjectiveRegionButton" Click="RemoveSubjectiveRegionButton_Click" IsEnabled="False" automation:AutomationProperties.Name="移除所选主观题区域">
-                            <TextBlock Text="移除所选区域" />
-                        </Button>
+                        <Button x:Name="AddQuestionButton" Content="添加题目" Click="AddQuestion_Click"/>
+                        <Button x:Name="RemoveQuestionButton" Content="删除所选题目" Click="RemoveQuestion_Click"/>
                     </StackPanel>
-                    <ListView
-                        x:Name="SubjectiveRegionList"
-                        SelectionMode="Single"
-                        SelectionChanged="SubjectiveRegionList_SelectionChanged"
-                        MaxHeight="220"
-                        automation:AutomationProperties.Name="模板主观题区域列表">
+                    <ListView x:Name="QuestionList" MaxHeight="180" SelectionChanged="QuestionList_SelectionChanged">
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap"/>
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <TextBlock x:Name="SubjectiveRegionStatusText" Text="尚未添加主观题区域。" TextWrapping="Wrap" />
+                    <ContentControl x:Name="QuestionPanel" HorizontalContentAlignment="Stretch">
+                        <StackPanel Spacing="8">
+                            <NumberBox x:Name="QuestionNumberBox" Header="题号" Value="1" Minimum="1" Maximum="1000000" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                            <ComboBox x:Name="QuestionTypeBox" Header="题型" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                                <ComboBoxItem Content="选择题"/>
+                                <ComboBoxItem Content="解答题"/>
+                            </ComboBox>
+                            <NumberBox x:Name="ScoreBox" Header="满分" Value="1" Minimum="0.01" Maximum="1000000" SmallChange="0.5" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                            <TextBox x:Name="BodyBox" Header="题目正文" Text="" TextChanged="InputChanged" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90"/>
+                            <NumberBox x:Name="OptionCountBox" Header="选项数" Value="4" Minimum="2" Maximum="6" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                            <TextBox x:Name="OptionsBox" Header="选项正文（每行一个，按 A–F 顺序）" Text="" TextChanged="InputChanged" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90"/>
+                            <NumberBox x:Name="HeightBox" Header="本题答题区高（毫米）" Value="30" Minimum="10" Maximum="230" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                            <TextBlock Text="解答区宽度自动占满所在栏。图片正文暂未提供，请使用文字；不会自动导入图片。" TextWrapping="Wrap"/>
+                            <Button x:Name="ApplyQuestionButton" Content="应用所选题目" Click="ApplyQuestion_Click"/>
+                        </StackPanel>
+                    </ContentControl>
                 </StackPanel>
-            </Border>
-
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <Button x:Name="GenerateButton" Click="GenerateButton_Click">
-                    <TextBlock Text="生成预览" />
-                </Button>
-                <Button x:Name="SaveSvgButton" Click="SaveSvgButton_Click">
-                    <TextBlock Text="保存 SVG" />
-                </Button>
-                <Button x:Name="PrintButton" Click="PrintButton_Click">
-                    <TextBlock Text="系统打印" />
-                </Button>
-                <Button x:Name="ImportButton" Click="ImportButton_Click">
-                    <TextBlock Text="导入图像" />
-                </Button>
-            </StackPanel>
-
-            <TextBlock x:Name="TemplateStatusText" Text="填写参数后生成预览。" TextWrapping="Wrap" />
-
-            <Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Background="White">
-                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-                    <Canvas x:Name="PreviewCanvas" Width="420" Height="594" Background="White" />
-                </ScrollViewer>
-            </Border>
+                <StackPanel x:Name="PreviewPanel" Grid.Column="1" Spacing="10">
+                    <StackPanel Spacing="8">
+                        <Button x:Name="GenerateButton" Content="生成并保存版式" Click="GenerateButton_Click"/>
+                        <Button x:Name="SaveSvgButton" Content="保存当前页 SVG" Click="SaveSvgButton_Click"/>
+                        <Button x:Name="PrintButton" Content="打印整份答题卡" Click="PrintButton_Click"/>
+                        <Button x:Name="ImportButton" Content="采集当前页" Click="ImportButton_Click"/>
+                    </StackPanel>
+                    <TextBlock x:Name="SummaryText" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="TemplateStatusText" TextWrapping="Wrap"/>
+                    <ComboBox x:Name="PagePicker" Header="预览页" SelectionChanged="PagePicker_SelectionChanged"/>
+                    <Border Background="White" BorderBrush="Gray" BorderThickness="1">
+                        <Viewbox Stretch="Uniform" HorizontalAlignment="Stretch">
+                            <Canvas x:Name="PreviewCanvas" Background="White"/>
+                        </Viewbox>
+                    </Border>
+                </StackPanel>
+            </Grid>
         </StackPanel>
     </ScrollViewer>
 </Page>
