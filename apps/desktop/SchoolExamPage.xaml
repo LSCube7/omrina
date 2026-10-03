@@ -10,6 +10,9 @@
                 <Button Content="新建考试" Click="NewExam_Click" />
                 <Button Content="刷新列表" Click="Refresh_Click" />
             </StackPanel>
+            <Button x:Name="ImportBundleButton" Content="导入离线资料包" Click="ImportBundle_Click" IsEnabled="False" HorizontalAlignment="Left" />
+            <Button x:Name="ExportBundleButton" Content="导出当前考试资料包" Click="ExportBundle_Click" IsEnabled="False" HorizontalAlignment="Left" />
+            <TextBlock Text="资料包只包含答题纸模板；如模板使用预印考号，该号码也会一并导出。已扫描答卷、标准答案和评分记录不会导出。" TextWrapping="Wrap" />
             <TextBlock x:Name="CurrentExamText" Text="尚未选择考试。" TextWrapping="Wrap" FontWeight="SemiBold" />
             <ListView x:Name="ExamList" SelectionChanged="ExamList_SelectionChanged" MaxHeight="420">
                 <ListView.ItemTemplate>

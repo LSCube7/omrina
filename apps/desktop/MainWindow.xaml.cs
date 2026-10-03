@@ -38,10 +38,11 @@ public sealed partial class MainWindow : Window
 
         _statusPage = new StatusPage();
         _examStore = new SchoolExamStore(_captureStore.RootDirectory);
-        _examPage = new SchoolExamPage(_examStore.ListDefinitions);
+        _examPage = new SchoolExamPage(_examStore.ReadCatalog);
         _answerKeyPage = new ExamAnswerKeyPage(_examStore.ReadAnswerKey, _examStore.SaveAnswerKey);
         _aboutPage = new AboutPage();
         _fileDialogService = DesktopPlatformFactory.CreateFileDialogs(this);
+        _examPage.ConfigureTemplateBundleTransfer(ExportSchoolTemplateBundleAsync, ImportSchoolTemplateBundleAsync);
         _scannerService = new SerializedScannerService(
             DesktopPlatformFactory.CreateScanner(_captureStore.RootDirectory));
         _recognitionService = new SkiaAnswerSheetRecognitionService();
@@ -384,6 +385,18 @@ public sealed partial class MainWindow : Window
             ".svg",
             layout.ToSvg());
         return new SvgSaveResult(result.Cancelled, result.Path);
+    }
+
+    private async Task<FileSaveResult> ExportSchoolTemplateBundleAsync(SchoolSheetDefinition definition)
+    {
+        var content = await Task.Run(() => _examStore.ExportTemplateBundle(definition));
+        return await _fileDialogService.SaveTextAsync("omrina-school-template", ".json", content);
+    }
+
+    private async Task<SchoolSheetDefinition?> ImportSchoolTemplateBundleAsync()
+    {
+        var content = await _fileDialogService.PickTemplateBundleJsonAsync();
+        return content is null ? null : await Task.Run(() => _examStore.ImportTemplateBundle(content));
     }
 
     private Task<FileSaveResult> SaveTextAsync(

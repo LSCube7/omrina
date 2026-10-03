@@ -77,9 +77,11 @@
                     </ListView>
                     <StackPanel Spacing="8">
                         <TextBox x:Name="GroupTitleBox" Header="题组名称" MaxLength="60" TextChanged="GroupTitleChanged" HorizontalAlignment="Stretch"/>
+                        <NumberBox x:Name="GroupChoiceColumnsBox" Header="客观题组每行题数（1–3）" Value="1" Minimum="1" Maximum="3" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="GroupChoiceColumnsChanged"/>
+                        <TextBlock Text="仅独立答题卡中的选择题组可设为每行 2 或 3 题。" TextWrapping="Wrap"/>
                         <Button x:Name="ApplyGroupTitleButton" Content="应用组名" Click="ApplyGroupTitle_Click"/>
                     </StackPanel>
-                    <TextBlock Text="题组用于安排排版与题目顺序；组级裁切与阅卷映射将在后续版本实现。" TextWrapping="Wrap"/>
+                    <TextBlock Text="题组用于安排排版与题目顺序。" TextWrapping="Wrap"/>
                     <ContentControl x:Name="QuestionPanel" HorizontalContentAlignment="Stretch">
                         <StackPanel Spacing="8">
                             <NumberBox x:Name="QuestionNumberBox" Header="题号" Value="1" Minimum="1" Maximum="1000000" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>

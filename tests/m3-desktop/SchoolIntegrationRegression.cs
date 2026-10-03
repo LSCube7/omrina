@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Omrina.Core;
 using Omrina.Desktop;
 using Omrina.Platform;
@@ -21,8 +22,11 @@ internal static class SchoolIntegrationRegression
             ExamId = "school-http-exam", LayoutDocumentId = "school-http-layout", Title = "学校 SDK 测试",
             Paper = SchoolPaper.A3Landscape, Columns = 3,
             CandidateIdentity = new(CandidateIdentityMode.Barcode, 4, "0123"),
-            Questions = [new(7, SchoolQuestionType.Choice, 2, Options: ["甲", "乙"]), new(15, SchoolQuestionType.Subjective, 5)],
-            Groups = [new("choice-group", "选择题组", [7]), new("written-group", "解答题组", [15])],
+            Questions = [new(7, SchoolQuestionType.Choice, 2, Options: ["甲", "乙"]),
+                new(15, SchoolQuestionType.Subjective, 5, SubjectiveHeightMm: 30),
+                new(16, SchoolQuestionType.Subjective, 6, SubjectiveHeightMm: 30)],
+            Groups = [new("choice-group", "选择题组", [7], ChoiceColumns: 2),
+                new("g.1", "解答题组", [15, 16])],
             LayoutOrder = SchoolLayoutOrder.Mixed
         };
         var fixture = Path.Combine(root, "school.png");
@@ -47,6 +51,7 @@ internal static class SchoolIntegrationRegression
 
     public static async Task RunAsync()
     {
+        VerifyInvalidCatalogRecordDoesNotBlockTemplates();
         var root = Path.Combine(Path.GetTempPath(), "omrina-school-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
@@ -182,6 +187,71 @@ internal static class SchoolIntegrationRegression
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    private static void VerifyInvalidCatalogRecordDoesNotBlockTemplates()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "omrina-school-catalog-" + Guid.NewGuid().ToString("N"));
+        var examDirectory = Path.Combine(root, "school-exams");
+        Directory.CreateDirectory(examDirectory);
+        try
+        {
+            var legacyDefinition = StoreTestDefinition("legacy-exam", "legacy-layout", "旧格式模板");
+            var legacyNode = JsonNode.Parse(SchoolAnswerSheet.Create(legacyDefinition).Pages[0].ToJson())!.AsObject();
+            var groups = legacyNode["definition"]!["groups"]!.AsArray();
+            groups[0]!.AsObject().Remove("choiceColumns");
+            var legacyPath = Path.Combine(examDirectory, "legacy-record.layout.json");
+            File.WriteAllText(legacyPath, legacyNode.ToJsonString(), new System.Text.UTF8Encoding(false));
+            var originalLegacyContents = File.ReadAllBytes(legacyPath);
+
+            var store = new SchoolExamStore(root);
+            var diagnosticCatalog = store.ReadCatalog();
+            Check(diagnosticCatalog.Definitions.Count == 0 && diagnosticCatalog.Diagnostics.Count == 1,
+                "legacy template without choiceColumns should be reported as a catalog diagnostic");
+
+            var sourceStore = new SchoolExamStore(Path.Combine(root, "source"));
+            var importedDefinition = StoreTestDefinition("imported-exam", "imported-layout", "导入模板");
+            sourceStore.SaveDefinition(importedDefinition);
+            var imported = store.ImportTemplateBundle(sourceStore.ExportTemplateBundle(importedDefinition));
+            Check(imported.ExamId == importedDefinition.ExamId,
+                "a valid bundle should import even when an invalid legacy record is present");
+
+            var savedDefinition = StoreTestDefinition("new-exam", "new-layout", "新模板");
+            Check(store.SaveDefinition(savedDefinition).ExamId == savedDefinition.ExamId,
+                "a new valid exam should save even when an invalid legacy record is present");
+            var catalog = store.ReadCatalog();
+            Check(catalog.Definitions.Count == 2 && catalog.Diagnostics.Count == 1,
+                "valid imported and saved exams should remain available alongside the legacy diagnostic");
+            Check(File.ReadAllBytes(legacyPath).SequenceEqual(originalLegacyContents),
+                "catalog reads and new writes should preserve the invalid legacy file byte for byte");
+
+            var existingFiles = Directory.EnumerateFiles(examDirectory, "*.layout.json")
+                .ToDictionary(path => path, File.ReadAllBytes, StringComparer.OrdinalIgnoreCase);
+            var conflictingSourceStore = new SchoolExamStore(Path.Combine(root, "conflicting-source"));
+            var conflictingDefinition = StoreTestDefinition("new-exam", "new-layout", "同版本冲突");
+            conflictingSourceStore.SaveDefinition(conflictingDefinition);
+            Expect<InvalidOperationException>(() => store.ImportTemplateBundle(
+                conflictingSourceStore.ExportTemplateBundle(conflictingDefinition)));
+            Check(existingFiles.Count == Directory.EnumerateFiles(examDirectory, "*.layout.json").Count()
+                && existingFiles.All(entry => File.ReadAllBytes(entry.Key).SequenceEqual(entry.Value)),
+                "an import targeting an existing exam version should reject without overwriting any file");
+            Console.WriteLine("PASS: school catalog preserves invalid legacy records while valid templates save and import; existing versions remain immutable.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static SchoolSheetDefinition StoreTestDefinition(string examId, string layoutId, string title) => new()
+    {
+        ExamId = examId,
+        LayoutDocumentId = layoutId,
+        Title = title,
+        Paper = SchoolPaper.A4Portrait,
+        Columns = 1,
+        Questions = [new(1, SchoolQuestionType.Choice, 2, Options: ["A", "B"])],
+        Groups = [new("choice-group", "选择题组", [1])]
+    };
+
     private static void Render(AnswerSheetLayout layout, string path)
     {
         using var bitmap = new SKBitmap((int)layout.WidthMm * 10, (int)layout.HeightMm * 10);
@@ -197,7 +267,10 @@ internal static class SchoolIntegrationRegression
             for (var y = 0; y < matrix.Height; y++) for (var x = 0; x < matrix.Width; x++)
                 if (matrix[x, y]) Rectangle(area.X + x * area.Width / matrix.Width, area.Y + y * area.Height / matrix.Height, area.Width / matrix.Width, area.Height / matrix.Height);
         }
-        Matrix(SchoolMachineCode.EncodeExam(layout.SchoolMetadata!), layout.ExamCodeArea!.Value);
+        var pageMatrix = SchoolMachineCode.EncodeExam(layout.SchoolMetadata!);
+        var pageArea = layout.ExamCodeArea!.Value;
+        var module = SchoolMachineCode.ExamModuleSizeMm;
+        Matrix(pageMatrix, new(pageArea.X + module, pageArea.Y + module, pageMatrix.Width * module, pageMatrix.Height * module));
         if (layout.SchoolDefinition!.CandidateIdentity.CandidateId is {} id && layout.CandidateArea is {} candidate)
             Matrix(SchoolMachineCode.EncodeCandidate(id), candidate);
         using var image = SKImage.FromBitmap(bitmap);

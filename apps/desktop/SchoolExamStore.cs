@@ -6,6 +6,12 @@ using Omrina.Core;
 
 namespace Omrina.Desktop;
 
+public sealed record SchoolExamCatalog(
+    IReadOnlyList<SchoolSheetDefinition> Definitions,
+    IReadOnlyList<SchoolExamCatalogDiagnostic> Diagnostics);
+
+public sealed record SchoolExamCatalogDiagnostic(string DocumentName, string ErrorType);
+
 /// <summary>App-owned immutable exam layouts and shared answer keys. Never exposed through a grant catalog.</summary>
 public sealed class SchoolExamStore
 {
@@ -27,15 +33,70 @@ public sealed class SchoolExamStore
         lock (_gate)
         {
             EnsureDirectory();
+            EnsureNoPageCodeConflicts(firstPage.SchoolDefinition!, path);
             if (File.Exists(path))
             {
-                var existing = ReadLayout(path);
+                AnswerSheetLayout existing;
+                try
+                {
+                    existing = ReadLayout(path);
+                }
+                catch (Exception exception) when (IsCatalogReadError(exception))
+                {
+                    throw new InvalidOperationException("同一答题纸版本路径已有无法读取的资料。为保护原文件，拒绝覆盖。", exception);
+                }
+
                 if (existing.ToJson() != snapshot)
                     throw new InvalidOperationException("此答题纸版本已保存。请增加版本号后保存修改，历史版本不能覆盖。");
                 return existing.SchoolDefinition!;
             }
             WriteAtomic(path, snapshot, overwrite: false);
             return firstPage.SchoolDefinition!;
+        }
+    }
+
+    public string ExportTemplateBundle(SchoolSheetDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        var canonical = GetDefinition(definition.ExamId, definition.LayoutDocumentId, definition.Version)
+            ?? throw new InvalidOperationException("请先保存答题纸版本，再导出考试资料。");
+        return SchoolTemplateBundle.Create(canonical).ToJson();
+    }
+
+    public SchoolSheetDefinition ImportTemplateBundle(string json)
+    {
+        var bundle = SchoolTemplateBundle.FromJson(json);
+        return SaveDefinition(bundle.Definition);
+    }
+
+    public SchoolTemplateBundlePage? FindPageByCode(string pageCode)
+    {
+        if (SchoolMachineCode.ParsePageCode(pageCode) is null)
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            var catalog = ReadCatalog();
+            SchoolTemplateBundlePage? match = null;
+            foreach (var definition in catalog.Definitions)
+            {
+                var page = SchoolTemplateBundle.Create(definition).FindPage(pageCode);
+                if (page is null)
+                {
+                    continue;
+                }
+
+                if (match is not null && match.Metadata != page.Metadata)
+                {
+                    throw new InvalidOperationException("本地考试资料中存在页面短标识冲突，无法安全识别。");
+                }
+
+                match = page;
+            }
+
+            return match;
         }
     }
 
@@ -116,6 +177,87 @@ public sealed class SchoolExamStore
         return layout;
     }
 
+    private void EnsureNoPageCodeConflicts(SchoolSheetDefinition definition, string destinationPath)
+    {
+        if (!Directory.Exists(_directory))
+        {
+            return;
+        }
+
+        var incomingPages = SchoolAnswerSheet.Create(definition).Pages;
+        var catalog = ReadCatalog();
+        foreach (var existingDefinition in catalog.Definitions)
+        {
+            var existingPath = DefinitionPath(
+                existingDefinition.ExamId,
+                existingDefinition.LayoutDocumentId,
+                existingDefinition.Version);
+            if (string.Equals(existingPath, destinationPath, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var existingPage in SchoolAnswerSheet.Create(existingDefinition).Pages)
+            {
+                var existingMetadata = existingPage.SchoolMetadata!;
+                var existingCode = SchoolMachineCode.PageCode(existingMetadata);
+                foreach (var incomingPage in incomingPages)
+                {
+                    var incomingMetadata = incomingPage.SchoolMetadata!;
+                    if (string.Equals(existingCode, SchoolMachineCode.PageCode(incomingMetadata), StringComparison.Ordinal)
+                        && existingMetadata != incomingMetadata)
+                    {
+                        throw new InvalidOperationException("页面短标识与已有考试资料冲突，无法保存或导入此版本。");
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Reads valid definitions while reporting each unreadable local record without changing it.</summary>
+    public SchoolExamCatalog ReadCatalog()
+    {
+        lock (_gate)
+        {
+            if (!Directory.Exists(_directory))
+            {
+                return new SchoolExamCatalog(Array.Empty<SchoolSheetDefinition>(), Array.Empty<SchoolExamCatalogDiagnostic>());
+            }
+
+            var definitions = new List<SchoolSheetDefinition>();
+            var diagnostics = new List<SchoolExamCatalogDiagnostic>();
+            string[] paths;
+            try
+            {
+                RejectLink(_directory);
+                paths = Directory.EnumerateFiles(_directory, "*.layout.json").ToArray();
+            }
+            catch (Exception exception) when (IsCatalogReadError(exception))
+            {
+                diagnostics.Add(new SchoolExamCatalogDiagnostic(Path.GetFileName(_directory), exception.GetType().Name));
+                return new SchoolExamCatalog(definitions.AsReadOnly(), diagnostics.AsReadOnly());
+            }
+
+            foreach (var path in paths)
+            {
+                try
+                {
+                    definitions.Add(ReadLayout(path).SchoolDefinition!);
+                }
+                catch (Exception exception) when (IsCatalogReadError(exception))
+                {
+                    diagnostics.Add(new SchoolExamCatalogDiagnostic(Path.GetFileName(path), exception.GetType().Name));
+                }
+            }
+
+            var orderedDefinitions = definitions
+                .OrderBy(definition => definition.Title, StringComparer.Ordinal)
+                .ThenByDescending(definition => definition.Version)
+                .ToArray();
+            return new SchoolExamCatalog(Array.AsReadOnly(orderedDefinitions), diagnostics.AsReadOnly());
+        }
+    }
+
     private static string ReadBounded(string path)
     {
         RejectLink(path);
@@ -124,6 +266,15 @@ public sealed class SchoolExamStore
         using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
         return reader.ReadToEnd();
     }
+
+    private static bool IsCatalogReadError(Exception exception)
+        => exception is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException
+            or System.Text.DecoderFallbackException
+            or System.Text.Json.JsonException
+            or ArgumentException
+            or InvalidOperationException;
 
     private void EnsureDirectory()
     {

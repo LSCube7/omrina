@@ -63,7 +63,43 @@ test("school template validates explicit homogeneous groups and preserves layout
     ],
   };
   await client.createSchoolTemplateTask({ idempotencyKey: "school-groups", parameters: { schoolDefinition: definition } });
-  assert.deepEqual(submitted.parameters.schoolDefinition, definition);
+  assert.deepEqual(submitted.parameters.schoolDefinition, {
+    ...definition,
+    groups: definition.groups.map((group) => ({ ...group, choiceColumns: 1 })),
+  });
+  assert.equal(definition.groups.every((group) => group.choiceColumns === undefined), true, "normalization must not mutate caller input");
+});
+
+test("school template groups accept row-major choice columns only for answer-only choice groups", async () => {
+  let submitted;
+  const client = new OmrinaClient({
+    fetch: async (url, init) => {
+      if (String(url).endsWith("/v1/pairing/exchange")) return new Response(JSON.stringify({ grantId: "grant", token: "token", expiresAt: "2099-01-01T00:00:00Z" }), { headers: { "Content-Type": "application/json" } });
+      submitted = JSON.parse(init.body);
+      return new Response(JSON.stringify({ taskId: "task", operation: "template", status: "queued", result: null, error: null, createdAt: "2026-10-03T00:00:00Z", updatedAt: "2026-10-03T00:00:00Z" }), { status: 202, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  await client.exchangePairing({ requestId: "pair", code: "123456" });
+  const definition = {
+    ...schoolDefinition,
+    groups: [
+      { id: "choice", title: "客观题", questionNumbers: [7], choiceColumns: 3 },
+      { id: "essay", title: "主观题", questionNumbers: [15], choiceColumns: 1 },
+    ],
+  };
+  await client.createSchoolTemplateTask({ idempotencyKey: "choice-columns", parameters: { schoolDefinition: definition } });
+  assert.deepEqual(submitted.parameters.schoolDefinition.groups, definition.groups);
+
+  const invalid = [
+    { ...definition, groups: [{ ...definition.groups[0], choiceColumns: 0 }, definition.groups[1]] },
+    { ...definition, groups: [{ ...definition.groups[0], choiceColumns: 4 }, definition.groups[1]] },
+    { ...definition, groups: [definition.groups[0], { ...definition.groups[1], choiceColumns: 2 }] },
+    { ...definition, mode: "WithQuestions" },
+  ];
+  const strictClient = new OmrinaClient({ fetch: async () => { throw new Error("must not fetch"); } });
+  for (const schoolDefinition of invalid) {
+    assert.throws(() => strictClient.createSchoolTemplateTask({ idempotencyKey: "choice-columns-invalid", parameters: { schoolDefinition } }), OmrinaSdkError);
+  }
 });
 
 test("school template rejects malformed groups and unsupported layout order before fetch", () => {

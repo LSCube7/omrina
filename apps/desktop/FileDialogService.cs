@@ -7,6 +7,8 @@ internal interface IFileDialogService
 {
     Task<IInputImageFile?> PickImageAsync(CancellationToken cancellationToken = default);
 
+    Task<string?> PickTemplateBundleJsonAsync(CancellationToken cancellationToken = default);
+
     Task<FileSaveResult> SaveTextAsync(
         string suggestedFileName,
         string extension,

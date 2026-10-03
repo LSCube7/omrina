@@ -1,5 +1,6 @@
 using Omrina.Platform;
 using Microsoft.UI.Xaml;
+using System.Text;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 
@@ -18,6 +19,8 @@ internal static partial class PlatformFileDialogService
 /// </summary>
 internal sealed class UnoDesktopFileDialogService : IFileDialogService
 {
+    private const int MaximumBundleBytes = 1024 * 1024;
+
     public async Task<IInputImageFile?> PickImageAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -29,6 +32,36 @@ internal sealed class UnoDesktopFileDialogService : IFileDialogService
         var file = await picker.PickSingleFileAsync();
         cancellationToken.ThrowIfCancellationRequested();
         return file is null ? null : new LocalInputImageFile(file.Path);
+    }
+
+    public async Task<string?> PickTemplateBundleJsonAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".json");
+
+        var file = await picker.PickSingleFileAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (file is null)
+        {
+            return null;
+        }
+
+        var properties = await file.GetBasicPropertiesAsync();
+        if (properties.Size is 0 or > MaximumBundleBytes)
+        {
+            throw new InvalidDataException("所选资料包为空或超过 1 MB。");
+        }
+
+        var json = await FileIO.ReadTextAsync(file, Windows.Storage.Streams.UnicodeEncoding.Utf8);
+        cancellationToken.ThrowIfCancellationRequested();
+        json = json.TrimStart('\uFEFF');
+        if (Encoding.UTF8.GetByteCount(json) > MaximumBundleBytes)
+        {
+            throw new InvalidDataException("所选资料包超过 1 MB。");
+        }
+
+        return json;
     }
 
     public async Task<FileSaveResult> SaveTextAsync(

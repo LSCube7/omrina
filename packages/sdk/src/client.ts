@@ -6,6 +6,7 @@ const MAX_JSON_BYTES = 64 * 1024;
 const MAX_UPLOAD_METADATA_BYTES = 4 * 1024;
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_SUBJECTIVE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_SCHOOL_TEMPLATE_BUNDLE_BYTES = 1024 * 1024;
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const INITIAL_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 5_000;
@@ -24,7 +25,9 @@ export type TaskOperation =
   | "subjectiveCreate"
   | "subjectiveRead"
   | "subjectiveGrade"
-  | "subjectiveExport";
+  | "subjectiveExport"
+  | "schoolTemplateExport"
+  | "schoolTemplateImport";
 export type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export type ProtocolError = {
@@ -110,6 +113,7 @@ export type SchoolQuestionGroupDefinition = {
   id: string;
   title: string;
   questionNumbers: number[];
+  choiceColumns?: number;
 };
 
 export type SchoolLayoutOrder = "Mixed" | "Separated";
@@ -138,6 +142,7 @@ export type SchoolQuestionGroupGeometry = {
   groupId: string;
   title: string;
   questionNumbers: number[];
+  choiceColumns: number;
   rectangleMm: TemplateMillimetreRectangle;
 };
 
@@ -157,10 +162,26 @@ export type SchoolTemplatePage = TemplateSummary & {
   pageIndex: number;
   widthMm: number;
   heightMm: number;
+  pageCode: string;
   schoolMetadata: SchoolPageMetadata;
   schoolGroups: SchoolQuestionGroupGeometry[];
 };
 export type SchoolTemplateDocument = { documentId: string; examId: string; version: number; pages: SchoolTemplatePage[] };
+export type SchoolTemplateBundlePage = {
+  pageCode: string;
+  metadata: SchoolPageMetadata;
+};
+export type SchoolTemplateBundleGroupDefinition = SchoolQuestionGroupDefinition & { choiceColumns: number };
+export type SchoolTemplateBundle = {
+  schemaVersion: 1;
+  definition: Omit<SchoolSheetDefinition, "groups"> & { groups: SchoolTemplateBundleGroupDefinition[] };
+  pages: SchoolTemplateBundlePage[];
+  hash: string;
+};
+export type SchoolTemplateExportTaskParameters = { templateId: string };
+export type SchoolTemplateImportTaskParameters = { bundle: SchoolTemplateBundle };
+export type SchoolTemplateExportResult = SchoolTemplateBundle;
+export type SchoolTemplateImportResult = SchoolTemplateDocument;
 export type SchoolIdentityStatus = "Identified" | "RequireAssociation";
 export type SchoolCaptureSummary = {
   captureId: string;
@@ -257,6 +278,7 @@ export type SubjectiveQuestionStatus = "ungraded" | "draft" | "confirmed";
 
 export type SubjectiveQuestion = {
   questionId: string;
+  imageGroupId: string | null;
   questionNumber: number;
   maxScore: number;
   region: SubjectivePixelRegion;
@@ -294,12 +316,28 @@ export type SubjectiveReviewDocument = {
   reviewId: string;
   captureId: string;
   version: number;
+  schoolMetadata: SchoolPageMetadata | null;
+  candidateId: string | null;
+  identityStatus: SchoolIdentityStatus | null;
   questions: SubjectiveQuestion[];
   history: SubjectiveGradeHistoryBatch[];
   createdAtUtc: string;
   updatedAtUtc: string;
   isFinal: boolean;
   finalSubtotal: number | null;
+  groups: SubjectiveReviewGroup[];
+};
+
+export type SubjectiveReviewGroup = {
+  groupId: string;
+  title: string;
+  questionIds: string[];
+  questionNumbers: number[];
+  maxScore: number;
+  provisionalSubtotal: number;
+  finalSubtotal: number | null;
+  status: "provisional" | "final";
+  rectangleMm: TemplateMillimetreRectangle;
 };
 
 export type SubjectiveReadTaskParameters = {
@@ -501,8 +539,34 @@ export class OmrinaClient {
     request: TaskSubmission<SchoolTemplateTaskParameters>,
     options: RequestOptions = {},
   ): Promise<TaskSnapshot> {
-    validateSchoolDefinition(request.parameters.schoolDefinition);
-    return this.#createJsonTask("template", request, options);
+    const definition = request.parameters.schoolDefinition;
+    validateSchoolDefinition(definition);
+    const normalizedDefinition = definition.groups === undefined
+      ? definition
+      : {
+        ...definition,
+        groups: definition.groups.map((group) => ({ ...group, choiceColumns: group.choiceColumns ?? 1 })),
+      };
+    return this.#createJsonTask("template", {
+      ...request,
+      parameters: { schoolDefinition: normalizedDefinition },
+    }, options);
+  }
+
+  createSchoolTemplateExportTask(
+    request: TaskSubmission<SchoolTemplateExportTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateSchoolTemplateExportParameters(request.parameters);
+    return this.#createJsonTask("schoolTemplateExport", request, options);
+  }
+
+  createSchoolTemplateImportTask(
+    request: TaskSubmission<SchoolTemplateImportTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateSchoolTemplateImportParameters(request.parameters);
+    return this.#createJsonTask("schoolTemplateImport", request, options);
   }
 
   uploadImage(request: UploadImageRequest, options: RequestOptions = {}): Promise<TaskSnapshot> {
@@ -627,14 +691,39 @@ export class OmrinaClient {
     validateGuid(reviewId, "reviewId");
     validateGuid(questionId, "questionId");
     const path = `/v1/subjective-reviews/${encodeURIComponent(reviewId)}/questions/${encodeURIComponent(questionId)}/image`;
+    return this.#getSubjectivePng(path, options);
+  }
+
+  getSubjectiveReviewGroupImage(
+    reviewId: string,
+    groupId: string,
+    options: RequestOptions = {},
+  ): Promise<Uint8Array> {
+    validateGuid(reviewId, "reviewId");
+    validateSubjectiveGroupId(groupId);
+    const path = `/v1/subjective-reviews/${encodeURIComponent(reviewId)}/groups/${encodeURIComponent(groupId)}/image`;
+    return this.#getSubjectivePng(path, options);
+  }
+
+  getSubjectiveCaptureGroupImage(
+    captureId: string,
+    groupId: string,
+    options: RequestOptions = {},
+  ): Promise<Uint8Array> {
+    validateCaptureId(captureId);
+    validateSubjectiveGroupId(groupId);
+    const path = `/v1/captures/${encodeURIComponent(captureId)}/groups/${encodeURIComponent(groupId)}/image`;
+    return this.#getSubjectivePng(path, options);
+  }
+
+  #getSubjectivePng(path: string, options: RequestOptions): Promise<Uint8Array> {
     return this.#performRequest(path, "GET", options, { authenticated: true, expectedStatus: 200 }, async (response, timedOut, signal) => {
-      if (response.headers) {
-        const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-        if (contentType !== "image/png") {
-          throw invalidResponse("Subjective image response must be PNG.");
-        }
-      } else {
+      if (!response.headers) {
         throw invalidResponse("Subjective image response is missing its content type.");
+      }
+      const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+      if (contentType !== "image/png") {
+        throw invalidResponse("Subjective image response must be PNG.");
       }
       let imageBytes: Uint8Array;
       try {
@@ -1521,7 +1610,9 @@ function isTaskOperation(value: unknown): value is TaskOperation {
     || value === "subjectiveCreate"
     || value === "subjectiveRead"
     || value === "subjectiveGrade"
-    || value === "subjectiveExport";
+    || value === "subjectiveExport"
+    || value === "schoolTemplateExport"
+    || value === "schoolTemplateImport";
 }
 
 function isTaskStatus(value: unknown): value is TaskStatus {
@@ -1629,7 +1720,7 @@ function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
   const groupIds = new Set<string>();
   const groupedQuestionNumbers = new Set<number>();
   for (const group of definition.groups) {
-    if (!keys(group, ["id", "title", "questionNumbers"])
+    if (!keys(group, ["id", "title", "questionNumbers", "choiceColumns"])
       || typeof group.id !== "string"
       || group.id.length < 1
       || group.id.length > 80
@@ -1640,6 +1731,7 @@ function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
       || group.title.length > 80
       || /[\r\n\t]/.test(group.title)
       || !isXml10String(group.title)
+      || (group.choiceColumns !== undefined && (!isPositiveInt32(group.choiceColumns) || group.choiceColumns > 3))
       || !Array.isArray(group.questionNumbers)
       || group.questionNumbers.length < 1
       || group.questionNumbers.length > numbers.size) fail();
@@ -1655,8 +1747,78 @@ function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
       groupQuestionType = questionType;
       groupedQuestionNumbers.add(questionNumber);
     }
+    if ((group.choiceColumns ?? 1) > 1
+      && (groupQuestionType !== "Choice" || (definition.mode ?? "AnswerOnly") !== "AnswerOnly")) fail();
   }
   if (groupedQuestionNumbers.size !== numbers.size) fail();
+}
+
+function validateSchoolTemplateExportParameters(parameters: SchoolTemplateExportTaskParameters): void {
+  if (!isRecord(parameters) || Object.keys(parameters).some((key) => key !== "templateId")) {
+    throw invalidArgument("schoolTemplateExport accepts only a templateId.");
+  }
+  requireNonEmptyString(parameters.templateId, "templateId");
+  if (!/^[0-9a-f]{64}$/.test(parameters.templateId)) {
+    throw invalidArgument("templateId must be a lowercase SHA-256 identifier.");
+  }
+}
+
+function validateSchoolTemplateImportParameters(parameters: SchoolTemplateImportTaskParameters): void {
+  if (!isRecord(parameters) || Object.keys(parameters).some((key) => key !== "bundle")) {
+    throw invalidArgument("schoolTemplateImport accepts only a SchoolTemplateBundle.");
+  }
+  validateSchoolTemplateBundle(parameters.bundle);
+  const bundleBytes = new TextEncoder().encode(JSON.stringify(parameters.bundle)).byteLength;
+  if (bundleBytes > MAX_SCHOOL_TEMPLATE_BUNDLE_BYTES) {
+    throw invalidArgument("SchoolTemplateBundle must not exceed 1 MiB.");
+  }
+}
+
+function validateSchoolTemplateBundle(bundle: SchoolTemplateBundle): void {
+  const fail = (): never => { throw invalidArgument("SchoolTemplateBundle is invalid."); };
+  validateJsonValue(bundle, "SchoolTemplateBundle");
+  if (!isRecord(bundle)
+    || Object.keys(bundle).some((key) => !["schemaVersion", "definition", "pages", "hash"].includes(key))
+    || bundle.schemaVersion !== 1
+    || typeof bundle.hash !== "string"
+    || !/^[0-9a-f]{64}$/.test(bundle.hash)
+    || !Array.isArray(bundle.pages)
+    || bundle.pages.length < 1
+    || bundle.pages.length > 64) fail();
+  validateSchoolDefinition(bundle.definition as SchoolSheetDefinition);
+  if (!Array.isArray(bundle.definition.groups)
+    || bundle.definition.groups.some((group) => !Object.hasOwn(group, "choiceColumns"))) fail();
+  const pageCodes = new Set<string>();
+  const templateIds = new Set<string>();
+  const pageNumbers = new Set<string>();
+  for (const page of bundle.pages) {
+    if (!isRecord(page)
+      || Object.keys(page).some((key) => !["pageCode", "metadata"].includes(key))
+      || typeof page.pageCode !== "string"
+      || !/^OM1[A-Z2-7]{26}$/.test(page.pageCode)
+      || pageCodes.has(page.pageCode)
+      || !isRecord(page.metadata)
+      || Object.keys(page.metadata).some((key) => !["examId", "layoutDocumentId", "version", "pageNumber", "side", "templateId"].includes(key))) fail();
+    const metadata = page.metadata;
+    requireNonEmptyString(metadata.examId, "metadata.examId");
+    requireNonEmptyString(metadata.layoutDocumentId, "metadata.layoutDocumentId");
+    if (metadata.examId.length > 80
+      || metadata.layoutDocumentId.length > 80
+      || metadata.examId !== bundle.definition.examId
+      || metadata.layoutDocumentId !== bundle.definition.layoutDocumentId
+      || metadata.version !== (bundle.definition.version ?? 1)
+      || !isPositiveInt32(metadata.version)
+      || !isPositiveInt32(metadata.pageNumber)
+      || (metadata.side !== "Front" && metadata.side !== "Back")
+      || typeof metadata.templateId !== "string"
+      || !/^[0-9a-f]{64}$/.test(metadata.templateId)
+      || templateIds.has(metadata.templateId)) fail();
+    const pageKey = `${metadata.pageNumber}:${metadata.side}`;
+    if (pageNumbers.has(pageKey)) fail();
+    pageNumbers.add(pageKey);
+    pageCodes.add(page.pageCode);
+    templateIds.add(metadata.templateId);
+  }
 }
 
 function isXml10String(value: string): boolean {
@@ -1772,6 +1934,16 @@ function validateGuid(value: string, label: string): void {
   if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(value)) {
     throw invalidArgument(`${label} must be a GUID.`);
   }
+}
+
+function validateSubjectiveGroupId(value: string): void {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(value)) {
+    throw invalidArgument("groupId must be a valid template group identifier.");
+  }
+}
+
+function validateCaptureId(value: string): void {
+  validateGuid(value, "captureId");
 }
 
 async function readBoundedSubjectiveImage(

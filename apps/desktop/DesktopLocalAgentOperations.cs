@@ -139,6 +139,8 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                 TaskOperation.Score => Score(grantResources!, parameters, operationCancellationToken),
                 TaskOperation.Review => Review(grantResources!, parameters, operationCancellationToken),
                 TaskOperation.Export => Export(grantResources!, parameters, operationCancellationToken),
+                TaskOperation.SchoolTemplateExport => ExportSchoolTemplateBundle(grantResources, parameters, operationCancellationToken),
+                TaskOperation.SchoolTemplateImport => ImportSchoolTemplateBundle(grantResources, parameters, operationCancellationToken),
                 TaskOperation.SubjectiveCreate => await CreateSubjectiveReviewAsync(
                     request.GrantId,
                     grantResources,
@@ -227,6 +229,39 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         cancellationToken.ThrowIfCancellationRequested();
         grantResources.AddTemplate(layout);
         return ToJsonElement(ToTemplateSummary(layout));
+    }
+
+    private static JsonElement ExportSchoolTemplateBundle(GrantResources resources, JsonElement parameters, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var layout = FindTemplate(resources, ReadString(parameters, "templateId"));
+        if (layout.SchoolDefinition is not { } definition)
+            throw new LocalOperationException("SCHOOL_TEMPLATE_REQUIRED", "请选择学校答题纸版式后导出资料。");
+        using var document = JsonDocument.Parse(SchoolTemplateBundle.Create(definition).ToJson());
+        return document.RootElement.Clone();
+    }
+
+    private static JsonElement ImportSchoolTemplateBundle(GrantResources resources, JsonElement parameters, CancellationToken cancellationToken)
+    {
+        if (!parameters.TryGetProperty("bundle", out var input) || input.ValueKind != JsonValueKind.Object)
+            throw new LocalOperationException("INVALID_SCHOOL_BUNDLE", "请提供完整的答题纸资料包。");
+        SchoolTemplateBundle bundle;
+        try { bundle = SchoolTemplateBundle.FromJson(input.GetRawText()); }
+        catch (Exception error) when (error is ArgumentException or JsonException or InvalidOperationException)
+        { throw new LocalOperationException("INVALID_SCHOOL_BUNDLE", "答题纸资料包校验失败，请重新导出完整资料后重试。"); }
+        cancellationToken.ThrowIfCancellationRequested();
+        var definition = bundle.Definition;
+        var pages = SchoolAnswerSheet.Create(definition).Pages;
+        var result = ToJsonElement(new
+        {
+            documentId = definition.LayoutDocumentId, examId = definition.ExamId, version = definition.Version,
+            pages = pages.Select(ToTemplateSummary).ToArray()
+        });
+        if (Encoding.UTF8.GetByteCount(result.GetRawText()) > MaximumResultBytes)
+            throw new LocalOperationException("TEMPLATE_DOCUMENT_TOO_LARGE", "答题纸页面和预览内容过大，请减少页数后重新导出。");
+        cancellationToken.ThrowIfCancellationRequested();
+        resources.AddTemplates(pages);
+        return result;
     }
 
     private async Task<JsonElement> UploadAsync(
@@ -529,7 +564,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             }
 
             var reviewId = Guid.NewGuid();
-            var response = CreateCheckedSubjectiveDocument(reviewId, snapshot);
+            var response = CreateCheckedSubjectiveDocument(reviewId, snapshot, templateMapping, captureRecord.Manifest);
             await SaveNewSubjectiveReviewAsync(
                 reviewId,
                 grantId,
@@ -556,7 +591,8 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = FindSubjectiveReview(grantResources, reviewId, grantId);
-            return CreateCheckedSubjectiveDocument(record.ReviewId, record.Snapshot);
+            return CreateCheckedSubjectiveDocument(record.ReviewId, record.Snapshot, record.TemplateMapping,
+                grantResources.TryGetCapture(record.Snapshot.CaptureId, out var documentCapture) ? documentCapture.Record.Manifest : null);
         }
         finally
         {
@@ -602,7 +638,8 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                         }
 
                         var next = current.ApplyEdits(edits, reviewer, expectedVersion);
-                        _ = CreateCheckedSubjectiveDocument(reviewId, next);
+                        _ = CreateCheckedSubjectiveDocument(reviewId, next, record.TemplateMapping,
+                            grantResources.TryGetCapture(current.CaptureId, out var sizeCapture) ? sizeCapture.Record.Manifest : null);
                         return next;
                     },
                     cancellationToken).ConfigureAwait(false);
@@ -620,7 +657,8 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                 throw new LocalOperationException(exception.Code, exception.Message);
             }
 
-            return CreateCheckedSubjectiveDocument(reviewId, committed.Snapshot);
+            return CreateCheckedSubjectiveDocument(reviewId, committed.Snapshot, committed.TemplateMapping,
+                grantResources.TryGetCapture(committed.Snapshot.CaptureId, out var documentCapture) ? documentCapture.Record.Manifest : null);
         }
         finally
         {
@@ -646,9 +684,11 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = FindSubjectiveReview(grantResources, reviewId, grantId);
+            var manifest = grantResources.TryGetCapture(record.Snapshot.CaptureId, out var capture) ? capture.Record.Manifest : null;
+            var identity = new SubjectiveReviewIdentity(manifest?.CandidateId, manifest?.IdentityStatus);
             var content = format == "json"
-                ? SubjectiveReviewExporter.ExportJson(record.ReviewId, record.Snapshot)
-                : SubjectiveReviewExporter.ExportCsv(record.Snapshot);
+                ? SubjectiveReviewExporter.ExportJson(record.ReviewId, record.Snapshot, record.TemplateMapping, identity)
+                : SubjectiveReviewExporter.ExportCsv(record.Snapshot, record.TemplateMapping, identity);
             cancellationToken.ThrowIfCancellationRequested();
             return EnsureSubjectiveResultSize(ToJsonElement(new { format, content }));
         }
@@ -698,6 +738,14 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             grantResources.SubjectiveGate.Release();
         }
 
+        if (templateMapping is not null)
+        {
+            var group = SchoolGroupMapper.MapRegistered(AnswerSheetLayout.FromJson(templateMapping.TemplateJson), templateMapping.PageTransform,
+                checked((int)captureRecord.Manifest.PixelWidth), checked((int)captureRecord.Manifest.PixelHeight))
+                .FirstOrDefault(g => g.QuestionIds.Contains(questionId));
+            if (group is not null) return await ReadSubjectiveGroupImageAsync(grantId, reviewId, group.GroupId, operationCancellationToken).ConfigureAwait(false);
+        }
+
         try
         {
             var file = new LocalInputImageFile(captureRecord.ImageFilePath);
@@ -727,7 +775,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             }
             else
             {
-                // Keep image access for already-saved pixel-defined documents.
+                // Explicit pixel-defined reviews use their validated image rectangle.
                 png = await SubjectiveImageCropper.CropToPngAsync(
                     file,
                     question.Region,
@@ -761,6 +809,39 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             LogSafeException("subjective-image", exception);
             throw new LocalOperationException("SUBJECTIVE_IMAGE_READ_FAILED", "答题区域读取失败，请稍后重试。");
         }
+    }
+
+    public async Task<LocalSubjectiveImage> ReadSubjectiveGroupImageAsync(string grantId, Guid reviewId, string groupId, CancellationToken cancellationToken)
+    {
+        var resources = GetGrantResources(grantId);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, resources.RevocationToken);
+        var record = FindSubjectiveReview(resources, reviewId, grantId);
+        if (!resources.TryGetCapture(record.Snapshot.CaptureId, out _))
+            throw new LocalOperationException("NOT_FOUND", "找不到此授权下的原图。");
+        try
+        {
+            var result = await new LocalSubjectiveReviewService(_captureStore, _subjectiveReviewStore)
+                .ReadGroupImageAsync(reviewId, groupId, lifetime.Token).ConfigureAwait(false);
+            lifetime.Token.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (LocalSubjectiveReviewException exception) { throw new LocalOperationException(exception.Code, exception.Message); }
+    }
+
+    public async Task<LocalSubjectiveImage> ReadCaptureGroupImageAsync(string grantId, string captureId, string groupId, CancellationToken cancellationToken)
+    {
+        var resources = GetGrantResources(grantId);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, resources.RevocationToken);
+        if (!resources.TryGetCapture(captureId, out _))
+            throw new LocalOperationException("NOT_FOUND", "找不到此授权下的采集记录。");
+        try
+        {
+            var result = await new LocalSubjectiveReviewService(_captureStore, _subjectiveReviewStore)
+                .ReadCaptureGroupImageAsync(captureId, groupId, lifetime.Token).ConfigureAwait(false);
+            lifetime.Token.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (LocalSubjectiveReviewException exception) { throw new LocalOperationException(exception.Code, exception.Message); }
     }
 
     private async Task SaveNewSubjectiveReviewAsync(
@@ -809,9 +890,9 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         return record;
     }
 
-    private static JsonElement CreateCheckedSubjectiveDocument(Guid reviewId, SubjectiveGradingSnapshot snapshot)
+    private static JsonElement CreateCheckedSubjectiveDocument(Guid reviewId, SubjectiveGradingSnapshot snapshot, SubjectiveReviewTemplateMapping? mapping = null, CaptureManifest? capture = null)
     {
-        var result = ToJsonElement(SubjectiveReviewExporter.ToWireDocument(reviewId, snapshot));
+        var result = ToJsonElement(SubjectiveReviewExporter.ToWireDocument(reviewId, snapshot, mapping, capture));
         if (Encoding.UTF8.GetByteCount(result.GetRawText()) > SubjectiveReviewStore.MaximumStoredDocumentBytes)
         {
             throw SubjectiveReviewTooLarge();
@@ -979,11 +1060,13 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
         if (layout.SchoolDefinition is not null)
         {
+            summary["pageCode"] = SchoolMachineCode.PageCode(layout.SchoolMetadata!);
             summary["schoolGroups"] = layout.SchoolGroups.Select(group => new
             {
                 groupId = group.GroupId,
                 title = group.Title,
                 questionNumbers = group.QuestionNumbers,
+                choiceColumns = layout.SchoolDefinition.Groups.Single(definition => definition.Id == group.GroupId).ChoiceColumns,
                 rectangleMm = new
                 {
                     x = group.RectangleMm.X,
@@ -1045,6 +1128,8 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             TaskOperation.Score => Names("resultId", "answerKey", "pointsPerQuestion"),
             TaskOperation.Review => Names("resultId", "expectedVersion", "reviewer", "edits", "answerKey"),
             TaskOperation.Export => Names("resultId", "format"),
+            TaskOperation.SchoolTemplateExport => Names("templateId"),
+            TaskOperation.SchoolTemplateImport => Names("bundle"),
             TaskOperation.SubjectiveCreate => Names("captureId"),
             TaskOperation.SubjectiveRead => Names("reviewId"),
             TaskOperation.SubjectiveGrade => Names("reviewId", "expectedVersion", "reviewer", "edits"),
@@ -1078,7 +1163,10 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             if (groups.ValueKind != JsonValueKind.Array)
                 throw new LocalOperationException("INVALID_TEMPLATE", "题目组定义格式无效。");
             foreach (var group in groups.EnumerateArray())
-                RejectUnknownOrPathProperties(RequireObject(group), Names("id", "title", "questionNumbers"));
+            {
+                RejectUnknownOrPathProperties(RequireObject(group), Names("id", "title", "questionNumbers", "choiceColumns"));
+                _ = ReadOptionalInteger(group, "choiceColumns", 1);
+            }
         }
         if (!value.TryGetProperty("questions", out var questions) || questions.ValueKind != JsonValueKind.Array)
             throw new LocalOperationException("INVALID_TEMPLATE", "请提供答题纸题目结构。");
@@ -1096,7 +1184,10 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                     Modifiers = { info =>
                     {
                         // Requests may omit fields with published defaults. Persisted snapshots remain strict.
-                        if (info.Type == typeof(SchoolSheetDefinition) || info.Type == typeof(SchoolQuestionDefinition) || info.Type == typeof(SchoolCandidateIdentity))
+                        if (info.Type == typeof(SchoolSheetDefinition)
+                            || info.Type == typeof(SchoolQuestionDefinition)
+                            || info.Type == typeof(SchoolCandidateIdentity)
+                            || info.Type == typeof(SchoolQuestionGroupDefinition))
                             foreach (var property in info.Properties) property.IsRequired = false;
                     } }
                 }
@@ -1130,6 +1221,21 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             || number <= 0)
         {
             throw new LocalOperationException("INVALID_PARAMETERS", $"参数 {name} 缺失或无效。");
+        }
+
+        return number;
+    }
+
+    private static int ReadOptionalInteger(JsonElement parameters, string name, int defaultValue)
+    {
+        if (!parameters.TryGetProperty(name, out var value))
+        {
+            return defaultValue;
+        }
+
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var number))
+        {
+            throw new LocalOperationException("INVALID_TEMPLATE", $"参数 {name} 必须是整数。");
         }
 
         return number;
@@ -1567,6 +1673,21 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
             lock (_gate)
             {
                 ThrowIfRevoked();
+                var knownCodes = _templates.Values.Where(template => template.SchoolMetadata is not null)
+                    .ToDictionary(template => SchoolMachineCode.PageCode(template.SchoolMetadata!), template => template.TemplateId, StringComparer.Ordinal);
+                foreach (var page in pages)
+                {
+                    if (page.SchoolDefinition is not { } incoming) continue;
+                    var previous = _templates.Values.FirstOrDefault(template => template.SchoolDefinition is { } saved
+                        && saved.ExamId == incoming.ExamId && saved.LayoutDocumentId == incoming.LayoutDocumentId && saved.Version == incoming.Version);
+                    if (previous?.SchoolDefinition is { } existing
+                        && JsonSerializer.Serialize(existing, AgentJson.Options) != JsonSerializer.Serialize(incoming, AgentJson.Options))
+                        throw new LocalOperationException("SCHOOL_TEMPLATE_CONFLICT", "此答题纸版本已存在不同内容，请增加版本号后重试。");
+                    var code = SchoolMachineCode.PageCode(page.SchoolMetadata!);
+                    if (knownCodes.TryGetValue(code, out var fullId) && fullId != page.TemplateId)
+                        throw new LocalOperationException("SCHOOL_PAGE_CODE_CONFLICT", "页面识别码冲突，资料未注册，请重新生成版式。");
+                    knownCodes[code] = page.TemplateId;
+                }
                 foreach (var page in pages) _templates[page.TemplateId] = page;
             }
         }

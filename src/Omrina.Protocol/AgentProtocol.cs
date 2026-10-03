@@ -15,7 +15,9 @@ public enum TaskOperation
     SubjectiveCreate,
     SubjectiveRead,
     SubjectiveGrade,
-    SubjectiveExport
+    SubjectiveExport,
+    SchoolTemplateExport,
+    SchoolTemplateImport
 }
 public enum LocalTaskStatus { Queued, Running, Completed, Failed, Cancelled }
 public sealed record PairingRequest(string ClientName);

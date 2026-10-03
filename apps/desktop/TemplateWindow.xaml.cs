@@ -97,7 +97,7 @@ public sealed partial class TemplatePage : Page
             BubbleWidthBox.Maximum = definition.BubbleShape == BubbleShape.Rectangle ? double.PositiveInfinity : 2;
             BubbleWidthBox.Value = definition.BubbleWidthMm; BubbleHeightBox.Value = definition.BubbleHeightMm;
             _editingItem = null;
-            _groups.Clear(); foreach (var group in definition.Groups) _groups.Add(new(group.Id, group.Title));
+            _groups.Clear(); foreach (var group in definition.Groups) _groups.Add(new(group.Id, group.Title, group.ChoiceColumns));
             var questionGroups = definition.Groups.SelectMany(group => group.QuestionNumbers.Select(number => (number, group.Id)))
                 .ToDictionary(pair => pair.number, pair => pair.Id);
             _questions.Clear(); foreach (var question in definition.Questions) _questions.Add(new(question, questionGroups[question.Number]));
@@ -153,6 +153,14 @@ public sealed partial class TemplatePage : Page
         MoveGroupUpButton.IsEnabled = !_busy && GroupList.SelectedIndex > 0;
         MoveGroupDownButton.IsEnabled = !_busy && GroupList.SelectedIndex >= 0 && GroupList.SelectedIndex < _groups.Count - 1;
         ApplyGroupTitleButton.IsEnabled = !_busy && _editingGroupId is not null;
+        var selectedGroup = GroupList.SelectedItem as SchoolQuestionGroupItem;
+        var selectedGroupType = selectedGroup is null
+            ? null
+            : _questions.FirstOrDefault(item => item.GroupId == selectedGroup.Id)?.Question.Type;
+        GroupChoiceColumnsBox.IsEnabled = !_busy
+            && selectedGroup is not null
+            && (GroupChoiceColumnsBox.Value > 1
+                || (ModeBox.SelectedIndex == 0 && (selectedGroupType ?? GetDraftQuestionType()) == SchoolQuestionType.Choice));
         GenerateButton.IsEnabled = !_busy;
         SaveSvgButton.IsEnabled = ready && _saveSvgAsync is not null;
         PrintButton.IsEnabled = ready && _isRegistered && (_printDocumentAsync is not null || _printAsync is not null) && _isPrintBusy?.Invoke() != true;
@@ -236,7 +244,7 @@ public sealed partial class TemplatePage : Page
     private void AddQuestion_Click(object sender, RoutedEventArgs e)
     {
         if (_questions.Count >= 500) { TemplateStatusText.Text = "最多支持 500 道题。"; return; }
-        try { if (_editingGroupId is not null) CommitGroupTitle(_editingGroupId); if (_editingItem is not null) ApplyQuestion(); }
+        try { if (_editingGroupId is not null) CommitGroup(_editingGroupId); if (_editingItem is not null) ApplyQuestion(); }
         catch (Exception error) when (error is ArgumentException or OverflowException) { TemplateStatusText.Text = error.Message; return; }
         var type = QuestionTypeBox.SelectedIndex == 1 ? SchoolQuestionType.Subjective : SchoolQuestionType.Choice;
         var selectedGroup = GroupList.SelectedItem as SchoolQuestionGroupItem;
@@ -267,6 +275,13 @@ public sealed partial class TemplatePage : Page
         if (!_isInitializing && !_loadingGroup) MarkOutdated();
     }
 
+    private void GroupChoiceColumnsChanged(NumberBox sender, NumberBoxValueChangedEventArgs e)
+    {
+        if (_isInitializing || _loadingGroup) return;
+        MarkOutdated();
+        UpdateActions();
+    }
+
     private void GroupList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_isInitializing || _loadingGroup) return;
@@ -274,7 +289,7 @@ public sealed partial class TemplatePage : Page
         var requestedId = requested?.Id;
         if (_editingGroupId is { } previousId && previousId != requestedId)
         {
-            try { CommitGroupTitle(previousId); }
+            try { CommitGroup(previousId); }
             catch (ArgumentException error)
             {
                 _loadingGroup = true;
@@ -286,12 +301,17 @@ public sealed partial class TemplatePage : Page
         }
         _editingGroupId = requestedId;
         _loadingGroup = true;
-        try { GroupTitleBox.Text = requestedId is null ? "" : _groups.First(group => group.Id == requestedId).Title; }
+        try
+        {
+            var selected = requestedId is null ? null : _groups.First(group => group.Id == requestedId);
+            GroupTitleBox.Text = selected?.Title ?? "";
+            GroupChoiceColumnsBox.Value = selected?.ChoiceColumns ?? 1;
+        }
         finally { _loadingGroup = false; }
         UpdateActions();
     }
 
-    private SchoolQuestionGroupItem CommitGroupTitle(string groupId)
+    private SchoolQuestionGroupItem CommitGroup(string groupId)
     {
         var index = _groups.ToList().FindIndex(group => group.Id == groupId);
         if (index < 0) throw new ArgumentException("所选题组已不存在。");
@@ -299,19 +319,41 @@ public sealed partial class TemplatePage : Page
         if (title.Length == 0) throw new ArgumentException("题组名称不能为空。");
         if (_groups.Any(group => group.Id != groupId && string.Equals(group.Title, title, StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException("题组名称不能重复。");
-        var updated = _groups[index] with { Title = title };
-        if (!string.Equals(_groups[index].Title, title, StringComparison.Ordinal))
+        var choiceColumns = ReadInteger(GroupChoiceColumnsBox, "客观题组每行题数");
+        if (choiceColumns is < 1 or > 3) throw new ArgumentException("客观题组每行题数须为 1–3。");
+        var groupQuestionType = _questions.FirstOrDefault(item => item.GroupId == groupId)?.Question.Type
+            ?? GetDraftQuestionType();
+        if (choiceColumns > 1
+            && (groupQuestionType != SchoolQuestionType.Choice || ModeBox.SelectedIndex != 0))
+        {
+            throw new ArgumentException("每行 2 或 3 题仅适用于独立答题卡中的选择题组。");
+        }
+
+        var updated = _groups[index] with { Title = title, ChoiceColumns = choiceColumns };
+        if (!string.Equals(_groups[index].Title, title, StringComparison.Ordinal)
+            || _groups[index].ChoiceColumns != choiceColumns)
         {
             var selectedListGroupId = (GroupList.SelectedItem as SchoolQuestionGroupItem)?.Id;
-            _groups[index] = updated;
-            if (selectedListGroupId == groupId)
+            var wasLoadingGroup = _loadingGroup;
+            _loadingGroup = true;
+            try
             {
-                _loadingGroup = true;
-                try { GroupList.SelectedItem = updated; GroupTitleBox.Text = title; }
-                finally { _loadingGroup = false; }
+                _groups[index] = updated;
+                if (selectedListGroupId == groupId)
+                {
+                    GroupList.SelectedItem = updated;
+                    GroupTitleBox.Text = title;
+                    GroupChoiceColumnsBox.Value = choiceColumns;
+                    _editingGroupId = groupId;
+                }
+
+                var selectedId = QuestionGroupBox.SelectedItem is SchoolQuestionGroupItem selectedGroup ? selectedGroup.Id : _editingItem?.GroupId;
+                RefreshQuestionGroups(GetDraftQuestionType(), selectedId, _editingItem);
             }
-            var selectedId = QuestionGroupBox.SelectedItem is SchoolQuestionGroupItem selectedGroup ? selectedGroup.Id : _editingItem?.GroupId;
-            RefreshQuestionGroups(GetDraftQuestionType(), selectedId, _editingItem);
+            finally
+            {
+                _loadingGroup = wasLoadingGroup;
+            }
         }
         return updated;
     }
@@ -321,9 +363,14 @@ public sealed partial class TemplatePage : Page
         if (_editingGroupId is not { } groupId) return;
         try
         {
-            var updated = CommitGroupTitle(groupId);
+            var updated = CommitGroup(groupId);
             _loadingGroup = true;
-            try { GroupList.SelectedItem = updated; GroupTitleBox.Text = updated.Title; }
+            try
+            {
+                GroupList.SelectedItem = updated;
+                GroupTitleBox.Text = updated.Title;
+                GroupChoiceColumnsBox.Value = updated.ChoiceColumns;
+            }
             finally { _loadingGroup = false; }
             MarkOutdated();
         }
@@ -332,13 +379,13 @@ public sealed partial class TemplatePage : Page
 
     private void AddGroup_Click(object sender, RoutedEventArgs e)
     {
-        try { if (_editingGroupId is { } currentId) CommitGroupTitle(currentId); }
+        try { if (_editingGroupId is { } currentId) CommitGroup(currentId); }
         catch (ArgumentException error) { TemplateStatusText.Text = error.Message; return; }
-        var group = new SchoolQuestionGroupItem(Guid.NewGuid().ToString("N"), CreateUniqueGroupTitle("新题组"));
+        var group = new SchoolQuestionGroupItem(Guid.NewGuid().ToString("N"), CreateUniqueGroupTitle("新题组"), 1);
         _groups.Add(group);
         _editingGroupId = group.Id;
         _loadingGroup = true;
-        try { GroupList.SelectedItem = group; GroupTitleBox.Text = group.Title; }
+        try { GroupList.SelectedItem = group; GroupTitleBox.Text = group.Title; GroupChoiceColumnsBox.Value = group.ChoiceColumns; }
         finally { _loadingGroup = false; }
         RefreshQuestionGroups(GetDraftQuestionType(), group.Id, _editingItem);
         MarkOutdated();
@@ -353,7 +400,12 @@ public sealed partial class TemplatePage : Page
         var next = _groups.Count == 0 ? null : _groups[Math.Min(index, _groups.Count - 1)];
         _editingGroupId = next?.Id;
         _loadingGroup = true;
-        try { GroupList.SelectedItem = next; GroupTitleBox.Text = next?.Title ?? ""; }
+        try
+        {
+            GroupList.SelectedItem = next;
+            GroupTitleBox.Text = next?.Title ?? "";
+            GroupChoiceColumnsBox.Value = next?.ChoiceColumns ?? 1;
+        }
         finally { _loadingGroup = false; }
         RefreshQuestionGroups(GetDraftQuestionType(), QuestionList.SelectedItem is SchoolQuestionItem item ? item.GroupId : null, _editingItem);
         MarkOutdated();
@@ -466,7 +518,7 @@ public sealed partial class TemplatePage : Page
         {
             if (save)
             {
-                if (_editingGroupId is { } groupId) CommitGroupTitle(groupId);
+                if (_editingGroupId is { } groupId) CommitGroup(groupId);
                 if (_editingItem is not null) ApplyQuestion();
             }
             var definition = new SchoolSheetDefinition
@@ -519,7 +571,7 @@ public sealed partial class TemplatePage : Page
         {
             var numbers = _questions.Where(item => item.GroupId == group.Id).Select(item => item.Question.Number).ToArray();
             if (numbers.Length == 0) throw new ArgumentException($"题组“{group.Title}”尚无题目，请先分配题目或删除该空组。");
-            groups.Add(new(group.Id, group.Title.Trim(), numbers));
+            groups.Add(new(group.Id, group.Title.Trim(), numbers, group.ChoiceColumns));
         }
         if (_questions.Any(item => !_groups.Any(group => group.Id == item.GroupId)))
             throw new ArgumentException("有题目尚未分配到题组。");
@@ -563,7 +615,7 @@ public sealed record SchoolQuestionItem(SchoolQuestionDefinition Question, strin
     public string DisplayText => $"第 {Question.Number} 题 · {(Question.Type == SchoolQuestionType.Choice ? "选择题" : "解答题")} · {Question.MaximumScore} 分";
 }
 
-public sealed record SchoolQuestionGroupItem(string Id, string Title)
+public sealed record SchoolQuestionGroupItem(string Id, string Title, int ChoiceColumns = 1)
 {
     public string DisplayText => Title;
 }
