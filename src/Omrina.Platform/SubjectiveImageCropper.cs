@@ -7,6 +7,7 @@ namespace Omrina.Platform;
 public static class SubjectiveImageCropper
 {
     public const ulong MaximumRegionPixelCount = 4_000_000;
+    public const ulong MaximumGroupPixelCount = 16_000_000;
     public const int MaximumPngBytes = 8 * 1024 * 1024;
 
     private static readonly SemaphoreSlim DecodeSlots = new(2, 2);
@@ -91,7 +92,7 @@ public static class SubjectiveImageCropper
                 region.Height,
                 imageWidth,
                 imageHeight);
-            if ((ulong)boundedRegion.Width * (uint)boundedRegion.Height > MaximumRegionPixelCount)
+            if ((ulong)boundedRegion.Width * (uint)boundedRegion.Height > (mapping?.QuestionId == Guid.Empty ? MaximumGroupPixelCount : MaximumRegionPixelCount))
             {
                 throw new SubjectiveImageCropException(
                     "SUBJECTIVE_IMAGE_TOO_LARGE",
@@ -127,7 +128,7 @@ public static class SubjectiveImageCropper
         if (region.OutputWidth <= 0 || region.OutputHeight <= 0
             || region.OutputWidth > SkiaImageDecoder.MaximumImageWidth
             || region.OutputHeight > SkiaImageDecoder.MaximumImageHeight
-            || (ulong)region.OutputWidth * (uint)region.OutputHeight > MaximumRegionPixelCount)
+            || (ulong)region.OutputWidth * (uint)region.OutputHeight > (region.QuestionId == Guid.Empty ? MaximumGroupPixelCount : MaximumRegionPixelCount))
             throw new SubjectiveImageCropException("SUBJECTIVE_IMAGE_TOO_LARGE", "校正后的答题区域图像过大。");
         var q = region.SourceQuadrilateral;
         PointPx[] points = [q.TopLeft, q.TopRight, q.BottomRight, q.BottomLeft];
@@ -147,7 +148,7 @@ public static class SubjectiveImageCropper
         var right = (int)Math.Ceiling(points.Max(point => point.X));
         var bottom = (int)Math.Ceiling(points.Max(point => point.Y));
         var bounds = SubjectivePixelRectangle.Create(left, top, right - left, bottom - top, width, height);
-        if ((ulong)bounds.Width * (uint)bounds.Height > MaximumRegionPixelCount)
+        if ((ulong)bounds.Width * (uint)bounds.Height > (region.QuestionId == Guid.Empty ? MaximumGroupPixelCount : MaximumRegionPixelCount))
             throw new SubjectiveImageCropException("SUBJECTIVE_IMAGE_TOO_LARGE", "题区解码范围过大。");
         _ = CreateUnitSquareTransform(q);
         return bounds;

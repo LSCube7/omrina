@@ -56,6 +56,19 @@ internal static class SubjectiveImageTests
                 && (await response.Content.ReadAsByteArrayAsync()).SequenceEqual(operations.Bytes), "region image returns exact PNG bytes without caching");
             check(operations.LastGrantId == owner.GrantId, "region adapter receives authenticated grant ID");
         }
+        foreach (var groupPath in new[] { $"/v1/subjective-reviews/{operations.ReviewId}/groups/g.1/image", $"/v1/captures/{operations.ReviewId:N}/groups/g.1/image" })
+        {
+            using (var response = await Request(groupPath, owner.Token)) check(response.IsSuccessStatusCode
+                && response.Headers.CacheControl?.NoStore == true, "shared group image available within owner grant");
+            using (var response = await Request(groupPath, other.Token)) check(response.StatusCode == HttpStatusCode.NotFound, "shared group image isolates grants");
+            using (var response = await Request(groupPath.Replace("g.1", "unknown-group"), owner.Token)) check(response.StatusCode == HttpStatusCode.NotFound, "unknown group rejected");
+            using (var response = await Request(groupPath + "?path=private", owner.Token)) check(response.StatusCode == HttpStatusCode.BadRequest, "group image rejects arbitrary path query");
+            foreach (var invalidGroupId in new[] { ".bad", "_bad", "-bad", "bad%2Fpath" })
+                using (var response = await Request(groupPath.Replace("g.1", invalidGroupId), owner.Token))
+                    check(response.StatusCode == HttpStatusCode.BadRequest
+                        || (invalidGroupId == "bad%2Fpath" && response.StatusCode == HttpStatusCode.NotFound),
+                        "group image rejects invalid leading character or path separator");
+        }
         operations.Bytes = new byte[9];
         using (var response = await Request(path, owner.Token)) check(response.StatusCode == HttpStatusCode.InternalServerError, "region image rejects invalid PNG signature");
         operations.Bytes = new byte[8 * 1024 * 1024 + 1];
@@ -72,7 +85,7 @@ internal static class SubjectiveImageTests
         operations.CancelRead = false;
         operations.Bytes = ImageOperations.Signature.ToArray();
         operations.Block = true;
-        var pending = Enumerable.Range(0, 32).Select(_ => Request(path, owner.Token)).ToArray();
+        var pending = Enumerable.Range(0, 32).Select(i => Request(i % 2 == 0 ? path : $"/v1/subjective-reviews/{operations.ReviewId}/groups/g.1/image", owner.Token)).ToArray();
         await operations.AllStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         using (var response = await Request(path, owner.Token)) check(response.StatusCode == HttpStatusCode.TooManyRequests, "region image read concurrency bounded at 32");
         check(server.RevokeGrant(owner.GrantId), "region image owner grant revoked during read");
@@ -133,6 +146,11 @@ internal static class SubjectiveImageTests
             }
             return new LocalSubjectiveImage(Bytes);
         }
+        public Task<LocalSubjectiveImage> ReadSubjectiveGroupImageAsync(string grantId, Guid reviewId, string groupId, CancellationToken cancellationToken)
+            => ReadSubjectiveImageAsync(grantId, reviewId, groupId == "g.1" ? QuestionId : Guid.Empty, cancellationToken);
+        public Task<LocalSubjectiveImage> ReadCaptureGroupImageAsync(string grantId, string captureId, string groupId, CancellationToken cancellationToken)
+            => ReadSubjectiveImageAsync(grantId, captureId == ReviewId.ToString("N") ? ReviewId : Guid.Empty,
+                groupId == "g.1" ? QuestionId : Guid.Empty, cancellationToken);
         public Task<JsonElement> GetTemplatesAsync(CancellationToken cancellationToken) => Task.FromResult(JsonSerializer.SerializeToElement(Array.Empty<object>()));
         public Task<JsonElement> GetDevicesAsync(CancellationToken cancellationToken) => GetTemplatesAsync(cancellationToken);
         public Task<JsonElement> RunAsync(TaskOperationRequest request, Stream? image, CancellationToken cancellationToken) => GetTemplatesAsync(cancellationToken);

@@ -174,7 +174,11 @@ internal sealed class LocalAgentHost
         app.MapDelete("/v1/grant", (HttpContext c) => { RevokeGrant(Current(c).Summary.GrantId); return Results.NoContent(); });
         app.MapGet("/v1/templates", (Func<HttpContext, Task<IResult>>)(c => QueryOperations(c, true)));
         app.MapGet("/v1/devices", (Func<HttpContext, Task<IResult>>)(c => QueryOperations(c, false)));
-        app.MapGet("/v1/subjective-reviews/{reviewId}/questions/{questionId}/image", ReadSubjectiveImage);
+        app.MapGet("/v1/subjective-reviews/{reviewId}/questions/{questionId}/image", (HttpContext context, string reviewId, string questionId) => ReadSubjectiveImage(context, reviewId, questionId));
+        app.MapGet("/v1/subjective-reviews/{reviewId}/groups/{groupId}/image", (HttpContext context, string reviewId, string groupId) =>
+            ReadSubjectiveImage(context, reviewId, "", groupId));
+        app.MapGet("/v1/captures/{captureId}/groups/{groupId}/image", (HttpContext context, string captureId, string groupId) =>
+            ReadSubjectiveImage(context, captureId, "", groupId, true));
         app.MapGet("/v1/tasks", (HttpContext c) => { lock (_sync) return Json(Current(c).Tasks.Values.Select(t => t.Snapshot).ToArray()); });
         app.MapGet("/v1/tasks/{id}", (HttpContext c, string id) => { lock (_sync) return Current(c).Tasks.TryGetValue(id, out var task) ? Json(task.Snapshot) : Error(404, "TASK_NOT_FOUND"); });
         app.MapPost("/v1/tasks/{id}/cancel", (HttpContext c, string id) =>
@@ -207,12 +211,16 @@ internal sealed class LocalAgentHost
         app.MapGet("/v1/events", WebSocketAsync);
     }
     private static Grant Current(HttpContext c) => (Grant)c.Items["grant"]!;
-    private async Task<IResult> ReadSubjectiveImage(HttpContext context, string reviewId, string questionId)
+    private async Task<IResult> ReadSubjectiveImage(HttpContext context, string reviewId, string questionId, string? groupId = null, bool captureGroup = false)
     {
         context.Response.Headers.CacheControl = "no-store";
+        var parsedQuestionId = Guid.Empty;
+        var parsedReviewId = Guid.Empty;
         if (context.Request.QueryString.HasValue
-            || !Guid.TryParse(reviewId, out var parsedReviewId) || parsedReviewId == Guid.Empty
-            || !Guid.TryParse(questionId, out var parsedQuestionId) || parsedQuestionId == Guid.Empty)
+            || !Guid.TryParse(reviewId, out parsedReviewId) || parsedReviewId == Guid.Empty
+            || (groupId is null && (!Guid.TryParse(questionId, out parsedQuestionId) || parsedQuestionId == Guid.Empty))
+            || (groupId is not null && !(groupId.Length is > 0 and <= 80 && char.IsAsciiLetterOrDigit(groupId[0])
+                && groupId.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_'))))
             return Error(400, "INVALID_IMAGE_RESOURCE");
         if (_operations is not ILocalAgentSubjectiveImages images)
             return Error(503, "SUBJECTIVE_IMAGES_UNAVAILABLE", "当前本地服务暂不支持读取答题区域。");
@@ -224,7 +232,10 @@ internal sealed class LocalAgentHost
         try
         {
             lifetime.Token.ThrowIfCancellationRequested();
-            reading = images.ReadSubjectiveImageAsync(grant.Summary.GrantId, parsedReviewId, parsedQuestionId, lifetime.Token);
+            reading = groupId is null
+                ? images.ReadSubjectiveImageAsync(grant.Summary.GrantId, parsedReviewId, parsedQuestionId, lifetime.Token)
+                : captureGroup ? images.ReadCaptureGroupImageAsync(grant.Summary.GrantId, reviewId, groupId, lifetime.Token)
+                : images.ReadSubjectiveGroupImageAsync(grant.Summary.GrantId, parsedReviewId, groupId, lifetime.Token);
             var image = await reading.WaitAsync(lifetime.Token);
             lifetime.Token.ThrowIfCancellationRequested();
             if (image?.Bytes is null || image.Bytes.Length < 8
@@ -240,7 +251,7 @@ internal sealed class LocalAgentHost
         {
             return exception.Code switch
             {
-                "NOT_FOUND" or "SUBJECTIVE_REVIEW_NOT_FOUND" or "SUBJECTIVE_QUESTION_NOT_FOUND" or "CAPTURE_NOT_FOUND" or "SUBJECTIVE_IMAGE_NOT_FOUND"
+                "NOT_FOUND" or "SUBJECTIVE_REVIEW_NOT_FOUND" or "SUBJECTIVE_QUESTION_NOT_FOUND" or "SUBJECTIVE_GROUP_NOT_FOUND" or "CAPTURE_NOT_FOUND" or "SUBJECTIVE_IMAGE_NOT_FOUND"
                     => Error(404, "SUBJECTIVE_IMAGE_NOT_FOUND", "找不到此授权下的答题区域。"),
                 "SUBJECTIVE_IMAGE_TOO_LARGE" => Error(413, "REGION_IMAGE_TOO_LARGE", "答题区域图像过大，请缩小区域后重试。"),
                 "INVALID_REGION" => Error(400, "INVALID_REGION", "答题区域无效，请重新指定区域。"),

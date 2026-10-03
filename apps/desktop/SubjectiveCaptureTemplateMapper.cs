@@ -59,13 +59,14 @@ public static class SubjectiveCaptureTemplateMapper
         IInputImageFile file,
         int expectedImageWidth,
         int expectedImageHeight,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool requireSubjective = true)
     {
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(file);
         cancellationToken.ThrowIfCancellationRequested();
         if (layout.SchemaVersion is not (AnswerSheetLayout.MixedTemplateSchemaVersion or 3)
-            || layout.SubjectiveRegions.Count is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount)
+            || (requireSubjective && layout.SubjectiveRegions.Count is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount))
         {
             throw new SubjectiveCaptureMappingException(
                 "SUBJECTIVE_TEMPLATE_REQUIRED",

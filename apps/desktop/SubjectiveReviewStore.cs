@@ -602,6 +602,14 @@ public sealed class SubjectiveReviewStore
         }
 
         ValidateTransform(templateMapping.PageTransform);
+        try
+        {
+            _ = SchoolGroupMapper.MapRegistered(layout, templateMapping.PageTransform, snapshot.ImageWidth, snapshot.ImageHeight);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new SubjectiveReviewStoreException("SUBJECTIVE_REVIEW_INVALID", "批阅记录的整组区域映射无效。", exception);
+        }
         var mappedRegionsById = new Dictionary<Guid, SubjectiveMappedRegionProvenance>();
         foreach (var mapped in templateMapping.Regions)
         {
@@ -636,7 +644,9 @@ public sealed class SubjectiveReviewStore
                 provenance,
                 templateMapping.PageTransform,
                 snapshot.ImageWidth,
-                snapshot.ImageHeight);
+                snapshot.ImageHeight,
+                layout.SchemaVersion == AnswerSheetLayout.SchoolTemplateSchemaVersion
+                    ? SubjectiveImageCropper.MaximumGroupPixelCount : SubjectiveImageCropper.MaximumRegionPixelCount);
             if (question.Region != mapped.BoundingRectangle)
             {
                 throw InvalidDocument();
@@ -676,7 +686,8 @@ public sealed class SubjectiveReviewStore
         SubjectiveMappedRegionProvenance provenance,
         PageTransform transform,
         int imageWidth,
-        int imageHeight)
+        int imageHeight,
+        ulong maximumPixels)
     {
         MappedSubjectiveRegion mapped;
         try
@@ -769,7 +780,7 @@ public sealed class SubjectiveReviewStore
             || mapped.OutputWidth != expectedWidth || mapped.OutputHeight != expectedHeight
             || mapped.OutputWidth <= 0 || mapped.OutputHeight <= 0
             || mapped.OutputWidth > 16_000 || mapped.OutputHeight > 16_000
-            || (ulong)mapped.OutputWidth * (uint)mapped.OutputHeight > SubjectiveImageCropper.MaximumRegionPixelCount)
+            || (ulong)mapped.OutputWidth * (uint)mapped.OutputHeight > maximumPixels)
         {
             throw InvalidDocument();
         }

@@ -78,15 +78,21 @@
 
             <Border x:Name="ReviewEditorBorder" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Visibility="Collapsed">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="逐题批阅" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="按题组批阅" Style="{StaticResource SubtitleTextBlockStyle}" />
                     <TextBlock x:Name="ReviewVersionText" Text="版本 —" TextWrapping="Wrap" />
                     <TextBlock x:Name="FinalSubtotalText" Text="尚未全部确认，暂不显示主观题小计。" TextWrapping="Wrap" />
+                    <ComboBox
+                        x:Name="SubjectiveGroupPicker"
+                        Header="题组"
+                        PlaceholderText="选择一个题组"
+                        SelectionChanged="SubjectiveGroupPicker_SelectionChanged"
+                        automation:AutomationProperties.Name="主观题组" />
                     <ListView
                         x:Name="SubjectiveQuestionList"
                         SelectionMode="Single"
                         MaxHeight="280"
                         SelectionChanged="SubjectiveQuestionList_SelectionChanged"
-                        automation:AutomationProperties.Name="主观题列表">
+                        automation:AutomationProperties.Name="所选题组中的题目">
                         <ListView.ItemTemplate>
                             <DataTemplate>
                                 <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" />
@@ -96,10 +102,10 @@
                     <TextBlock x:Name="SelectedQuestionText" Text="请选择一道题目。" TextWrapping="Wrap" />
                     <Border Padding="8" CornerRadius="8" Background="White" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="360">
-                            <Image x:Name="QuestionRegionImage" MaxWidth="720" MaxHeight="340" Stretch="Uniform" HorizontalAlignment="Left" />
+                            <Image x:Name="GroupRegionImage" MaxWidth="720" MaxHeight="340" Stretch="Uniform" HorizontalAlignment="Left" />
                         </ScrollViewer>
                     </Border>
-                    <TextBlock x:Name="QuestionImageStatusText" Text="选择一道题目后显示该区域图像。" TextWrapping="Wrap" />
+                    <TextBlock x:Name="GroupImageStatusText" Text="选择题组后显示整组答题图。" TextWrapping="Wrap" />
                     <TextBox
                         x:Name="QuestionScoreBox"
                         Header="本题得分"

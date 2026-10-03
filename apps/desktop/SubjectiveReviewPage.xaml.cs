@@ -33,7 +33,7 @@ public sealed record SubjectiveReviewPickerItem(LocalSubjectiveReviewSummary Sum
         get
         {
             var state = Summary.IsFinal
-                ? $"已确认 · {Summary.FinalSubtotal?.ToString(CultureInfo.CurrentCulture) ?? "—"} 分"
+                ? "主观题已确认"
                 : "未完成";
             var id = Summary.ReviewId.ToString("N");
             return $"{Summary.CreatedAtUtc.ToLocalTime():g} · {Summary.QuestionCount} 题 · v{Summary.Version} · {state} · {id[..8]}";
@@ -61,6 +61,18 @@ public sealed record SubjectiveQuestionPickerItem(SubjectiveGradingQuestion Ques
     }
 }
 
+public sealed record SubjectiveReviewGroupPickerItem(SubjectiveReviewGroup Group)
+{
+    public string DisplayText
+    {
+        get
+        {
+            var state = Group.Status == "final" ? "已确认" : "草稿中";
+            return $"{Group.Title} · {Group.QuestionNumbers.Count} 题 · {state}";
+        }
+    }
+}
+
 /// <summary>Cached local page for defining and grading human-marked image regions.</summary>
 public sealed partial class SubjectiveReviewPage : Page
 {
@@ -70,8 +82,9 @@ public sealed partial class SubjectiveReviewPage : Page
     private readonly ObservableCollection<SubjectiveCapturePickerItem> _captureItems = [];
     private readonly ObservableCollection<SubjectiveReviewPickerItem> _reviewItems = [];
     private readonly ObservableCollection<SubjectiveQuestionPickerItem> _questionItems = [];
+    private readonly ObservableCollection<SubjectiveReviewGroupPickerItem> _groupItems = [];
     private readonly AsyncSelectionGeneration _captureImageGeneration = new();
-    private readonly AsyncSelectionGeneration _questionImageGeneration = new();
+    private readonly AsyncSelectionGeneration _groupImageGeneration = new();
     private readonly AsyncSelectionGeneration _captureListGeneration = new();
     private readonly AsyncSelectionGeneration _reviewListGeneration = new();
     private readonly AsyncSelectionGeneration _documentGeneration = new();
@@ -81,14 +94,19 @@ public sealed partial class SubjectiveReviewPage : Page
     private readonly List<LocalSubjectiveReviewDiagnostic> _reviewDiagnostics = [];
     private LocalSubjectiveCaptureSummary? _selectedCapture;
     private LocalSubjectiveReviewDocument? _document;
+    private SubjectiveReviewGroup? _selectedGroup;
     private SubjectiveGradingQuestion? _selectedQuestion;
+    private Guid? _loadedGroupImageReviewId;
+    private string? _loadedGroupImageId;
+    private Guid? _pendingGroupImageReviewId;
+    private string? _pendingGroupImageId;
     private string? _captureCursor;
     private string? _reviewCursor;
     private CancellationTokenSource? _captureListCancellation;
     private CancellationTokenSource? _reviewListCancellation;
     private CancellationTokenSource? _documentCancellation;
     private CancellationTokenSource? _captureImageCancellation;
-    private CancellationTokenSource? _questionImageCancellation;
+    private CancellationTokenSource? _groupImageCancellation;
     private CancellationTokenSource? _mutationCancellation;
     private CancellationTokenSource? _exportCancellation;
     private int _activeOperationCount;
@@ -97,6 +115,7 @@ public sealed partial class SubjectiveReviewPage : Page
     private bool _isCaptureImageAvailable;
     private bool _isUpdatingCapturePicker;
     private bool _isUpdatingReviewPicker;
+    private bool _isUpdatingGroupPicker;
     private bool _isUpdatingQuestionList;
     private bool _isLoadingCaptureList;
     private bool _isLoadingReviewList;
@@ -126,6 +145,8 @@ public sealed partial class SubjectiveReviewPage : Page
         ReviewPicker.ItemsSource = _reviewItems;
         ReviewPicker.DisplayMemberPath = nameof(SubjectiveReviewPickerItem.DisplayText);
         SubjectiveQuestionList.ItemsSource = _questionItems;
+        SubjectiveGroupPicker.ItemsSource = _groupItems;
+        SubjectiveGroupPicker.DisplayMemberPath = nameof(SubjectiveReviewGroupPickerItem.DisplayText);
         _isInitializing = false;
         UpdateActionStates();
         if (_service is null)
@@ -166,21 +187,22 @@ public sealed partial class SubjectiveReviewPage : Page
         if (!CanChangeExam(examId)) return false;
         _examId = examId; _examCaptureIds = ids;
         CancelRequest(_captureListCancellation); CancelRequest(_reviewListCancellation);
-        CancelRequest(_documentCancellation); CancelRequest(_captureImageCancellation); CancelRequest(_questionImageCancellation);
+        CancelRequest(_documentCancellation); CancelRequest(_captureImageCancellation); CancelRequest(_groupImageCancellation);
         _captureListGeneration.Invalidate(); _reviewListGeneration.Invalidate(); _documentGeneration.Invalidate();
-        _captureImageGeneration.Invalidate(); _questionImageGeneration.Invalidate();
+        _captureImageGeneration.Invalidate(); _groupImageGeneration.Invalidate();
         _isLoadingCaptureList = false; _isLoadingReviewList = false;
-        _isUpdatingCapturePicker = true; _isUpdatingReviewPicker = true; _isUpdatingQuestionList = true;
+        _isUpdatingCapturePicker = true; _isUpdatingReviewPicker = true; _isUpdatingGroupPicker = true; _isUpdatingQuestionList = true;
         try
         {
-            _captureItems.Clear(); _reviewItems.Clear(); _questionItems.Clear();
-            CapturePicker.SelectedItem = null; ReviewPicker.SelectedItem = null; SubjectiveQuestionList.SelectedItem = null;
+            _captureItems.Clear(); _reviewItems.Clear(); _groupItems.Clear(); _questionItems.Clear();
+            CapturePicker.SelectedItem = null; ReviewPicker.SelectedItem = null; SubjectiveGroupPicker.SelectedItem = null; SubjectiveQuestionList.SelectedItem = null;
         }
-        finally { _isUpdatingCapturePicker = false; _isUpdatingReviewPicker = false; _isUpdatingQuestionList = false; }
-        _selectedCapture = null; _document = null; _selectedQuestion = null;
+        finally { _isUpdatingCapturePicker = false; _isUpdatingReviewPicker = false; _isUpdatingGroupPicker = false; _isUpdatingQuestionList = false; }
+        _selectedCapture = null; _document = null; _selectedGroup = null; _selectedQuestion = null;
+        _loadedGroupImageReviewId = null; _loadedGroupImageId = null; _pendingGroupImageReviewId = null; _pendingGroupImageId = null;
         _captureCursor = null; _reviewCursor = null; _hasLoadedOnNavigation = false;
         _captureDiagnostics.Clear(); _reviewDiagnostics.Clear();
-        OriginalCaptureImage.Source = null; QuestionRegionImage.Source = null; _isCaptureImageAvailable = false;
+        OriginalCaptureImage.Source = null; GroupRegionImage.Source = null; _isCaptureImageAvailable = false;
         PopulateEditor(null); ReviewEditorBorder.Visibility = Visibility.Collapsed;
         CaptureListStatusText.Text = "当前考试答卷将在进入本页时加载。";
         ReviewListStatusText.Text = "尚未加载当前考试批阅记录。";
@@ -225,11 +247,11 @@ public sealed partial class SubjectiveReviewPage : Page
         CancelRequest(_reviewListCancellation);
         CancelRequest(_documentCancellation);
         CancelRequest(_captureImageCancellation);
-        CancelRequest(_questionImageCancellation);
+        CancelRequest(_groupImageCancellation);
         CancelRequest(_mutationCancellation);
         CancelRequest(_exportCancellation);
         _captureImageGeneration.Invalidate();
-        _questionImageGeneration.Invalidate();
+        _groupImageGeneration.Invalidate();
 
         var activeOperations = _activeOperations.ToArray();
         if (activeOperations.Length > 0)
@@ -241,7 +263,7 @@ public sealed partial class SubjectiveReviewPage : Page
         DisposeRequest(ref _reviewListCancellation);
         DisposeRequest(ref _documentCancellation);
         DisposeRequest(ref _captureImageCancellation);
-        DisposeRequest(ref _questionImageCancellation);
+        DisposeRequest(ref _groupImageCancellation);
         DisposeRequest(ref _mutationCancellation);
         DisposeRequest(ref _exportCancellation);
         _pageLifetime.Dispose();
@@ -341,12 +363,40 @@ public sealed partial class SubjectiveReviewPage : Page
             () => !_isClosed
                 && _selectedCapture is
                 {
-                    SubjectiveQuestionCount: > 0 and <= SubjectiveGradingSnapshot.MaximumQuestionCount
+                SubjectiveQuestionCount: > 0 and <= SubjectiveGradingSnapshot.MaximumQuestionCount
                 });
+
+    private void SubjectiveGroupPicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isInitializing || _isUpdatingGroupPicker
+            || SubjectiveGroupPicker.SelectedItem is not SubjectiveReviewGroupPickerItem item)
+        {
+            return;
+        }
+
+        if (HasUnsavedGrade() && !string.Equals(item.Group.GroupId, _selectedGroup?.GroupId, StringComparison.Ordinal))
+        {
+            _isUpdatingGroupPicker = true;
+            try
+            {
+                SubjectiveGroupPicker.SelectedItem = _groupItems.FirstOrDefault(previous =>
+                    string.Equals(previous.Group.GroupId, _selectedGroup?.GroupId, StringComparison.Ordinal));
+            }
+            finally
+            {
+                _isUpdatingGroupPicker = false;
+            }
+
+            ShowInfo("请先保存当前题目的草稿，再切换题组。", InfoBarSeverity.Warning);
+            return;
+        }
+
+        SelectGroup(item.Group);
+    }
 
     private void SubjectiveQuestionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_isUpdatingQuestionList)
+        if (_isInitializing || _isUpdatingQuestionList)
         {
             return;
         }
@@ -362,10 +412,7 @@ public sealed partial class SubjectiveReviewPage : Page
         if (SubjectiveQuestionList.SelectedItem is not SubjectiveQuestionPickerItem item)
         {
             _selectedQuestion = null;
-            _questionImageGeneration.Invalidate();
-            CancelRequest(_questionImageCancellation);
-            QuestionRegionImage.Source = null;
-            QuestionImageStatusText.Text = "选择一道题目后显示该区域图像。";
+            RequestQuestionImage(null);
             UpdateGradeActions();
             return;
         }
@@ -691,62 +738,82 @@ public sealed partial class SubjectiveReviewPage : Page
         }
     }
 
-    private async Task LoadQuestionImageAsync(SubjectiveGradingQuestion question)
+    private async Task LoadQuestionImageAsync(
+        SubjectiveGradingQuestion question,
+        SubjectiveReviewGroup? group,
+        Guid reviewId)
     {
-        if (_service is null || _document is null)
+        if (_service is null)
         {
             return;
         }
 
-        var reviewId = _document.ReviewId;
-        var generation = _questionImageGeneration.Begin();
-        var cancellation = StartRequest(ref _questionImageCancellation);
-        QuestionRegionImage.Source = null;
-        QuestionImageStatusText.Text = "正在读取所选题目的区域图像。";
+        var groupId = group?.GroupId;
+        var generation = _groupImageGeneration.Begin();
+        var cancellation = StartRequest(ref _groupImageCancellation);
+        GroupRegionImage.Source = null;
+        GroupImageStatusText.Text = group is null ? "正在读取所选题目的区域图像。" : $"正在读取“{group.Title}”整组答题图。";
         try
         {
-            var image = await _service.ReadQuestionImageAsync(reviewId, question.QuestionId, cancellation.Token);
+            var image = group is null
+                ? await _service.ReadQuestionImageAsync(reviewId, question.QuestionId, cancellation.Token)
+                : await _service.ReadGroupImageAsync(reviewId, group.GroupId, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
-            if (!IsCurrentQuestionImage(generation, reviewId, question.QuestionId))
+            if (!IsCurrentReviewImage(generation, reviewId, groupId, question.QuestionId))
             {
                 return;
             }
 
             var bitmap = await CreateBitmapFromPngAsync(image.Bytes, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
-            if (!IsCurrentQuestionImage(generation, reviewId, question.QuestionId))
+            if (!IsCurrentReviewImage(generation, reviewId, groupId, question.QuestionId))
             {
                 return;
             }
 
-            QuestionRegionImage.Source = bitmap;
-            QuestionImageStatusText.Text =
-                $"第 {question.QuestionNumber} 题 · 区域 {question.Region.Width}×{question.Region.Height} 像素。";
+            GroupRegionImage.Source = bitmap;
+            if (group is null)
+            {
+                GroupImageStatusText.Text = $"第 {question.QuestionNumber} 题 · 区域 {question.Region.Width}×{question.Region.Height} 像素。";
+            }
+            else
+            {
+                _loadedGroupImageReviewId = reviewId;
+                _loadedGroupImageId = group.GroupId;
+                GroupImageStatusText.Text = $"“{group.Title}”整组答题图 · 包含第 {string.Join("、", group.QuestionNumbers)} 题。";
+            }
         }
         catch (LocalSubjectiveReviewException exception)
         {
-            if (IsCurrentQuestionImage(generation, reviewId, question.QuestionId))
+            if (IsCurrentReviewImage(generation, reviewId, groupId, question.QuestionId))
             {
-                QuestionRegionImage.Source = null;
-                QuestionImageStatusText.Text =
-                    $"题目区域图像不可用；已保存分数和批阅历史仍可查看。错误代码：{exception.Code}";
+                GroupRegionImage.Source = null;
+                GroupImageStatusText.Text =
+                    $"{(group is null ? "题目区域" : "题组")}图像不可用；已保存分数和批阅历史仍可查看。错误代码：{exception.Code}";
             }
 
             throw;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            if (IsCurrentQuestionImage(generation, reviewId, question.QuestionId))
+            if (IsCurrentReviewImage(generation, reviewId, groupId, question.QuestionId))
             {
-                QuestionRegionImage.Source = null;
-                QuestionImageStatusText.Text = "题目区域图像无法显示；已保存分数和批阅历史仍可查看。错误代码：SUBJECTIVE_IMAGE_PREVIEW_FAILED";
+                GroupRegionImage.Source = null;
+                GroupImageStatusText.Text = $"{(group is null ? "题目区域" : "题组")}图像无法显示；已保存分数和批阅历史仍可查看。错误代码：SUBJECTIVE_IMAGE_PREVIEW_FAILED";
             }
 
             throw;
         }
         finally
         {
-            FinishRequest(ref _questionImageCancellation, cancellation);
+            if (_groupImageGeneration.IsCurrent(generation)
+                && _pendingGroupImageReviewId == reviewId
+                && string.Equals(_pendingGroupImageId, groupId, StringComparison.Ordinal))
+            {
+                _pendingGroupImageReviewId = null;
+                _pendingGroupImageId = null;
+            }
+            FinishRequest(ref _groupImageCancellation, cancellation);
         }
     }
 
@@ -803,14 +870,30 @@ public sealed partial class SubjectiveReviewPage : Page
         var generation = _documentGeneration.Begin();
         var cancellation = StartRequest(ref _documentCancellation);
         _isReadingReview = true;
-        _questionImageGeneration.Invalidate();
-        CancelRequest(_questionImageCancellation);
-        QuestionRegionImage.Source = null;
-        QuestionImageStatusText.Text = "正在读取批阅记录。";
+        _groupImageGeneration.Invalidate();
+        CancelRequest(_groupImageCancellation);
+        _pendingGroupImageReviewId = null;
+        _pendingGroupImageId = null;
+        _loadedGroupImageReviewId = null;
+        _loadedGroupImageId = null;
+        GroupRegionImage.Source = null;
+        GroupImageStatusText.Text = "正在读取批阅记录。";
         if (!preserveEditorInput)
         {
             _document = null;
+            _selectedGroup = null;
             _selectedQuestion = null;
+            _isUpdatingGroupPicker = true;
+            try
+            {
+                _groupItems.Clear();
+                SubjectiveGroupPicker.SelectedItem = null;
+                SubjectiveGroupPicker.Visibility = Visibility.Collapsed;
+            }
+            finally
+            {
+                _isUpdatingGroupPicker = false;
+            }
             _questionItems.Clear();
             ReviewEditorBorder.Visibility = Visibility.Collapsed;
         }
@@ -937,6 +1020,7 @@ public sealed partial class SubjectiveReviewPage : Page
         var selectedQuestion = _selectedQuestion;
         var questionId = selectedQuestion.QuestionId;
         var questionNumber = selectedQuestion.QuestionNumber;
+        var editorInputAtSubmit = CaptureEditorInput();
         _isMutatingReview = true;
         var cancellation = StartRequest(ref _mutationCancellation);
         var edit = new SubjectiveGradeEdit(questionId, status, score, comment);
@@ -957,7 +1041,9 @@ public sealed partial class SubjectiveReviewPage : Page
 
             var selectedQuestionId = _selectedQuestion?.QuestionId;
             var editorInput = CaptureEditorInput();
-            SetDocument(updated, editorInput, selectedQuestionId);
+            var shouldResetEditor = status == SubjectiveReviewStatus.Unreviewed
+                && editorInput == editorInputAtSubmit;
+            SetDocument(updated, shouldResetEditor ? null : editorInput, selectedQuestionId);
             UpdateReviewSummaryItem(updated, select: false);
             var saved = updated.Snapshot.GetQuestion(questionNumber);
             var savedState = saved.Status switch
@@ -1034,22 +1120,46 @@ public sealed partial class SubjectiveReviewPage : Page
         EditorInput? preserveEditorInput,
         Guid? selectedQuestionId = null)
     {
+        var previousGroupId = _selectedGroup?.GroupId;
         var previousQuestionId = selectedQuestionId
             ?? preserveEditorInput?.QuestionId
             ?? _selectedQuestion?.QuestionId;
         _document = document;
+        _selectedGroup = null;
         _selectedQuestion = null;
+        _isUpdatingGroupPicker = true;
         _isUpdatingQuestionList = true;
         try
         {
+            _groupItems.Clear();
+            foreach (var group in document.Groups)
+            {
+                _groupItems.Add(new SubjectiveReviewGroupPickerItem(group));
+            }
+
+            var selectedGroup = previousGroupId is not null
+                ? _groupItems.FirstOrDefault(item => string.Equals(item.Group.GroupId, previousGroupId, StringComparison.Ordinal))
+                : null;
+            if (selectedGroup is null && previousQuestionId is Guid questionId)
+            {
+                selectedGroup = _groupItems.FirstOrDefault(item => item.Group.QuestionIds.Contains(questionId));
+            }
+            selectedGroup ??= _groupItems.FirstOrDefault();
+            _selectedGroup = selectedGroup?.Group;
+            SubjectiveGroupPicker.SelectedItem = selectedGroup;
+            SubjectiveGroupPicker.Visibility = selectedGroup is null ? Visibility.Collapsed : Visibility.Visible;
+
             _questionItems.Clear();
-            foreach (var question in document.Snapshot.Questions)
+            var questions = _selectedGroup is null
+                ? document.Snapshot.Questions
+                : document.Snapshot.Questions.Where(question => _selectedGroup.QuestionIds.Contains(question.QuestionId)).ToArray();
+            foreach (var question in questions)
             {
                 _questionItems.Add(new SubjectiveQuestionPickerItem(question));
             }
 
-            var selected = previousQuestionId is Guid questionId
-                ? _questionItems.FirstOrDefault(item => item.Question.QuestionId == questionId)
+            var selected = previousQuestionId is Guid questionToSelectId
+                ? _questionItems.FirstOrDefault(item => item.Question.QuestionId == questionToSelectId)
                 : null;
             selected ??= _questionItems.FirstOrDefault();
             SubjectiveQuestionList.SelectedItem = selected;
@@ -1057,15 +1167,14 @@ public sealed partial class SubjectiveReviewPage : Page
         }
         finally
         {
+            _isUpdatingGroupPicker = false;
             _isUpdatingQuestionList = false;
         }
 
         ReviewEditorBorder.Visibility = Visibility.Visible;
-        ReviewVersionText.Text = $"批阅记录版本：{document.Snapshot.Version} · 共 {document.Snapshot.Questions.Count} 题。";
-        FinalSubtotalText.Text = document.Snapshot.IsFinal && document.Snapshot.FinalSubtotal is decimal subtotal
-            ? $"所有题目均已确认 · 主观题小计 {subtotal.ToString(CultureInfo.CurrentCulture)} 分。"
-            : "尚未全部确认，暂不显示最终主观题小计。";
-        SelectedReviewSummaryText.Text = FormatReviewSummary(document.ReviewId, document.Snapshot);
+        ReviewVersionText.Text = $"批阅记录版本：{document.Snapshot.Version} · 共 {document.Snapshot.Questions.Count} 道主观题。";
+        UpdateGroupSummary();
+        SelectedReviewSummaryText.Text = FormatReviewSummary(document.ReviewId, document.Snapshot, document.Capture);
         ReviewHistoryText.Text = FormatReviewHistory(document.Snapshot);
 
         if (preserveEditorInput is not null)
@@ -1085,6 +1194,76 @@ public sealed partial class SubjectiveReviewPage : Page
         }
 
         UpdateActionStates();
+    }
+
+    private void SelectGroup(SubjectiveReviewGroup group)
+    {
+        if (_document is null || string.Equals(_selectedGroup?.GroupId, group.GroupId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _selectedGroup = group;
+        _selectedQuestion = null;
+        var wasUpdating = _isUpdatingQuestionList;
+        _isUpdatingQuestionList = true;
+        try
+        {
+            _questionItems.Clear();
+            foreach (var question in _document.Snapshot.Questions.Where(item => group.QuestionIds.Contains(item.QuestionId)))
+            {
+                _questionItems.Add(new SubjectiveQuestionPickerItem(question));
+            }
+
+            var selected = _questionItems.FirstOrDefault();
+            SubjectiveQuestionList.SelectedItem = selected;
+            _selectedQuestion = selected?.Question;
+        }
+        finally
+        {
+            _isUpdatingQuestionList = wasUpdating;
+        }
+
+        UpdateGroupSummary();
+        if (_selectedQuestion is null)
+        {
+            PopulateEditor(null);
+            RequestQuestionImage(null);
+        }
+        else
+        {
+            SelectQuestion(_selectedQuestion, preserveEditorInput: false);
+        }
+    }
+
+    private void UpdateGroupSummary()
+    {
+        if (_document is null)
+        {
+            FinalSubtotalText.Text = "尚未打开批阅记录。";
+            return;
+        }
+
+        if (_selectedGroup is null)
+        {
+            FinalSubtotalText.Text = "当前记录没有可分组显示的主观题区域。此处仅显示逐题批阅状态，不代表学生总分。";
+            return;
+        }
+
+        var group = _selectedGroup;
+        var confirmedCount = _document.Snapshot.Questions.Count(question =>
+            group.QuestionIds.Contains(question.QuestionId) && question.Status == SubjectiveReviewStatus.Confirmed);
+        var subtotalText = group.ProvisionalSubtotal.ToString(CultureInfo.CurrentCulture);
+        var finalText = group.Status == "final" && group.FinalSubtotal is decimal finalSubtotal
+            ? finalSubtotal.ToString(CultureInfo.CurrentCulture)
+            : "尚未全部确认";
+        var identityNote = _document.Capture?.IdentityStatus switch
+        {
+            "RequireAssociation" => "身份待关联；",
+            "Identified" => "身份已识别；",
+            _ => "身份尚未确认；"
+        };
+        FinalSubtotalText.Text = $"{identityNote}{group.Title} · 已确认 {confirmedCount}/{group.QuestionIds.Count} 题 · 草稿小计（含已确认分）{subtotalText}/{group.MaximumScore.ToString(CultureInfo.CurrentCulture)} 分 · 最终小计 {finalText}。本组主观题评分不代表学生总分。";
     }
 
     private void SelectQuestion(SubjectiveGradingQuestion question, bool preserveEditorInput)
@@ -1127,21 +1306,63 @@ public sealed partial class SubjectiveReviewPage : Page
 
     private void RequestQuestionImage(SubjectiveGradingQuestion? question)
     {
-        _questionImageGeneration.Invalidate();
-        CancelRequest(_questionImageCancellation);
-        QuestionRegionImage.Source = null;
-        if (question is null || _document is null)
+        var document = _document;
+        var group = _selectedGroup;
+        if (document is null)
         {
-            QuestionImageStatusText.Text = "选择一道题目后显示该区域图像。";
+            _groupImageGeneration.Invalidate();
+            CancelRequest(_groupImageCancellation);
+            _pendingGroupImageReviewId = null;
+            _pendingGroupImageId = null;
+            GroupRegionImage.Source = null;
+            GroupImageStatusText.Text = "选择题组后显示整组答题图。";
+            return;
+        }
+
+        var imageQuestion = question ?? (group is null
+            ? null
+            : document.Snapshot.Questions.FirstOrDefault(item => group.QuestionIds.Contains(item.QuestionId)));
+        if (imageQuestion is null)
+        {
+            _groupImageGeneration.Invalidate();
+            CancelRequest(_groupImageCancellation);
+            _pendingGroupImageReviewId = null;
+            _pendingGroupImageId = null;
+            GroupRegionImage.Source = null;
+            GroupImageStatusText.Text = "选择一道题目后显示该区域图像。";
             UpdateGradeActions();
             return;
         }
 
+        if (group is not null
+            && (_loadedGroupImageReviewId == document.ReviewId
+                && string.Equals(_loadedGroupImageId, group.GroupId, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        if (group is not null
+            && _pendingGroupImageReviewId == document.ReviewId
+            && string.Equals(_pendingGroupImageId, group.GroupId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _groupImageGeneration.Invalidate();
+        CancelRequest(_groupImageCancellation);
+        _pendingGroupImageReviewId = group is null ? null : document.ReviewId;
+        _pendingGroupImageId = group?.GroupId;
+        _loadedGroupImageReviewId = null;
+        _loadedGroupImageId = null;
+        GroupRegionImage.Source = null;
         _ = RunTrackedOperationAsync(
-            "题目区域图像读取失败",
-            () => LoadQuestionImageAsync(question),
-            () => !_isClosed && _document?.Snapshot.Questions.Any(item => item.QuestionId == question.QuestionId) == true
-                && _selectedQuestion?.QuestionId == question.QuestionId);
+            group is null ? "题目区域图像读取失败" : "题组图像读取失败",
+            () => LoadQuestionImageAsync(imageQuestion, group, document.ReviewId),
+            () => !_isClosed
+                && _document?.ReviewId == document.ReviewId
+                && (group is null
+                    ? _selectedQuestion?.QuestionId == imageQuestion.QuestionId
+                    : string.Equals(_selectedGroup?.GroupId, group.GroupId, StringComparison.Ordinal)));
     }
 
     private void UpdateActionStates()
@@ -1165,6 +1386,7 @@ public sealed partial class SubjectiveReviewPage : Page
             && !_isReadingReview
             && _document is not null;
         ReviewPicker.IsEnabled = serviceAvailable && !_isCreatingReview && !_isMutatingReview && !_isReadingReview;
+        SubjectiveGroupPicker.IsEnabled = serviceAvailable && !_isCreatingReview && !_isMutatingReview && !_isReadingReview;
         CapturePicker.IsEnabled = serviceAvailable && !_isCreatingReview;
         UpdateGradeActions();
     }
@@ -1424,13 +1646,22 @@ public sealed partial class SubjectiveReviewPage : Page
         _ => "来源未识别"
     };
 
-    private static string FormatReviewSummary(Guid reviewId, SubjectiveGradingSnapshot snapshot)
+    private static string FormatReviewSummary(
+        Guid reviewId,
+        SubjectiveGradingSnapshot snapshot,
+        LocalSubjectiveCaptureSummary? capture)
     {
         var state = snapshot.IsFinal
-            ? $"已确认 · 小计 {snapshot.FinalSubtotal?.ToString(CultureInfo.CurrentCulture) ?? "—"} 分"
+            ? "主观题已全部确认"
             : "未全部确认";
+        var identity = capture?.IdentityStatus switch
+        {
+            "RequireAssociation" => "身份待关联",
+            "Identified" => "身份已识别",
+            _ => "身份状态未知"
+        };
         return $"批阅记录 {reviewId.ToString("N")[..8]} · 采集记录 {ShortId(snapshot.CaptureId)} · "
-            + $"v{snapshot.Version} · {snapshot.Questions.Count} 题 · {state}";
+            + $"v{snapshot.Version} · {snapshot.Questions.Count} 题 · {identity} · {state}（不含客观题，不代表学生总分）";
     }
 
     private static string FormatSelectedQuestion(SubjectiveGradingQuestion question)
@@ -1531,11 +1762,13 @@ public sealed partial class SubjectiveReviewPage : Page
         && _captureImageGeneration.IsCurrent(generation)
         && string.Equals(_selectedCapture?.CaptureId, captureId, StringComparison.OrdinalIgnoreCase);
 
-    private bool IsCurrentQuestionImage(long generation, Guid reviewId, Guid questionId) =>
+    private bool IsCurrentReviewImage(long generation, Guid reviewId, string? groupId, Guid questionId) =>
         !_isClosed
-        && _questionImageGeneration.IsCurrent(generation)
+        && _groupImageGeneration.IsCurrent(generation)
         && _document?.ReviewId == reviewId
-        && _selectedQuestion?.QuestionId == questionId;
+        && (groupId is null
+            ? _selectedQuestion?.QuestionId == questionId
+            : string.Equals(_selectedGroup?.GroupId, groupId, StringComparison.Ordinal));
 
     private CancellationTokenSource StartRequest(ref CancellationTokenSource? current)
     {

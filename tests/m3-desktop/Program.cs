@@ -11,6 +11,12 @@ using Omrina.Scanning;
 using Omrina.Server;
 using SkiaSharp;
 
+if (args.Contains("--group-regression", StringComparer.Ordinal))
+{
+    await SchoolGroupRegression.RunAsync();
+    return 0;
+}
+
 if (args.Contains("--school-http-harness", StringComparer.Ordinal))
     return await SchoolIntegrationRegression.RunHttpHarnessAsync();
 
@@ -23,6 +29,7 @@ try
 {
     SubjectiveReviewInputRegression.Run();
     await SchoolIntegrationRegression.RunAsync();
+    await SchoolGroupRegression.RunAsync();
     VerifyScannerDeviceIdentityMap();
     await VerifyDesktopAgentOperationsAsync();
     await VerifyActualSkiaRejectsSyntheticFixtureAsync();

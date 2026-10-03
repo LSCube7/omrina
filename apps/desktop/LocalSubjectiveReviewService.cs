@@ -36,7 +36,10 @@ public sealed record LocalSubjectiveCaptureSummary(
     uint PixelHeight,
     int QuestionCount,
     int TemplateSchemaVersion,
-    int SubjectiveQuestionCount);
+    int SubjectiveQuestionCount,
+    SchoolPageMetadata? SchoolMetadata = null,
+    string? CandidateId = null,
+    string? IdentityStatus = null);
 
 public sealed record LocalSubjectiveReviewDiagnostic(string ResourceId, string Code, string Message);
 
@@ -53,7 +56,8 @@ public sealed record LocalSubjectiveCapturePage(
 public sealed record LocalSubjectiveReviewDocument(
     Guid ReviewId,
     SubjectiveGradingSnapshot Snapshot,
-    LocalSubjectiveCaptureSummary? Capture);
+    LocalSubjectiveCaptureSummary? Capture,
+    IReadOnlyList<SubjectiveReviewGroup> Groups);
 
 public sealed record LocalSubjectiveReviewExport(string Format, string Content);
 
@@ -232,7 +236,7 @@ public sealed class LocalSubjectiveReviewService
                 imageWidth,
                 imageHeight,
                 definitions);
-            EnsureStoredResponseSize(reviewId, snapshot);
+            EnsureStoredResponseSize(reviewId, snapshot, templateMapping);
         }
         catch (LocalSubjectiveReviewException)
         {
@@ -273,8 +277,8 @@ public sealed class LocalSubjectiveReviewService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(edits);
-        var captureSummary = await TryLoadCaptureSummaryAsyncForReviewAsync(reviewId, cancellationToken)
-            .ConfigureAwait(false);
+        var originalRecord = await LoadReviewAsync(reviewId, cancellationToken).ConfigureAwait(false);
+        var captureSummary = await TryLoadCaptureSummaryAsync(originalRecord.Snapshot.CaptureId, cancellationToken).ConfigureAwait(false);
         try
         {
             var record = await _reviewStore.ApplyTrustedAsync(
@@ -283,7 +287,7 @@ public sealed class LocalSubjectiveReviewService
                 current =>
                 {
                     var next = current.ApplyEdits(edits, reviewer, expectedVersion);
-                    EnsureStoredResponseSize(reviewId, next);
+                    EnsureStoredResponseSize(reviewId, next, originalRecord.TemplateMapping);
                     return next;
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -319,6 +323,13 @@ public sealed class LocalSubjectiveReviewService
         var record = await LoadReviewAsync(reviewId, cancellationToken).ConfigureAwait(false);
         var question = record.Snapshot.Questions.FirstOrDefault(item => item.QuestionId == questionId)
             ?? throw new LocalSubjectiveReviewException("SUBJECTIVE_QUESTION_NOT_FOUND", "找不到此批阅记录中的题目区域。");
+
+        if (record.TemplateMapping is { } groupMapping)
+        {
+            var group = SubjectiveReviewExporter.GetGroups(record.Snapshot, groupMapping)
+                .FirstOrDefault(g => g.QuestionIds.Contains(questionId));
+            if (group is not null) return await ReadGroupImageAsync(reviewId, group.GroupId, cancellationToken).ConfigureAwait(false);
+        }
 
         CaptureRecord? capture;
         try
@@ -376,7 +387,7 @@ public sealed class LocalSubjectiveReviewService
             }
             else
             {
-                // Released pixel-defined documents remain readable as legacy records.
+                // Explicit pixel-defined reviews use their validated image rectangle.
                 png = await SubjectiveImageCropper.CropToPngAsync(
                     file,
                     question.Region,
@@ -407,6 +418,46 @@ public sealed class LocalSubjectiveReviewService
         {
             throw new LocalSubjectiveReviewException("SUBJECTIVE_IMAGE_READ_FAILED", "答题区域读取失败，请稍后重试。");
         }
+    }
+
+    public async Task<LocalSubjectiveImage> ReadGroupImageAsync(Guid reviewId, string groupId, CancellationToken cancellationToken = default)
+    {
+        var record = await LoadReviewAsync(reviewId, cancellationToken).ConfigureAwait(false);
+        if (!SubjectiveReviewExporter.GetGroups(record.Snapshot, record.TemplateMapping).Any(g => g.GroupId == groupId))
+            throw new LocalSubjectiveReviewException("SUBJECTIVE_GROUP_NOT_FOUND", "找不到此批阅记录中的题组。");
+        return await ReadCaptureGroupImageCoreAsync(record.Snapshot.CaptureId, groupId, cancellationToken, record.TemplateMapping?.TemplateJson).ConfigureAwait(false);
+    }
+
+    public Task<LocalSubjectiveImage> ReadCaptureGroupImageAsync(string captureId, string groupId,
+        CancellationToken cancellationToken = default)
+        => ReadCaptureGroupImageCoreAsync(captureId, groupId, cancellationToken, null);
+
+    private async Task<LocalSubjectiveImage> ReadCaptureGroupImageCoreAsync(string captureId, string groupId,
+        CancellationToken cancellationToken, string? expectedTemplateJson)
+    {
+        if (!SchoolGroupMapper.IsValidGroupId(groupId))
+            throw new LocalSubjectiveReviewException("SUBJECTIVE_GROUP_NOT_FOUND", "题组标识无效。");
+        try
+        {
+            var capture = await Task.Run(() => _captureStore.LoadById(captureId, cancellationToken), cancellationToken).ConfigureAwait(false)
+                ?? throw new LocalSubjectiveReviewException("CAPTURE_NOT_FOUND", "找不到本地采集记录。");
+            var layout = capture.TemplateLayout ?? throw new LocalSubjectiveReviewException("CAPTURE_TEMPLATE_INVALID", "采集记录缺少模板。");
+            if (expectedTemplateJson is not null && layout.ToJson() != expectedTemplateJson)
+                throw new LocalSubjectiveReviewException("CAPTURE_TEMPLATE_MISMATCH", "采集模板与批阅记录不一致。");
+            var file = _captureStore.GetInputFile(captureId, cancellationToken);
+            var width = checked((int)capture.Manifest.PixelWidth); var height = checked((int)capture.Manifest.PixelHeight);
+            var mapping = await SubjectiveCaptureTemplateMapper.LocateAndMapAsync(layout, file, width, height, cancellationToken, requireSubjective: false).ConfigureAwait(false);
+            var group = SchoolGroupMapper.MapRegistered(layout, mapping.PageTransform, width, height).FirstOrDefault(g => g.GroupId == groupId)
+                ?? throw new LocalSubjectiveReviewException("SUBJECTIVE_GROUP_NOT_FOUND", "此页面没有指定题组。");
+            return new LocalSubjectiveImage(await SubjectiveImageCropper.RectifyToPngAsync(file, group.ImageRegion, width, height, cancellationToken).ConfigureAwait(false));
+        }
+        catch (SubjectiveCaptureMappingException exception) { throw new LocalSubjectiveReviewException(exception.Code, exception.Message, exception); }
+        catch (SubjectiveImageCropException exception) { throw new LocalSubjectiveReviewException(exception.Code, exception.Message, exception); }
+        catch (CaptureException exception) { throw ToServiceException(exception); }
+        catch (ImageDecodeException exception) { throw new LocalSubjectiveReviewException("SUBJECTIVE_IMAGE_INVALID", "答题区域图像无法读取。", exception); }
+        catch (ArgumentException exception) { throw new LocalSubjectiveReviewException("INVALID_REGION", "整组区域无法安全映射，请检查原图后重试。", exception); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        { throw new LocalSubjectiveReviewException("SUBJECTIVE_IMAGE_READ_FAILED", "整组区域读取失败，请稍后重试。", exception); }
     }
 
     public async Task<IInputImageFile> ReadCaptureImageAsync(
@@ -440,10 +491,12 @@ public sealed class LocalSubjectiveReviewService
         }
 
         var record = await LoadReviewAsync(reviewId, cancellationToken).ConfigureAwait(false);
+        var capture = await TryLoadCaptureSummaryAsync(record.Snapshot.CaptureId, cancellationToken).ConfigureAwait(false);
+        var identity = new SubjectiveReviewIdentity(capture?.CandidateId, capture?.IdentityStatus);
         cancellationToken.ThrowIfCancellationRequested();
         var content = format == "json"
-            ? SubjectiveReviewExporter.ExportJson(record.ReviewId, record.Snapshot)
-            : SubjectiveReviewExporter.ExportCsv(record.Snapshot);
+            ? SubjectiveReviewExporter.ExportJson(record.ReviewId, record.Snapshot, record.TemplateMapping, identity)
+            : SubjectiveReviewExporter.ExportCsv(record.Snapshot, record.TemplateMapping, identity);
         var envelopeBytes = JsonSerializer.SerializeToUtf8Bytes(new { format, content }, AgentJson.Options);
         if (envelopeBytes.Length > MaximumExportEnvelopeBytes)
         {
@@ -501,15 +554,6 @@ public sealed class LocalSubjectiveReviewService
         }
     }
 
-    private async Task<LocalSubjectiveCaptureSummary?> TryLoadCaptureSummaryAsyncForReviewAsync(
-        Guid reviewId,
-        CancellationToken cancellationToken)
-    {
-        var record = await LoadReviewAsync(reviewId, cancellationToken).ConfigureAwait(false);
-        return await TryLoadCaptureSummaryAsync(record.Snapshot.CaptureId, cancellationToken)
-            .ConfigureAwait(false);
-    }
-
     private static LocalSubjectiveReviewSummary ToSummary(SubjectiveReviewRecord record)
     {
         var snapshot = record.Snapshot;
@@ -536,14 +580,17 @@ public sealed class LocalSubjectiveReviewService
             manifest.PixelHeight,
             manifest.QuestionCount,
             record.TemplateLayout?.SchemaVersion ?? manifest.TemplateSchemaVersion,
-            record.TemplateLayout?.SubjectiveRegions.Count ?? 0);
+            record.TemplateLayout?.SubjectiveRegions.Count ?? 0,
+            manifest.SchoolMetadata,
+            manifest.CandidateId,
+            manifest.IdentityStatus);
     }
 
     private static LocalSubjectiveReviewDocument ToDocument(
         SubjectiveReviewRecord record,
         LocalSubjectiveCaptureSummary? capture)
     {
-        return new LocalSubjectiveReviewDocument(record.ReviewId, record.Snapshot, capture);
+        return new LocalSubjectiveReviewDocument(record.ReviewId, record.Snapshot, capture, SubjectiveReviewExporter.GetGroups(record.Snapshot, record.TemplateMapping));
     }
 
     private static LocalSubjectiveReviewDiagnostic ToDiagnostic(SubjectiveReviewStoreDiagnostic diagnostic)
@@ -551,10 +598,10 @@ public sealed class LocalSubjectiveReviewService
         return new LocalSubjectiveReviewDiagnostic(diagnostic.ResourceId, diagnostic.Code, diagnostic.Message);
     }
 
-    private static void EnsureStoredResponseSize(Guid reviewId, SubjectiveGradingSnapshot snapshot)
+    private static void EnsureStoredResponseSize(Guid reviewId, SubjectiveGradingSnapshot snapshot, SubjectiveReviewTemplateMapping? mapping = null)
     {
         var responseBytes = JsonSerializer.SerializeToUtf8Bytes(
-            SubjectiveReviewExporter.ToWireDocument(reviewId, snapshot),
+            SubjectiveReviewExporter.ToWireDocument(reviewId, snapshot, mapping),
             AgentJson.Options);
         if (responseBytes.Length > SubjectiveReviewStore.MaximumStoredDocumentBytes)
         {
