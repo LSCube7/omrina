@@ -87,9 +87,9 @@ internal sealed class Naps2ScannerService : IScannerService
             throw new ArgumentOutOfRangeException(nameof(options), options.Dpi, "Only 150, 300 and 600 DPI are supported.");
         }
 
-        if (!options.Flatbed || !string.Equals(options.PageSize, "A4", StringComparison.OrdinalIgnoreCase))
+        if (!options.Flatbed || options.PageSize is not ("A4" or "A3"))
         {
-            throw new NotSupportedException("当前扫描适配器仅支持 A4 平板扫描。");
+            throw new NotSupportedException("当前扫描适配器仅支持 A4 纵向或 A3 横向平板扫描；设备须支持所选纸张。");
         }
 
         var imagePath = await CaptureScanService.ScanFirstPageAsync(
@@ -97,7 +97,8 @@ internal sealed class Naps2ScannerService : IScannerService
             nativeDevice.Device,
             options.Dpi,
             _temporaryRoot,
-            cancellationToken);
+            cancellationToken,
+            options.PageSize);
 
         return new ScanResult(imagePath, options.Dpi, options.PageSize, options.Flatbed);
     }

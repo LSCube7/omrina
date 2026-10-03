@@ -1,6 +1,7 @@
 using Omrina.Core;
 using Omrina.Platform;
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace Omrina.Desktop;
@@ -35,7 +36,7 @@ public sealed record CaptureTemplateReference(
             layout.Title,
             layout.QuestionCount,
             layout.OptionsPerQuestion,
-            layout.SchemaVersion == AnswerSheetLayout.MixedTemplateSchemaVersion ? layout.ToJson() : null,
+            layout.SchemaVersion != AnswerSheetLayout.TemplateSchemaVersion ? layout.ToJson() : null,
             layout);
     }
 }
@@ -56,7 +57,13 @@ public sealed record CaptureManifest(
     string ImageExtension,
     uint PixelWidth,
     uint PixelHeight,
-    ulong ByteLength);
+    ulong ByteLength)
+{
+    public SchoolPageMetadata? SchoolMetadata { get; init; }
+    public string? ImageSha256 { get; init; }
+    public string? CandidateId { get; init; }
+    public string? IdentityStatus { get; init; }
+}
 
 /// <summary>Result of a successful image import or scan-page save.</summary>
 public sealed record CaptureRecord(
@@ -112,7 +119,7 @@ public sealed class CaptureStore
 {
     public const int ManifestSchemaVersion = 1;
     private const int MaximumManifestBytes = 64 * 1024;
-    private const int MaximumTemplateSnapshotBytes = 64 * 1024;
+    private const int MaximumTemplateSnapshotBytes = 1024 * 1024;
     private const int MaximumPageSize = 50;
     public const ulong MaximumFileSizeBytes = 100UL * 1024 * 1024;
     public const uint MaximumImageWidth = 16_000;
@@ -373,7 +380,7 @@ public sealed class CaptureStore
                     null);
             }
 
-            if (manifest.TemplateSchemaVersion is not (AnswerSheetLayout.TemplateSchemaVersion or AnswerSheetLayout.MixedTemplateSchemaVersion))
+            if (manifest.TemplateSchemaVersion is not (AnswerSheetLayout.TemplateSchemaVersion or AnswerSheetLayout.MixedTemplateSchemaVersion or 3))
             {
                 throw new CaptureStorageException(
                     "CAPTURE_TEMPLATE_UNSUPPORTED",
@@ -510,19 +517,38 @@ public sealed class CaptureStore
         }
 
         if (layout.SchemaVersion != manifest.TemplateSchemaVersion
-            || layout.SchemaVersion != AnswerSheetLayout.MixedTemplateSchemaVersion
-            || layout.SubjectiveRegions.Count == 0
+            || layout.SchemaVersion is not (AnswerSheetLayout.MixedTemplateSchemaVersion or 3)
+            || (layout.SchemaVersion == AnswerSheetLayout.MixedTemplateSchemaVersion && layout.SubjectiveRegions.Count == 0)
             || layout.TemplateId != manifest.TemplateId
             || layout.Title != manifest.TemplateTitle
             || layout.QuestionCount != manifest.QuestionCount
-            || layout.OptionsPerQuestion != manifest.OptionsPerQuestion)
+            || layout.OptionsPerQuestion != manifest.OptionsPerQuestion
+            || (layout.SchemaVersion == 3 && layout.SchoolMetadata != manifest.SchoolMetadata))
         {
             throw new CaptureStorageException(
                 "CAPTURE_TEMPLATE_MISMATCH",
                 "采集记录的模板快照与模板身份不一致。");
         }
 
+        if (layout.SchemaVersion == 3)
+        {
+            var imagePath = Path.Combine(captureDirectory.FullName, $"original{manifest.ImageExtension.ToLowerInvariant()}");
+            if (manifest.IdentityStatus is not ("Identified" or "RequireAssociation")
+                || (manifest.IdentityStatus == "RequireAssociation" && manifest.CandidateId is not null)
+                || (manifest.IdentityStatus == "Identified" && (layout.CandidateArea is null
+                    || manifest.CandidateId is null || manifest.CandidateId.Length != layout.SchoolDefinition!.CandidateIdentity.Digits
+                    || manifest.CandidateId.Any(character => character is < '0' or > '9'))))
+                throw new CaptureStorageException("CAPTURE_IDENTITY_INVALID", "答卷身份状态与模板不一致，请重新检查原图。");
+            if (manifest.ImageSha256 is null || ComputeImageHash(imagePath) != manifest.ImageSha256)
+                throw new CaptureStorageException("CAPTURE_IMAGE_MISMATCH", "答卷原图与保存记录不一致，无法确认考试归属。");
+        }
         return layout;
+    }
+
+    private static string ComputeImageHash(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
     private static bool PathsEqual(string left, string right)
@@ -709,10 +735,11 @@ public sealed class CaptureStore
 
         if (string.IsNullOrWhiteSpace(manifest.TemplateId)
             || string.IsNullOrWhiteSpace(manifest.TemplateTitle)
-            || manifest.QuestionCount <= 0
-            || manifest.OptionsPerQuestion is < AnswerSheetLayout.MinOptionsPerQuestion
-                or > AnswerSheetLayout.MaxOptionsPerQuestion
-            || manifest.QuestionCount > AnswerSheetLayout.MaxQuestionCount(manifest.OptionsPerQuestion))
+            || (manifest.TemplateSchemaVersion == 3
+                ? manifest.QuestionCount < 0 || manifest.OptionsPerQuestion < 0 || manifest.OptionsPerQuestion > 10
+                : manifest.QuestionCount <= 0
+                    || manifest.OptionsPerQuestion is < AnswerSheetLayout.MinOptionsPerQuestion or > AnswerSheetLayout.MaxOptionsPerQuestion
+                    || manifest.QuestionCount > AnswerSheetLayout.MaxQuestionCount(manifest.OptionsPerQuestion)))
         {
             throw InvalidHistory("最近采集记录的模板参数无效。", null);
         }
@@ -806,19 +833,29 @@ public sealed class CaptureStore
         var templateSnapshotTempPath = Path.Combine(stagingDirectory, ".template.json.tmp");
         var relativeImagePath = ToManifestPath(Path.Combine("captures", captureId, imageName));
         var committed = false;
+        SchoolCandidateRecognitionResult? candidateIdentity = null;
 
         try
         {
             Directory.CreateDirectory(stagingDirectory);
             await CopyOriginalAsync(sourceFile, image, imageFilePath, cancellationToken);
+            if (template.SchemaVersion == 3)
+            {
+                var gray = await new SkiaImageDecoder().DecodeGrayscaleAsync(new LocalInputImageFile(imageFilePath), cancellationToken);
+                var location = await Task.Run(() => new AnswerSheetRecognizer().LocatePage(template.Layout!, gray, cancellationToken), cancellationToken);
+                if (!location.CanMapRegions || location.Transform is not { } transform
+                    || !SchoolMachineCode.ValidateExpected(template.Layout!, gray, transform))
+                    throw new CaptureValidationException("CAPTURE_SCHOOL_PAGE_MISMATCH", "无法确认考试、答题纸版本或页码，请检查所选答题纸及完整原图后重试。未保存该页面。");
+                candidateIdentity = SchoolCandidateRecognition.Read(template.Layout!, gray, transform);
+            }
 
-            if (template.SchemaVersion == AnswerSheetLayout.MixedTemplateSchemaVersion)
+            if (template.SchemaVersion is AnswerSheetLayout.MixedTemplateSchemaVersion or 3)
             {
                 if (template.TemplateJson is null
                     || template.Layout is null
                     || template.Layout.SchemaVersion != template.SchemaVersion
                     || template.Layout.TemplateId != template.TemplateId
-                    || template.Layout.SubjectiveRegions.Count == 0)
+                    || (template.SchemaVersion == AnswerSheetLayout.MixedTemplateSchemaVersion && template.Layout.SubjectiveRegions.Count == 0))
                 {
                     throw new CaptureValidationException(
                         "CAPTURE_TEMPLATE_INVALID",
@@ -853,7 +890,13 @@ public sealed class CaptureStore
                 image.Extension,
                 image.PixelWidth,
                 image.PixelHeight,
-                image.ByteLength);
+                image.ByteLength)
+            {
+                SchoolMetadata = template.Layout?.SchoolMetadata,
+                ImageSha256 = template.SchemaVersion == 3 ? ComputeImageHash(imageFilePath) : null,
+                CandidateId = candidateIdentity is { RequiresReview: false } ? candidateIdentity.CandidateId : null,
+                IdentityStatus = template.SchemaVersion == 3 ? (candidateIdentity is { RequiresReview: false, CandidateId: not null } ? "Identified" : "RequireAssociation") : null
+            };
 
             await WriteManifestAsync(manifest, manifestTempPath, manifestFilePath, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();

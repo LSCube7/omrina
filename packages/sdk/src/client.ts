@@ -97,6 +97,74 @@ export type TemplateSubjectiveRegionInput = {
   rectangleMm: TemplateMillimetreRectangle;
 };
 
+export type SchoolQuestionDefinition = {
+  number: number;
+  type: "Choice" | "Subjective";
+  maximumScore?: number;
+  body?: string;
+  options?: string[] | null;
+  subjectiveHeightMm?: number;
+};
+
+export type SchoolSheetDefinition = {
+  examId: string;
+  layoutDocumentId: string;
+  version?: number;
+  title?: string;
+  paper?: "A4Portrait" | "A3Landscape";
+  mode?: "AnswerOnly" | "WithQuestions";
+  columns?: number;
+  bubbleShape?: "Circle" | "Rectangle";
+  labelPlacement?: "Inside" | "Outside";
+  bubbleWidthMm?: number;
+  bubbleHeightMm?: number;
+  candidateIdentity?: { mode?: "Barcode" | "Marking"; digits?: number; candidateId?: string | null };
+  duplex?: boolean;
+  repeatBackIdentity?: boolean;
+  questions: SchoolQuestionDefinition[];
+};
+
+export type SchoolTemplateTaskParameters = { schoolDefinition: SchoolSheetDefinition };
+export type SchoolPageMetadata = {
+  examId: string;
+  layoutDocumentId: string;
+  version: number;
+  pageNumber: number;
+  side: "Front" | "Back";
+  templateId: string;
+};
+export type SchoolTemplatePage = TemplateSummary & {
+  schemaVersion: 3;
+  paper: "A4Portrait" | "A3Landscape";
+  side: "Front" | "Back";
+  pageIndex: number;
+  widthMm: number;
+  heightMm: number;
+  schoolMetadata: SchoolPageMetadata;
+};
+export type SchoolTemplateDocument = { documentId: string; examId: string; version: number; pages: SchoolTemplatePage[] };
+export type SchoolIdentityStatus = "Identified" | "RequireAssociation";
+export type SchoolCaptureSummary = {
+  captureId: string;
+  templateId: string;
+  createdAt: string;
+  sourceType: "import" | "scan";
+  imageWidth: number;
+  imageHeight: number;
+  byteLength: number;
+  schoolMetadata: SchoolPageMetadata;
+  candidateId: string | null;
+  identityStatus: SchoolIdentityStatus;
+};
+export type SchoolRecognitionTaskResult = {
+  resultId: string;
+  version: number;
+  schoolMetadata: SchoolPageMetadata;
+  candidateId: string | null;
+  identityStatus: SchoolIdentityStatus;
+  result: unknown;
+};
+
 export type ScanTaskParameters = {
   templateId: string;
   deviceId: string;
@@ -403,6 +471,14 @@ export class OmrinaClient {
     options: RequestOptions = {},
   ): Promise<TaskSnapshot> {
     validateTemplateParameters(request.parameters);
+    return this.#createJsonTask("template", request, options);
+  }
+
+  createSchoolTemplateTask(
+    request: TaskSubmission<SchoolTemplateTaskParameters>,
+    options: RequestOptions = {},
+  ): Promise<TaskSnapshot> {
+    validateSchoolDefinition(request.parameters.schoolDefinition);
     return this.#createJsonTask("template", request, options);
   }
 
@@ -1475,6 +1551,46 @@ function validateTemplateParameters(parameters: TemplateTaskParameters): void {
       throw invalidArgument("Each subjective template region must be a unique bounded millimetre rectangle with a positive maximum score.");
     }
     questionNumbers.add(region.questionNumber);
+  }
+}
+
+function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
+  const fail = (): never => { throw invalidArgument("School answer-sheet definition is invalid."); };
+  const keys = (value: unknown, allowed: string[]): value is Record<string, unknown> =>
+    isRecord(value) && Object.keys(value).every((key) => allowed.includes(key));
+  if (!keys(definition, ["examId", "layoutDocumentId", "version", "title", "paper", "mode", "columns", "bubbleShape", "labelPlacement", "bubbleWidthMm", "bubbleHeightMm", "candidateIdentity", "duplex", "repeatBackIdentity", "questions"])) fail();
+  requireNonEmptyString(definition.examId, "examId");
+  requireNonEmptyString(definition.layoutDocumentId, "layoutDocumentId");
+  if (definition.examId.length > 80 || definition.layoutDocumentId.length > 80) fail();
+  if (definition.version !== undefined && !isPositiveInt32(definition.version)) fail();
+  if (definition.title !== undefined && (typeof definition.title !== "string" || definition.title.trim().length === 0 || definition.title.length > 80)) fail();
+  if (definition.paper !== undefined && !["A4Portrait", "A3Landscape"].includes(definition.paper)) fail();
+  if (definition.mode !== undefined && !["AnswerOnly", "WithQuestions"].includes(definition.mode)) fail();
+  if (definition.bubbleShape !== undefined && !["Circle", "Rectangle"].includes(definition.bubbleShape)) fail();
+  if (definition.labelPlacement !== undefined && !["Inside", "Outside"].includes(definition.labelPlacement)) fail();
+  const columns = definition.columns ?? 1;
+  if ((definition.paper ?? "A4Portrait") === "A4Portrait" ? columns !== 1 : columns !== 2 && columns !== 3) fail();
+  if (definition.bubbleWidthMm !== undefined && (!isFinitePositiveNumber(definition.bubbleWidthMm) || definition.bubbleWidthMm > 2)) fail();
+  if (definition.bubbleHeightMm !== undefined && (!isFinitePositiveNumber(definition.bubbleHeightMm) || definition.bubbleHeightMm > 4)) fail();
+  if (definition.duplex !== undefined && typeof definition.duplex !== "boolean") fail();
+  if (definition.repeatBackIdentity !== undefined && typeof definition.repeatBackIdentity !== "boolean") fail();
+  if (definition.candidateIdentity !== undefined) {
+    const identity = definition.candidateIdentity;
+    if (!keys(identity, ["mode", "digits", "candidateId"])) fail();
+    if (identity.mode !== undefined && !["Barcode", "Marking"].includes(identity.mode)) fail();
+    const digits = identity.digits ?? 8;
+    if (!isPositiveInt32(digits) || digits > 20) fail();
+    if (identity.candidateId != null && (typeof identity.candidateId !== "string" || !/^\d+$/.test(identity.candidateId) || identity.candidateId.length !== digits)) fail();
+  }
+  if (!Array.isArray(definition.questions) || definition.questions.length < 1 || definition.questions.length > 500) fail();
+  const numbers = new Set<number>();
+  for (const question of definition.questions) {
+    if (!keys(question, ["number", "type", "maximumScore", "body", "options", "subjectiveHeightMm"]) || !isPositiveInt32(question.number) || numbers.has(question.number) || !["Choice", "Subjective"].includes(question.type)) fail();
+    numbers.add(question.number);
+    if (question.maximumScore !== undefined && (!isFinitePositiveNumber(question.maximumScore) || question.maximumScore > 1_000_000)) fail();
+    if (question.body !== undefined && (typeof question.body !== "string" || question.body.length > 8000)) fail();
+    if (question.type === "Choice" && (!Array.isArray(question.options) || question.options.length < 2 || question.options.length > 6 || question.options.some((option) => typeof option !== "string" || option.length > 1000))) fail();
+    if (question.subjectiveHeightMm !== undefined && (!Number.isFinite(question.subjectiveHeightMm) || question.subjectiveHeightMm < 10 || question.subjectiveHeightMm > 230)) fail();
   }
 }
 

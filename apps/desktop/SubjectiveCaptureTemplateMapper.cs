@@ -64,7 +64,7 @@ public static class SubjectiveCaptureTemplateMapper
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(file);
         cancellationToken.ThrowIfCancellationRequested();
-        if (layout.SchemaVersion != AnswerSheetLayout.MixedTemplateSchemaVersion
+        if (layout.SchemaVersion is not (AnswerSheetLayout.MixedTemplateSchemaVersion or 3)
             || layout.SubjectiveRegions.Count is < 1 or > SubjectiveGradingSnapshot.MaximumQuestionCount)
         {
             throw new SubjectiveCaptureMappingException(

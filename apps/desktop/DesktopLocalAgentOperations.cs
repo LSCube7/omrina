@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Omrina.Core;
 using Omrina.Platform;
 using Omrina.Protocol;
@@ -184,6 +186,25 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (parameters.TryGetProperty("schoolDefinition", out var schoolInput))
+        {
+            if (parameters.EnumerateObject().Count() != 1)
+                throw new LocalOperationException("INVALID_PARAMETERS", "学校答题纸定义不能与旧版模板参数混用。");
+            var definition = ReadSchoolDefinition(schoolInput);
+            var pages = SchoolAnswerSheet.Create(definition).Pages;
+            foreach (var page in pages)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                grantResources.AddTemplate(page);
+            }
+            return ToJsonElement(new
+            {
+                documentId = definition.LayoutDocumentId,
+                examId = definition.ExamId,
+                version = definition.Version,
+                pages = pages.Select(ToTemplateSummary).ToArray()
+            });
+        }
         var title = ReadString(parameters, "title");
         var questionCount = ReadPositiveInt(parameters, "questionCount");
         var optionsPerQuestion = ReadPositiveInt(parameters, "optionsPerQuestion");
@@ -256,7 +277,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
             var scan = await _scannerService.ScanAsync(
                 device,
-                new ScanOptions(dpi, Flatbed: true, PageSize: "A4"),
+                new ScanOptions(dpi, Flatbed: true, PageSize: layout.WidthMm > 210 ? "A3" : "A4"),
                 cancellationToken).ConfigureAwait(false);
             temporaryImagePath = ValidateScannerOutputPath(scan.ImagePath);
             var file = new LocalInputImageFile(temporaryImagePath);
@@ -358,7 +379,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         var expectedVersion = ReadPositiveInt(parameters, "expectedVersion");
         var reviewer = ReadString(parameters, "reviewer");
         var result = FindResult(grantResources, resultId);
-        var edits = ReadReviewEdits(parameters, result.Layout.QuestionCount);
+        var edits = ReadReviewEdits(parameters, result.Layout);
         var updatedAnswerKey = parameters.TryGetProperty("answerKey", out _)
             ? ReadOptionalAnswerKey(parameters, result.Layout)
             : null;
@@ -815,6 +836,9 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         {
             resultId,
             version = result.Version,
+            schoolMetadata = ToSchoolMetadata(result.Layout.SchoolMetadata),
+            candidateId = result.Recognition.CandidateIdentity is { RequiresReview: false } identity ? identity.CandidateId : null,
+            identityStatus = result.Layout.SchemaVersion == 3 ? (result.Recognition.CandidateIdentity is { RequiresReview: false, CandidateId: not null } ? "Identified" : "RequireAssociation") : null,
             result = document.RootElement.Clone()
         });
     }
@@ -920,6 +944,12 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
     {
         templateId = layout.TemplateId,
         schemaVersion = layout.SchemaVersion,
+        paper = layout.SchoolDefinition?.Paper.ToString() ?? "A4Portrait",
+        side = layout.SchoolMetadata?.Side.ToString() ?? "Front",
+        pageIndex = layout.SchoolPageIndex,
+        widthMm = layout.WidthMm,
+        heightMm = layout.HeightMm,
+        schoolMetadata = ToSchoolMetadata(layout.SchoolMetadata),
         title = layout.Title,
         questionCount = layout.QuestionCount,
         optionsPerQuestion = layout.OptionsPerQuestion,
@@ -940,6 +970,16 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         svg = layout.ToSvg()
     };
 
+    private static object? ToSchoolMetadata(SchoolPageMetadata? metadata) => metadata is null ? null : new
+    {
+        metadata.ExamId,
+        metadata.LayoutDocumentId,
+        metadata.Version,
+        metadata.PageNumber,
+        side = metadata.Side.ToString(),
+        metadata.TemplateId
+    };
+
     private static JsonElement ToCaptureSummary(CaptureRecord capture) => ToJsonElement(new
     {
         captureId = capture.Manifest.CaptureId,
@@ -948,7 +988,10 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         sourceType = capture.Manifest.SourceType,
         imageWidth = capture.Manifest.PixelWidth,
         imageHeight = capture.Manifest.PixelHeight,
-        byteLength = capture.Manifest.ByteLength
+        byteLength = capture.Manifest.ByteLength,
+        schoolMetadata = ToSchoolMetadata(capture.Manifest.SchoolMetadata),
+        candidateId = capture.Manifest.CandidateId,
+        identityStatus = capture.Manifest.IdentityStatus
     });
 
     private static JsonElement ToJsonElement<T>(T value) =>
@@ -968,7 +1011,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
     {
         return operation switch
         {
-            TaskOperation.Template => Names("title", "questionCount", "optionsPerQuestion", "subjectiveRegions"),
+            TaskOperation.Template => Names("title", "questionCount", "optionsPerQuestion", "subjectiveRegions", "schoolDefinition"),
             TaskOperation.Upload => Names("templateId", "fileName"),
             TaskOperation.Scan => Names("templateId", "deviceId", "dpi"),
             TaskOperation.Recognize => Names("captureId"),
@@ -987,13 +1030,49 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
     private static void RejectUnknownOrPathProperties(JsonElement parameters, IReadOnlySet<string> allowedNames)
     {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var property in parameters.EnumerateObject())
         {
-            if (!allowedNames.Contains(property.Name)
+            if (!seen.Add(property.Name) || !allowedNames.Contains(property.Name)
                 || property.Name.Contains("path", StringComparison.OrdinalIgnoreCase))
             {
                 throw new LocalOperationException("INVALID_PARAMETERS", "操作参数包含不受支持的字段。");
             }
+        }
+    }
+
+    private static SchoolSheetDefinition ReadSchoolDefinition(JsonElement value)
+    {
+        RejectUnknownOrPathProperties(RequireObject(value), Names("examId", "layoutDocumentId", "version", "title", "paper", "mode", "columns", "bubbleShape", "labelPlacement", "bubbleWidthMm", "bubbleHeightMm", "candidateIdentity", "duplex", "repeatBackIdentity", "questions"));
+        if (value.TryGetProperty("candidateIdentity", out var identity))
+            RejectUnknownOrPathProperties(RequireObject(identity), Names("mode", "digits", "candidateId"));
+        if (!value.TryGetProperty("questions", out var questions) || questions.ValueKind != JsonValueKind.Array)
+            throw new LocalOperationException("INVALID_TEMPLATE", "请提供答题纸题目结构。");
+        foreach (var question in questions.EnumerateArray())
+            RejectUnknownOrPathProperties(RequireObject(question), Names("number", "type", "maximumScore", "body", "options", "subjectiveHeightMm"));
+        try
+        {
+            var options = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+                Converters = { new JsonStringEnumConverter(allowIntegerValues: false) },
+                TypeInfoResolver = new DefaultJsonTypeInfoResolver
+                {
+                    Modifiers = { info =>
+                    {
+                        // Requests may omit fields with published defaults. Persisted snapshots remain strict.
+                        if (info.Type == typeof(SchoolSheetDefinition) || info.Type == typeof(SchoolQuestionDefinition) || info.Type == typeof(SchoolCandidateIdentity))
+                            foreach (var property in info.Properties) property.IsRequired = false;
+                    } }
+                }
+            };
+            var definition = value.Deserialize<SchoolSheetDefinition>(options) ?? throw new JsonException();
+            return SchoolAnswerSheet.Create(definition).Pages[0].SchoolDefinition!;
+        }
+        catch (Exception exception) when (exception is JsonException or ArgumentException)
+        {
+            throw new LocalOperationException("INVALID_TEMPLATE", "答题纸定义无效，请检查考试标识、纸张、题目和填涂框尺寸。");
         }
     }
 
@@ -1103,7 +1182,18 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
         try
         {
-            return AnswerKey.Create(layout.QuestionCount, layout.OptionsPerQuestion, values);
+            if (layout.SchoolDefinition is {} definition)
+            {
+                var allChoice = definition.Questions.Where(question => question.Type == SchoolQuestionType.Choice).ToArray();
+                if (values.Count == allChoice.Length && allChoice.All(question => values.ContainsKey(question.Number)))
+                {
+                    if (allChoice.Any(question => values[question.Number] is not { Length: 1 } answer
+                        || answer[0] < 'A' || answer[0] >= 'A' + question.Options!.Count))
+                        throw new ArgumentException("考试标准答案包含无效选项。");
+                    values = layout.Questions.ToDictionary(question => question.Number, question => values[question.Number]);
+                }
+            }
+            return AnswerKey.Create(layout, values);
         }
         catch (Exception exception)
         {
@@ -1331,12 +1421,12 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         return parsed;
     }
 
-    private static IReadOnlyList<ReviewEdit> ReadReviewEdits(JsonElement parameters, int questionCount)
+    private static IReadOnlyList<ReviewEdit> ReadReviewEdits(JsonElement parameters, AnswerSheetLayout layout)
     {
         if (!parameters.TryGetProperty("edits", out var edits)
             || edits.ValueKind != JsonValueKind.Array
             || edits.GetArrayLength() == 0
-            || edits.GetArrayLength() > questionCount)
+            || edits.GetArrayLength() > layout.QuestionCount)
         {
             throw new LocalOperationException("INVALID_REVIEW", "请提供一条或多条有效的复核修改。");
         }
@@ -1355,7 +1445,7 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
                 || questionValue.ValueKind != JsonValueKind.Number
                 || !questionValue.TryGetInt32(out var questionNumber)
                 || questionNumber <= 0
-                || questionNumber > questionCount
+                || !layout.Questions.Any(question => question.Number == questionNumber)
                 || !questionNumbers.Add(questionNumber))
             {
                 throw new LocalOperationException("INVALID_REVIEW", "复核题号无效或重复。");

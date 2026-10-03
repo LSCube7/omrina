@@ -157,3 +157,38 @@ node .\tests\integration\m3-sdk-e2e.mjs http://127.0.0.1:17845 "本次合成PNG�
 脚本使用固定测试来源 `http://localhost:3000`。在服务终端核对 `pending` 后批准请求，把一次性码输入脚本，验证模板、上传、识别、评分、复核、导出和任务恢复，最后撤销测试授权。完成后在服务终端输入 `quit`。
 
 本联调使用实际 Server、Desktop 业务适配器和 Core 评分/复核/导出；设备和成功识别输出使用模拟实现。它不验证真实答题纸识别准确率或浏览器权限。实际验证范围与失败记录见 [验证记录](../../docs/development/validation.md)。
+
+## 学校答题纸（schema 3）
+
+`createSchoolTemplateTask()` 复用 `template` 操作，传入 `{schoolDefinition}`，不能混入旧模板的 `title/questionCount/subjectiveRegions` 参数。学校枚举使用以下大小写：`A4Portrait/A3Landscape`、`AnswerOnly/WithQuestions`、`Choice/Subjective`、`Circle/Rectangle`、`Inside/Outside`、`Barcode/Marking`。
+
+```ts
+const task = await client.createSchoolTemplateTask({
+  idempotencyKey: crypto.randomUUID(),
+  parameters: {
+    schoolDefinition: {
+      examId: "math-2026", layoutDocumentId: "math-layout", version: 1,
+      title: "数学测验", paper: "A3Landscape", columns: 3,
+      mode: "AnswerOnly", bubbleShape: "Rectangle", labelPlacement: "Inside",
+      bubbleWidthMm: 2, bubbleHeightMm: 1.8,
+      candidateIdentity: { mode: "Barcode", digits: 8 },
+      questions: [
+        { number: 1, type: "Choice", maximumScore: 2, options: ["甲", "乙", "丙", "丁"] },
+        { number: 2, type: "Subjective", maximumScore: 10, subjectiveHeightMm: 40 },
+      ],
+    },
+  },
+});
+```
+
+成功任务返回 `SchoolTemplateDocument`：`{documentId,examId,version,pages}`。每页包含 `templateId/schemaVersion/paper/side/pageIndex/widthMm/heightMm/schoolMetadata/svg` 及原有模板摘要字段；`pageIndex` 从 0 开始，`schoolMetadata.pageNumber` 从 1 开始，正反面为 `Front/Back`。使用对应页的 `templateId` 上传或扫描；每页资源仍只属于生成它的授权。`TaskSnapshot.result` 保持 `unknown`，导出的类型用于调用方检查结果后使用。
+
+定义必须包含 `examId/layoutDocumentId/questions`。未提供的字段采用 Core 默认值；A3 必须显式指定两栏或三栏。题号为唯一正整数；选择题有 2–6 个选项；题目 1–500 道，最多 64 页；圆框直径/矩形宽度大于 0 且 ≤2 mm，矩形高度 ≤4 mm；主观题高度为 10–230 mm，仍须能放进所选栏。题目正文最多 8000 字符，定义序列化后最多 60000 UTF-8 字节，HTTP 总请求最多 64 KiB。SDK 与服务端拒绝未知字段、路径字段和重复题号；服务端也拒绝重复 JSON 属性。
+
+学校页上传/扫描会校验四角、方向及考试机器码的考试、版本、页码和正反面；无法确认时任务返回 `CAPTURE_SCHOOL_PAGE_MISMATCH`，不保存该页面。采集结果和识别结果外层提供 `schoolMetadata/candidateId/identityStatus`：可靠读出考号时 `Identified`，空白、多涂、损坏条码或无反面身份区时 `RequireAssociation` 且 `candidateId:null`。考试码不能替代考号；本轮不会根据页序自动配对学生。
+
+`answerKey` 可以传本页全部选择题或整个考试全部选择题，题号沿用全局题号；学校题目分值由定义决定。页面选择题评分不能作为整份多页混合答卷的最终总分，页面完整性、身份与主观题确认仍需桌面流程处理。
+
+扫描沿用 `{templateId,deviceId,dpi}`，纸张从模板获得。当前适配器只请求平板扫描：A4 纵向或 A3 横向，不拉伸/裁切为请求尺寸，不回退 A4；设备能力未经过验证时不会声明支持 A3。实际扫描须设备和驱动支持，请用实纸验收；导入不需要扫描设备。
+
+离线学校真实 HTTP SDK 回归：先离线构建 SDK 和 `tests/m3-desktop`，再运行 `node tests/integration/school-sdk-e2e.mjs`。脚本启动临时 loopback 测试 host，使用合成纸验证生成、采集、考号、识别、非连续题号复核、错考试拒绝和授权隔离；不会扫描真实设备。测试 host 的批准入口仅在测试进程标准输入，生产 API 不增加自动批准。

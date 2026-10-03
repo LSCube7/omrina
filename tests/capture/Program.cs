@@ -323,11 +323,11 @@ static async Task VerifyUnsupportedLatestTemplateSchemaAsync(string sourcePath, 
     var (store, capture) = await CreateHistoryCaptureAsync(sourcePath, testRoot, "template-schema");
     await UpdateManifestAsync(
         capture,
-        manifest => manifest["templateSchemaVersion"] = AnswerSheetLayout.TemplateSchemaVersion + 1);
+        manifest => manifest["templateSchemaVersion"] = 99);
 
     var exception = await AssertThrowsAsync<CaptureStorageException>(
         () => Task.Run(() => store.LoadLatest()));
-    AssertEqual("CAPTURE_HISTORY_INVALID", exception.Code, "unsupported template schema should be rejected");
+    AssertEqual("CAPTURE_TEMPLATE_UNSUPPORTED", exception.Code, "unsupported template schema should be rejected");
 }
 
 static async Task VerifyLatestPathTraversalAsync(string sourcePath, string testRoot)

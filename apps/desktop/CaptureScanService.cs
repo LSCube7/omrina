@@ -13,7 +13,8 @@ internal static class CaptureScanService
         ScanDevice device,
         int dpi,
         string temporaryRoot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string pageSize = "A4")
     {
         ArgumentNullException.ThrowIfNull(scanController);
         ArgumentNullException.ThrowIfNull(device);
@@ -40,7 +41,14 @@ internal static class CaptureScanService
                 Device = device,
                 Driver = device.Driver,
                 PaperSource = PaperSource.Flatbed,
-                PageSize = PageSize.A4,
+                PageSize = pageSize switch
+                {
+                    "A4" => PageSize.A4,
+                    "A3" => new PageSize(420m, 297m, PageSizeUnit.Millimetre),
+                    _ => throw new NotSupportedException("只支持 A4 纵向或 A3 横向扫描。")
+                },
+                StretchToPageSize = false,
+                CropToPageSize = false,
                 Dpi = dpi,
                 UseNativeUI = false
             };

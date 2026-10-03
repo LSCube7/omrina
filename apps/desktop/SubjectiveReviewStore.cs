@@ -594,7 +594,7 @@ public sealed class SubjectiveReviewStore
                 "批阅记录的模板映射已损坏或不受支持。",
                 exception);
         }
-        if (layout.SchemaVersion != AnswerSheetLayout.MixedTemplateSchemaVersion
+        if (layout.SchemaVersion is not (AnswerSheetLayout.MixedTemplateSchemaVersion or 3)
             || layout.SubjectiveRegions.Count != snapshot.Questions.Count
             || templateMapping.Regions.Count != snapshot.Questions.Count)
         {

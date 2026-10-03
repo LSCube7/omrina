@@ -11,6 +11,9 @@ using Omrina.Scanning;
 using Omrina.Server;
 using SkiaSharp;
 
+if (args.Contains("--school-http-harness", StringComparer.Ordinal))
+    return await SchoolIntegrationRegression.RunHttpHarnessAsync();
+
 if (args.Contains("--http-harness", StringComparer.Ordinal))
 {
     return await RunHttpHarnessAsync();
@@ -19,6 +22,7 @@ if (args.Contains("--http-harness", StringComparer.Ordinal))
 try
 {
     SubjectiveReviewInputRegression.Run();
+    await SchoolIntegrationRegression.RunAsync();
     VerifyScannerDeviceIdentityMap();
     await VerifyDesktopAgentOperationsAsync();
     await VerifyActualSkiaRejectsSyntheticFixtureAsync();
@@ -29,7 +33,7 @@ try
 }
 catch (Exception exception)
 {
-    Console.Error.WriteLine($"FAIL: {exception.GetType().Name}: {exception.Message}");
+    Console.Error.WriteLine($"FAIL: {exception}");
     return 1;
 }
 

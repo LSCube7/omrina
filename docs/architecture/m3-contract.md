@@ -63,3 +63,23 @@ HTTP 基址 `http://127.0.0.1:17843`。JSON 属性 camelCase；枚举采用 came
 `dotnet restore tests/server/Omrina.Server.Tests.csproj --configfile .tools/NuGet.Config` 使用仓库离线源；`dotnet run --project tests/server/Omrina.Server.Tests.csproj --no-restore` 运行真实loopback HTTP/WS测试、mock operations，不调用扫描硬件。
 
 `-- --browser-harness` 启动仅测试mock host17844；console stdin 接受 `pending`、`approve <requestId>`、`grants`、`revoke <grantId>`、`quit`。测试code只在测试console显示，不写文件；生产服务无自动批准和测试路由。
+
+## 学校答题纸扩展（schema 3）
+
+`template` 操作新增互斥输入 `{schoolDefinition}`；原 schema 1/2 请求继续支持。`schoolDefinition` 包含 `examId/layoutDocumentId/version/title/paper/mode/columns/bubbleShape/labelPlacement/bubbleWidthMm/bubbleHeightMm/candidateIdentity/duplex/repeatBackIdentity/questions`。只有 `examId/layoutDocumentId/questions` 是请求必需项，其余沿用 Core 默认值；持久化快照则要求完整字段，以免历史版式因为默认值变化而改变。
+
+学校定义枚举采用 PascalCase 字符串：`A4Portrait/A3Landscape`、`AnswerOnly/WithQuestions`、`Choice/Subjective`、`Circle/Rectangle`、`Inside/Outside`、`Barcode/Marking`。这与外层 operation/status 的 camelCase 分开。`candidateIdentity` 为 `{mode,digits,candidateId?}`；`questions` 为 `[{number,type,maximumScore?,body?,options?,subjectiveHeightMm?}]`。拒绝所有层级未知字段、路径字段、重复属性与重复题号；不接受 enum 整数。
+
+成功返回 `{documentId,examId,version,pages}`，每页含原模板摘要与 `schemaVersion:3,paper,side,pageIndex,widthMm,heightMm,schoolMetadata,svg`。`schoolMetadata` 为 `{examId,layoutDocumentId,version,pageNumber,side,templateId}`；`pageIndex` 零基，`pageNumber` 一基，`side` 为 `Front/Back`。分页模板分别注册在当前 grant，可直接沿用 upload/scan/recognize 操作；目录接口不会列出桌面本地考试或其他 grant 的资料。
+
+学校定义限制：题目 1–500、最多 64 页、选择题选项 2–6、考号 1–20 位数字；A4 一栏、A3 两栏或三栏；圆框直径/矩形宽度 `(0,2] mm`、矩形高度 `(0,4] mm`、每题主观区高度 `[10,230] mm`。题号必须唯一且为正整数。标题/考试 ID/版式 ID 最多 80 字符；每题正文最多 8000 字符；定义 UTF-8 最大 60000 字节，仍受完整 HTTP 请求 64 KiB 限制。无法放入一栏的题目会明确拒绝。
+
+学校 capture 在提交目录前验证原图四角、方向和机器码；考试 ID、版式版本、页码、正反面或页模板身份不匹配时返回 `CAPTURE_SCHOOL_PAGE_MISMATCH`，不保存页面。manifest 保存完整页快照、学校元数据及原图 SHA256；重新打开时复算快照身份并验证原图哈希，兼容读取既有 schema 1/2 数据。
+
+upload/scan 的 capture 摘要及 recognize 外层结果增加 `schoolMetadata,candidateId,identityStatus`。仅可靠读出的考号为 `Identified`；空白、多涂、无条码、无法解码或无反面身份区为 `RequireAssociation`，考号为空。不依据考试码或页序猜测学生，不自动配对无身份反面。旧版 capture 的学校字段为 null。
+
+学校 score/review 接受当前页全部选择题答案，也接受完整考试选择题答案（校验合法选项后取本页）；不连续题号按定义原样保留，分值来自学校定义。输出为页面选择题成绩，不能代表缺页、未确认身份或未完成主观题的整卷最终成绩。
+
+scan 纸张由关联页模板决定，NAPS2 请求 A4 210×297 或 A3 420×297 mm 平板扫描，禁止尺寸拉伸/裁切及回退 A4；实际设备/驱动可能拒绝 A3，未验证能力不声明为支持。导入 A3 不依赖设备。
+
+`node tests/integration/school-sdk-e2e.mjs` 使用真实 loopback HTTP 与已构建 SDK，对合成 A3 纸执行配对、生成、导入、可靠考号、识别、非连续题号复核、错误考试拒绝和撤销授权；测试 host 不运行扫描硬件，也不扩大生产批准边界。
