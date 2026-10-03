@@ -39,7 +39,7 @@
                                     <ComboBoxItem Content="框内"/>
                                 </ComboBox>
                                 <NumberBox x:Name="BubbleWidthBox" Header="圆框直径 / 矩形宽（毫米）" Value="1.8" Minimum="0.1" Maximum="2" SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
-                                <NumberBox x:Name="BubbleHeightBox" Header="矩形高（毫米）" Value="1.8" Minimum="0.1" Maximum="4" SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
+                                <NumberBox x:Name="BubbleHeightBox" Header="矩形高（毫米）" Value="1.8" Minimum="0.1" Maximum="2" SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
                             </StackPanel>
                         </ContentControl>
                     </Expander>
@@ -55,12 +55,44 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
+                    <TextBlock Text="题组" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <ComboBox x:Name="LayoutOrderBox" Header="题组排列" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                        <ComboBoxItem Content="按组混排"/>
+                        <ComboBoxItem Content="先选择题组，再解答题组"/>
+                    </ComboBox>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="AddGroupButton" Content="新建空组" Click="AddGroup_Click"/>
+                        <Button x:Name="RemoveGroupButton" Content="删除空组" Click="RemoveGroup_Click"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="MoveGroupUpButton" Content="题组上移" Click="MoveGroupUp_Click"/>
+                        <Button x:Name="MoveGroupDownButton" Content="题组下移" Click="MoveGroupDown_Click"/>
+                    </StackPanel>
+                    <ListView x:Name="GroupList" MaxHeight="140" SelectionChanged="GroupList_SelectionChanged">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap"/>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <StackPanel Spacing="8">
+                        <TextBox x:Name="GroupTitleBox" Header="题组名称" MaxLength="60" TextChanged="GroupTitleChanged" HorizontalAlignment="Stretch"/>
+                        <Button x:Name="ApplyGroupTitleButton" Content="应用组名" Click="ApplyGroupTitle_Click"/>
+                    </StackPanel>
+                    <TextBlock Text="题组用于安排排版与题目顺序；组级裁切与阅卷映射将在后续版本实现。" TextWrapping="Wrap"/>
                     <ContentControl x:Name="QuestionPanel" HorizontalContentAlignment="Stretch">
                         <StackPanel Spacing="8">
                             <NumberBox x:Name="QuestionNumberBox" Header="题号" Value="1" Minimum="1" Maximum="1000000" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
-                            <ComboBox x:Name="QuestionTypeBox" Header="题型" SelectedIndex="0" SelectionChanged="SelectionChanged">
+                            <ComboBox x:Name="QuestionTypeBox" Header="题型" SelectedIndex="0" SelectionChanged="QuestionType_SelectionChanged">
                                 <ComboBoxItem Content="选择题"/>
                                 <ComboBoxItem Content="解答题"/>
+                            </ComboBox>
+                            <ComboBox x:Name="QuestionGroupBox" Header="所属题组" SelectionChanged="QuestionGroup_SelectionChanged">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
                             </ComboBox>
                             <NumberBox x:Name="ScoreBox" Header="满分" Value="1" Minimum="0.01" Maximum="1000000" SmallChange="0.5" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
                             <TextBox x:Name="BodyBox" Header="题目正文" Text="" TextChanged="InputChanged" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90"/>
@@ -68,6 +100,10 @@
                             <TextBox x:Name="OptionsBox" Header="选项正文（每行一个，按 A–F 顺序）" Text="" TextChanged="InputChanged" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90"/>
                             <NumberBox x:Name="HeightBox" Header="本题答题区高（毫米）" Value="30" Minimum="10" Maximum="230" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="NumberChanged"/>
                             <TextBlock Text="解答区宽度自动占满所在栏。图片正文暂未提供，请使用文字；不会自动导入图片。" TextWrapping="Wrap"/>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button x:Name="MoveQuestionUpButton" Content="本组内上移" Click="MoveQuestionUp_Click"/>
+                                <Button x:Name="MoveQuestionDownButton" Content="本组内下移" Click="MoveQuestionDown_Click"/>
+                            </StackPanel>
                             <Button x:Name="ApplyQuestionButton" Content="应用所选题目" Click="ApplyQuestion_Click"/>
                         </StackPanel>
                     </ContentControl>

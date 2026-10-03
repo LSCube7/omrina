@@ -106,6 +106,14 @@ export type SchoolQuestionDefinition = {
   subjectiveHeightMm?: number;
 };
 
+export type SchoolQuestionGroupDefinition = {
+  id: string;
+  title: string;
+  questionNumbers: number[];
+};
+
+export type SchoolLayoutOrder = "Mixed" | "Separated";
+
 export type SchoolSheetDefinition = {
   examId: string;
   layoutDocumentId: string;
@@ -121,7 +129,16 @@ export type SchoolSheetDefinition = {
   candidateIdentity?: { mode?: "Barcode" | "Marking"; digits?: number; candidateId?: string | null };
   duplex?: boolean;
   repeatBackIdentity?: boolean;
+  groups?: SchoolQuestionGroupDefinition[];
+  layoutOrder?: SchoolLayoutOrder;
   questions: SchoolQuestionDefinition[];
+};
+
+export type SchoolQuestionGroupGeometry = {
+  groupId: string;
+  title: string;
+  questionNumbers: number[];
+  rectangleMm: TemplateMillimetreRectangle;
 };
 
 export type SchoolTemplateTaskParameters = { schoolDefinition: SchoolSheetDefinition };
@@ -141,6 +158,7 @@ export type SchoolTemplatePage = TemplateSummary & {
   widthMm: number;
   heightMm: number;
   schoolMetadata: SchoolPageMetadata;
+  schoolGroups: SchoolQuestionGroupGeometry[];
 };
 export type SchoolTemplateDocument = { documentId: string; examId: string; version: number; pages: SchoolTemplatePage[] };
 export type SchoolIdentityStatus = "Identified" | "RequireAssociation";
@@ -1563,7 +1581,7 @@ function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
   const fail = (): never => { throw invalidArgument("School answer-sheet definition is invalid."); };
   const keys = (value: unknown, allowed: string[]): value is Record<string, unknown> =>
     isRecord(value) && Object.keys(value).every((key) => allowed.includes(key));
-  if (!keys(definition, ["examId", "layoutDocumentId", "version", "title", "paper", "mode", "columns", "bubbleShape", "labelPlacement", "bubbleWidthMm", "bubbleHeightMm", "candidateIdentity", "duplex", "repeatBackIdentity", "questions"])) fail();
+  if (!keys(definition, ["examId", "layoutDocumentId", "version", "title", "paper", "mode", "columns", "bubbleShape", "labelPlacement", "bubbleWidthMm", "bubbleHeightMm", "candidateIdentity", "duplex", "repeatBackIdentity", "groups", "layoutOrder", "questions"])) fail();
   requireNonEmptyString(definition.examId, "examId");
   requireNonEmptyString(definition.layoutDocumentId, "layoutDocumentId");
   if (definition.examId.length > 80 || definition.layoutDocumentId.length > 80) fail();
@@ -1575,10 +1593,16 @@ function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
   if (definition.labelPlacement !== undefined && !["Inside", "Outside"].includes(definition.labelPlacement)) fail();
   const columns = definition.columns ?? 1;
   if ((definition.paper ?? "A4Portrait") === "A4Portrait" ? columns !== 1 : columns !== 2 && columns !== 3) fail();
-  if (definition.bubbleWidthMm !== undefined && (!isFinitePositiveNumber(definition.bubbleWidthMm) || definition.bubbleWidthMm > 2)) fail();
-  if (definition.bubbleHeightMm !== undefined && (!isFinitePositiveNumber(definition.bubbleHeightMm) || definition.bubbleHeightMm > 4)) fail();
+  const width = definition.bubbleWidthMm ?? 1.8;
+  const height = definition.bubbleHeightMm ?? 1.8;
+  const isTenthMillimetre = (value: number): boolean => isFinitePositiveNumber(value)
+    && Number.isSafeInteger(Math.round(value * 10))
+    && Math.abs(value * 10 - Math.round(value * 10)) <= 1e-9;
+  if (!isTenthMillimetre(width) || !isTenthMillimetre(height) || Math.round(height * 10) > 20) fail();
+  if ((definition.bubbleShape ?? "Circle") === "Circle" && Math.round(width * 10) > 20) fail();
   if (definition.duplex !== undefined && typeof definition.duplex !== "boolean") fail();
   if (definition.repeatBackIdentity !== undefined && typeof definition.repeatBackIdentity !== "boolean") fail();
+  if (definition.layoutOrder !== undefined && definition.layoutOrder !== "Mixed" && definition.layoutOrder !== "Separated") fail();
   if (definition.candidateIdentity !== undefined) {
     const identity = definition.candidateIdentity;
     if (!keys(identity, ["mode", "digits", "candidateId"])) fail();
@@ -1589,14 +1613,63 @@ function validateSchoolDefinition(definition: SchoolSheetDefinition): void {
   }
   if (!Array.isArray(definition.questions) || definition.questions.length < 1 || definition.questions.length > 500) fail();
   const numbers = new Set<number>();
+  const questionTypes = new Map<number, SchoolQuestionDefinition["type"]>();
   for (const question of definition.questions) {
     if (!keys(question, ["number", "type", "maximumScore", "body", "options", "subjectiveHeightMm"]) || !isPositiveInt32(question.number) || numbers.has(question.number) || !["Choice", "Subjective"].includes(question.type)) fail();
     numbers.add(question.number);
+    questionTypes.set(question.number, question.type);
     if (question.maximumScore !== undefined && (!isFinitePositiveNumber(question.maximumScore) || question.maximumScore > 1_000_000)) fail();
     if (question.body !== undefined && (typeof question.body !== "string" || question.body.length > 8000)) fail();
     if (question.type === "Choice" && (!Array.isArray(question.options) || question.options.length < 2 || question.options.length > 6 || question.options.some((option) => typeof option !== "string" || option.length > 1000))) fail();
     if (question.subjectiveHeightMm !== undefined && (!Number.isFinite(question.subjectiveHeightMm) || question.subjectiveHeightMm < 10 || question.subjectiveHeightMm > 230)) fail();
   }
+
+  if (definition.groups === undefined || (Array.isArray(definition.groups) && definition.groups.length === 0)) return;
+  if (!Array.isArray(definition.groups) || definition.groups.length > definition.questions.length) fail();
+  const groupIds = new Set<string>();
+  const groupedQuestionNumbers = new Set<number>();
+  for (const group of definition.groups) {
+    if (!keys(group, ["id", "title", "questionNumbers"])
+      || typeof group.id !== "string"
+      || group.id.length < 1
+      || group.id.length > 80
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(group.id)
+      || groupIds.has(group.id)
+      || typeof group.title !== "string"
+      || group.title.trim().length === 0
+      || group.title.length > 80
+      || /[\r\n\t]/.test(group.title)
+      || !isXml10String(group.title)
+      || !Array.isArray(group.questionNumbers)
+      || group.questionNumbers.length < 1
+      || group.questionNumbers.length > numbers.size) fail();
+    groupIds.add(group.id);
+
+    let groupQuestionType: SchoolQuestionDefinition["type"] | undefined;
+    for (const questionNumber of group.questionNumbers) {
+      if (!isPositiveInt32(questionNumber)
+        || !numbers.has(questionNumber)
+        || groupedQuestionNumbers.has(questionNumber)) fail();
+      const questionType = questionTypes.get(questionNumber)!;
+      if (groupQuestionType !== undefined && groupQuestionType !== questionType) fail();
+      groupQuestionType = questionType;
+      groupedQuestionNumbers.add(questionNumber);
+    }
+  }
+  if (groupedQuestionNumbers.size !== numbers.size) fail();
+}
+
+function isXml10String(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint !== 0x9 && codePoint !== 0xa && codePoint !== 0xd
+      && !(codePoint >= 0x20 && codePoint <= 0xd7ff)
+      && !(codePoint >= 0xe000 && codePoint <= 0xfffd)
+      && !(codePoint >= 0x10000 && codePoint <= 0x10ffff)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function validateScanParameters(parameters: ScanTaskParameters): void {

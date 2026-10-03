@@ -30,6 +30,20 @@ internal static class SchoolSheetRegression
         var two=SchoolAnswerSheet.Create(basis with{BubbleWidthMm=2,BubbleHeightMm=2}).Pages[0];
         Check(two.Bubbles.All(b=>b.RadiusMm==1),"2mm inclusive");
         Reject(()=>SchoolAnswerSheet.Create(basis with{BubbleWidthMm=2.01}),"2.01 rejected");
+        Reject(()=>SchoolAnswerSheet.Create(basis with{BubbleWidthMm=2.1}),"circle diameter 2.1 rejected");
+        Reject(()=>SchoolAnswerSheet.Create(basis with{BubbleShape=BubbleShape.Rectangle,BubbleHeightMm=2.1}),"rectangle height 2.1 rejected");
+        Reject(()=>SchoolAnswerSheet.Create(basis with{BubbleWidthMm=1.85}),"new dimensions must use 0.1 mm steps");
+        var wideDefinition=basis with{BubbleShape=BubbleShape.Rectangle,BubbleWidthMm=3.5000000000000004,BubbleHeightMm=2,
+            CandidateIdentity=new(CandidateIdentityMode.Marking,4),Questions=[new(7,SchoolQuestionType.Choice,1,"",["甲","乙","丙","丁"])]};
+        var wide=SchoolAnswerSheet.Create(wideDefinition).Pages[0];
+        Check(wide.SchoolDefinition!.BubbleWidthMm==3.5 && wide.SchoolDefinition.BubbleHeightMm==2,"floating point noise should save on the tenth millimetre grid");
+        Check(wide.Bubbles.Select(b=>b.Center.X).Zip(wide.Bubbles.Skip(1).Select(b=>b.Center.X),(a,b)=>b-a).All(step=>step>=wideDefinition.BubbleWidthMm+3-1e-9),"wide choice bubbles keep a clear gap");
+        Check(wide.CandidateDigits[0].Bubbles[0].Center.X==28 && wide.CandidateDigits[1].Bubbles[0].Center.X-wide.CandidateDigits[0].Bubbles[0].Center.X>=wideDefinition.BubbleWidthMm+3-1e-9,"wide candidate digits use dynamic spacing");
+        Check(AnswerSheetLayout.FromJson(wide.ToJson()).ToJson()==wide.ToJson(),"wide dimensions round trip with canonical precision");
+        var wideRecognition=new AnswerSheetRecognizer().Recognize(wide,Render(wide,true));
+        Check(wideRecognition.Status==RecognitionStatus.Accepted && wideRecognition.Questions.Single().Options.Single(o=>o.State==OptionMarkState.Selected).OptionLabel=="B","wide rectangular marks remain recognizable");
+        Reject(()=>SchoolAnswerSheet.Create(basis with{BubbleShape=BubbleShape.Rectangle,BubbleWidthMm=90,BubbleHeightMm=2,Questions=[new(1,SchoolQuestionType.Choice,1,"",["甲","乙"])]}),"wide choices that exceed their column are rejected");
+        Reject(()=>SchoolAnswerSheet.Create(basis with{Paper=SchoolPaper.A3Landscape,Columns=3,BubbleShape=BubbleShape.Rectangle,BubbleWidthMm=52,BubbleHeightMm=2,Questions=[new(1,SchoolQuestionType.Choice,1,"",["甲","乙"])]}),"wide example must stay clear of QR code");
         Reject(()=>SchoolAnswerSheet.Create(basis with{Title=new string('长',80)}),"oversize title rejected");
         Reject(()=>SchoolAnswerSheet.Create(basis with{Questions=new[]{new SchoolQuestionDefinition(1,SchoolQuestionType.Choice,1,"invalid\u0001",new[]{"",""})}}),"unprintable text rejected");
         Reject(()=>SchoolAnswerSheet.Create(basis with{Questions=new[]{new SchoolQuestionDefinition(1,SchoolQuestionType.Subjective,1,new string('长',8000),null,200)},Mode=SchoolContentMode.WithQuestions}),"long content rejected");
@@ -38,6 +52,7 @@ internal static class SchoolSheetRegression
         Reject(()=>AnswerSheetLayout.FromJson(two.ToJson().Replace("\"pageIndex\":0","\"pageIndex\":0,\"pageIndex\":0")),"duplicate field rejected");
         var withBody=SchoolAnswerSheet.Create(basis with{Mode=SchoolContentMode.WithQuestions}).Pages[0];
         Check(withBody.ToSvg().Contains("正文&lt;&amp;&gt;",StringComparison.Ordinal),"body escaped");
+        VerifyQuestionGroups(basis);
 
         foreach(var shape in new[]{BubbleShape.Circle,BubbleShape.Rectangle})
             foreach(var placement in new[]{LabelPlacement.Inside,LabelPlacement.Outside})
@@ -91,6 +106,108 @@ internal static class SchoolSheetRegression
         var tiny=SchoolAnswerSheet.Create(basis with { BubbleWidthMm=.2,BubbleHeightMm=.2,Questions=new[]{new SchoolQuestionDefinition(1,SchoolQuestionType.Choice,1,"",new[]{"",""})} }).Pages[0];
         var tinyResult=new AnswerSheetRecognizer().Recognize(tiny,Render(tiny,true));
         Check(tinyResult.Questions.Single().State==QuestionMarkState.Uncertain,"subpixel bubbles require review");
+    }
+
+    private static void VerifyQuestionGroups(SchoolSheetDefinition basis)
+    {
+        var questions = new SchoolQuestionDefinition[]
+        {
+            new(1, SchoolQuestionType.Choice, 2, "", ["甲", "乙", "丙"]),
+            new(2, SchoolQuestionType.Choice, 3, "", ["甲", "乙", "丙"]),
+            new(3, SchoolQuestionType.Choice, 4, "", ["甲", "乙", "丙"]),
+            new(4, SchoolQuestionType.Subjective, 5, "", null, 20),
+            new(5, SchoolQuestionType.Subjective, 6, "", null, 35)
+        };
+        var mixedGroups = new SchoolQuestionGroupDefinition[]
+        {
+            new("choice-a", "第一组", [3, 1]),
+            new("subjective-a", "主观组", [5, 4]),
+            new("choice-b", "第二客观组", [2])
+        };
+        var mixedDefinition = basis with
+        {
+            Mode = SchoolContentMode.AnswerOnly,
+            Paper = SchoolPaper.A3Landscape,
+            Columns = 2,
+            CandidateIdentity = new(CandidateIdentityMode.Barcode, 4),
+            Questions = questions,
+            Groups = mixedGroups,
+            LayoutOrder = SchoolLayoutOrder.Mixed
+        };
+        var mixedPage = SchoolAnswerSheet.Create(mixedDefinition).Pages.Single();
+        Check(mixedPage.SchoolGroups.Select(group => group.GroupId).SequenceEqual(new[] { "choice-a", "subjective-a", "choice-b" }), "Mixed preserves group order");
+        Check(mixedPage.SchoolGroups[0].QuestionNumbers.SequenceEqual(new[] { 3, 1 }), "group member order is preserved");
+        Check(mixedPage.Questions.Select(question => question.Number).SequenceEqual(new[] { 3, 1, 2 }), "original question numbers are preserved in layout");
+        Check(mixedPage.Questions.Single(question => question.Number == 1).Bubbles[0].QuestionNumber == 1, "question score and bubble identity remain tied to the original number");
+        Check(mixedPage.SchoolGroups.All(group => Math.Abs(group.RectangleMm.Width - mixedPage.SchoolInformationArea!.Value.Width) < .0001), "group geometry spans the full column");
+        Check(mixedPage.SubjectiveRegions.Select(region => region.Rectangle.Height).SequenceEqual(new[] { 35d, 20d }), "subjective regions keep per-question heights and group member order");
+        Check(mixedPage.ToSvg().Contains("<line ", StringComparison.Ordinal) && mixedPage.ToSvg().Contains("第一组", StringComparison.Ordinal), "group title and divider render from page geometry");
+        Check(AnswerSheetLayout.FromJson(mixedPage.ToJson()).ToSvg() == mixedPage.ToSvg(), "explicit groups survive canonical round trip");
+        Check(mixedPage.ToJson().Contains("\"groups\":[", StringComparison.Ordinal) && mixedPage.ToJson().Contains("\"layoutOrder\":\"Mixed\"", StringComparison.Ordinal), "canonical snapshot stores groups and layout order");
+
+        var separatedDefinition = mixedDefinition with
+        {
+            Groups = [new("subjective-a", "主观组", [5, 4]), new("choice-a", "第一组", [3, 1]), new("choice-b", "第二客观组", [2])],
+            LayoutOrder = SchoolLayoutOrder.Separated
+        };
+        var separatedPage = SchoolAnswerSheet.Create(separatedDefinition).Pages.Single();
+        Check(separatedPage.SchoolGroups.Select(group => group.GroupId).SequenceEqual(new[] { "choice-a", "choice-b", "subjective-a" }), "Separated stably puts objective groups before subjective groups");
+
+        var conveniencePage = SchoolAnswerSheet.Create(basis with
+        {
+            Mode = SchoolContentMode.AnswerOnly,
+            CandidateIdentity = new(CandidateIdentityMode.Barcode, 4),
+            Questions = Enumerable.Range(1, 4).Select(number => new SchoolQuestionDefinition(number, SchoolQuestionType.Choice, number, "", ["甲", "乙", "丙", "丁"])).ToArray(),
+            Groups = [new("four-questions", "四道客观题", [1, 2, 3, 4])]
+        }).Pages.Single();
+        var autoGroups = SchoolAnswerSheet.Create(basis with
+        {
+            Mode = SchoolContentMode.AnswerOnly,
+            CandidateIdentity = new(CandidateIdentityMode.Barcode, 4),
+            Questions = Enumerable.Range(1, 4).Select(number => new SchoolQuestionDefinition(number, SchoolQuestionType.Choice, number, "", ["甲", "乙", "丙", "丁"])).ToArray(),
+            Groups = []
+        }).Pages.Single();
+        Check(autoGroups.SchoolDefinition!.Groups.Select(group => group.Id).SequenceEqual(new[] { "question-1", "question-2", "question-3", "question-4" }), "empty Groups normalizes to stable explicit single-question groups");
+        var rowHeights = conveniencePage.Questions.Select(question => question.Bubbles[0].Center.Y).ToArray();
+        Check(rowHeights.Zip(rowHeights.Skip(1), (first, second) => second - first).All(height => height is >= 5 and <= 6), "AnswerOnly objective groups use compact 5–6 mm rows");
+        Check(conveniencePage.Questions.All(question => question.NumberPosition.Y - question.Bubbles[0].Center.Y is >= 0 and <= 2), "objective question labels share the bubble row");
+        Check(AnswerSheetLayout.FromJson(conveniencePage.ToJson()).ToJson() == conveniencePage.ToJson(), "generated groups survive strict snapshot round trip");
+        Reject(() => AnswerSheetLayout.FromJson(conveniencePage.ToJson().Replace("\"layoutOrder\":\"Mixed\"", "", StringComparison.Ordinal)), "missing required layout order rejected");
+
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("same", "组一", [1]), new("same", "组二", [2, 3, 4, 5])] }), "duplicate group IDs rejected");
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("choice-a", "第一组", [1, 2])] }), "incomplete question coverage rejected");
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("choice-a", "第一组", [1, 1]), new("others", "其余题目", [2, 3, 4, 5])] }), "duplicate member numbers rejected");
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("choice-a", "第一组", [1, 999]), new("others", "其余题目", [2, 3, 4, 5])] }), "unknown member numbers rejected");
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("mixed", "混合题型", [1, 4]), new("others", "其余题目", [2, 3, 5])] }), "mixed question types in one group rejected");
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("bad id", "非法 ID", [1, 2, 3, 4, 5])] }), "unstable group ID characters rejected");
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Groups = [new("empty-title", "  ", [1, 2, 3, 4, 5])] }), "blank group titles rejected");
+
+        var paginationQuestions = Enumerable.Range(1, 31).Select(number => new SchoolQuestionDefinition(number, SchoolQuestionType.Choice, 1, "", ["甲", "乙"])).ToArray();
+        var pagination = SchoolAnswerSheet.Create(mixedDefinition with
+        {
+            Questions = paginationQuestions,
+            Groups = [new("small", "小组", Enumerable.Range(1, 9).ToArray()), new("large", "整组换栏", Enumerable.Range(10, 20).ToArray()), new("tail", "尾组", [30, 31])]
+        });
+        Check(pagination.Pages.Count == 1, "whole groups fit across the two columns on one page");
+        var paginationPage = pagination.Pages.Single();
+        Check(paginationPage.SchoolGroups.Single(group => group.GroupId == "small").RectangleMm.X != paginationPage.SchoolGroups.Single(group => group.GroupId == "large").RectangleMm.X, "group moves intact to the next column when remaining space is insufficient");
+        foreach (var group in paginationPage.SchoolGroups)
+        {
+            var memberColumns = group.QuestionNumbers.Select(number =>
+            {
+                var choice = paginationPage.Questions.SingleOrDefault(question => question.Number == number);
+                return choice is null
+                    ? paginationPage.SubjectiveRegions.Single(region => region.QuestionNumber == number).Rectangle.X
+                    : paginationPage.SchoolGroups.Single(placed => placed.QuestionNumbers.Contains(number)).RectangleMm.X;
+            }).Distinct().ToArray();
+            Check(memberColumns.Length == 1, $"group {group.GroupId} remains in one column");
+        }
+
+        var tooLarge = Enumerable.Range(1, 40).Select(number => new SchoolQuestionDefinition(number, SchoolQuestionType.Choice, 1, "", ["甲", "乙"])).ToArray();
+        Reject(() => SchoolAnswerSheet.Create(basis with { Mode = SchoolContentMode.AnswerOnly, CandidateIdentity = new(CandidateIdentityMode.Barcode, 4), Questions = tooLarge, Groups = [new("too-tall", "超高题组", Enumerable.Range(1, 40).ToArray())] }), "a group larger than a complete column is rejected");
+
+        var longRunQuestions = Enumerable.Range(1, 65).Select(number => new SchoolQuestionDefinition(number, SchoolQuestionType.Subjective, 1, "", null, 200)).ToArray();
+        Reject(() => SchoolAnswerSheet.Create(mixedDefinition with { Questions = longRunQuestions, Groups = [], CandidateIdentity = new(CandidateIdentityMode.Marking, 4) }), "layouts over 64 pages are rejected after group pagination");
     }
 
     private static GrayImage Render(AnswerSheetLayout layout,bool filled)

@@ -45,6 +45,9 @@ try {
   assert.equal(template.examId, definition.examId);
   assert.equal(template.pages[0].widthMm, 420);
   assert.equal(template.pages[0].schoolMetadata.side, "Front");
+  assert.deepEqual(template.pages[0].schoolGroups.map((group) => group.groupId), definition.groups.map((group) => group.id));
+  assert.deepEqual(template.pages[0].schoolGroups.map((group) => group.questionNumbers), [[7], [15]]);
+  assert.ok(template.pages[0].schoolGroups.every((group) => group.rectangleMm.width > 0 && group.rectangleMm.height > 0));
   const bytes = new Uint8Array(await readFile(fixture));
   const capture = (await waitTask(client, client.uploadImage({ idempotencyKey: randomUUID(), templateId: template.pages[0].templateId, fileName: "school.png", contentType: "image/png", body: bytes }))).result;
   assert.equal(capture.candidateId, "0123");

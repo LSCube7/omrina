@@ -66,13 +66,15 @@ HTTP 基址 `http://127.0.0.1:17843`。JSON 属性 camelCase；枚举采用 came
 
 ## 学校答题纸扩展（schema 3）
 
-`template` 操作新增互斥输入 `{schoolDefinition}`；原 schema 1/2 请求继续支持。`schoolDefinition` 包含 `examId/layoutDocumentId/version/title/paper/mode/columns/bubbleShape/labelPlacement/bubbleWidthMm/bubbleHeightMm/candidateIdentity/duplex/repeatBackIdentity/questions`。只有 `examId/layoutDocumentId/questions` 是请求必需项，其余沿用 Core 默认值；持久化快照则要求完整字段，以免历史版式因为默认值变化而改变。
+`template` 操作新增互斥输入 `{schoolDefinition}`；原 schema 1/2 请求继续支持。`schoolDefinition` 包含 `examId/layoutDocumentId/version/title/paper/mode/columns/bubbleShape/labelPlacement/bubbleWidthMm/bubbleHeightMm/candidateIdentity/duplex/repeatBackIdentity/groups/layoutOrder/questions`。只有 `examId/layoutDocumentId/questions` 是请求必需项，其余沿用 Core 默认值；持久化快照则要求完整字段，以便复算当前版式身份；旧开发版快照不要求兼容。
 
-学校定义枚举采用 PascalCase 字符串：`A4Portrait/A3Landscape`、`AnswerOnly/WithQuestions`、`Choice/Subjective`、`Circle/Rectangle`、`Inside/Outside`、`Barcode/Marking`。这与外层 operation/status 的 camelCase 分开。`candidateIdentity` 为 `{mode,digits,candidateId?}`；`questions` 为 `[{number,type,maximumScore?,body?,options?,subjectiveHeightMm?}]`。拒绝所有层级未知字段、路径字段、重复属性与重复题号；不接受 enum 整数。
+学校定义枚举采用 PascalCase 字符串：`A4Portrait/A3Landscape`、`AnswerOnly/WithQuestions`、`Choice/Subjective`、`Circle/Rectangle`、`Inside/Outside`、`Barcode/Marking`、`Mixed/Separated`（题组排序）。这与外层 operation/status 的 camelCase 分开。`candidateIdentity` 为 `{mode,digits,candidateId?}`；`questions` 为 `[{number,type,maximumScore?,body?,options?,subjectiveHeightMm?}]`。拒绝所有层级未知字段、路径字段、重复属性与重复题号；不接受 enum 整数。
 
-成功返回 `{documentId,examId,version,pages}`，每页含原模板摘要与 `schemaVersion:3,paper,side,pageIndex,widthMm,heightMm,schoolMetadata,svg`。`schoolMetadata` 为 `{examId,layoutDocumentId,version,pageNumber,side,templateId}`；`pageIndex` 零基，`pageNumber` 一基，`side` 为 `Front/Back`。分页模板分别注册在当前 grant，可直接沿用 upload/scan/recognize 操作；目录接口不会列出桌面本地考试或其他 grant 的资料。
+题组输入为 `groups:[{id,title,questionNumbers}]`：ID 为 1–80 位 ASCII 字母／数字／点／下划线／连字符，首位为字母或数字；标题为 1–80 字符非空文本，不能含换行或不可打印字符。显式分组须完整、唯一覆盖题目，每组仅含一种题型。`layoutOrder:Mixed` 按组顺序排版，`Separated` 稳定地将客观组排在主观组前。省略／空 groups 是便捷输入，Core 为每题生成一个明确题组，持久化快照保存归一化后的组；这不提供旧开发版快照兼容。
 
-学校定义限制：题目 1–500、最多 64 页、选择题选项 2–6、考号 1–20 位数字；A4 一栏、A3 两栏或三栏；圆框直径/矩形宽度 `(0,2] mm`、矩形高度 `(0,4] mm`、每题主观区高度 `[10,230] mm`。题号必须唯一且为正整数。标题/考试 ID/版式 ID 最多 80 字符；每题正文最多 8000 字符；定义 UTF-8 最大 60000 字节，仍受完整 HTTP 请求 64 KiB 限制。无法放入一栏的题目会明确拒绝。
+成功返回 `{documentId,examId,version,pages}`，每页含原模板摘要与 `schemaVersion:3,paper,side,pageIndex,widthMm,heightMm,schoolMetadata,schoolGroups,svg`。`schoolMetadata` 为 `{examId,layoutDocumentId,version,pageNumber,side,templateId}`；`pageIndex` 零基，`pageNumber` 一基，`side` 为 `Front/Back`。`schoolGroups` 为当前页的 `[{groupId,title,questionNumbers,rectangleMm:{x,y,width,height}}]`，矩形采用纸面毫米且占满栏宽，一组不拆跨栏或跨页。这是版式几何摘要，尚不代表已提供整组裁图接口。分页模板分别注册在当前 grant，可直接沿用 upload/scan/recognize 操作；目录接口不会列出桌面本地考试或其他 grant 的资料。
+
+学校定义限制：题目 1–500、最多 64 页、选择题选项 2–6、考号 1–20 位数字；A4 一栏、A3 两栏或三栏；圆框直径与矩形高度 `(0,2] mm`；矩形宽度为有限正值，无统一上限，但须通过栏宽、间距与信息区空间校验；新建填涂尺寸采用 0.1 mm 精度、每题主观区高度 `[10,230] mm`。题号必须唯一且为正整数。标题/考试 ID/版式 ID 最多 80 字符；每题正文最多 8000 字符；定义 UTF-8 最大 60000 字节，仍受完整 HTTP 请求 64 KiB 限制。无法放入一栏的题目会明确拒绝。
 
 学校 capture 在提交目录前验证原图四角、方向和机器码；考试 ID、版式版本、页码、正反面或页模板身份不匹配时返回 `CAPTURE_SCHOOL_PAGE_MISMATCH`，不保存页面。manifest 保存完整页快照、学校元数据及原图 SHA256；重新打开时复算快照身份并验证原图哈希，兼容读取既有 schema 1/2 数据。
 

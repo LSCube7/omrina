@@ -945,35 +945,57 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
         return fullPath;
     }
 
-    private static object ToTemplateSummary(AnswerSheetLayout layout) => new
+    private static object ToTemplateSummary(AnswerSheetLayout layout)
     {
-        templateId = layout.TemplateId,
-        schemaVersion = layout.SchemaVersion,
-        paper = layout.SchoolDefinition?.Paper.ToString() ?? "A4Portrait",
-        side = layout.SchoolMetadata?.Side.ToString() ?? "Front",
-        pageIndex = layout.SchoolPageIndex,
-        widthMm = layout.WidthMm,
-        heightMm = layout.HeightMm,
-        schoolMetadata = ToSchoolMetadata(layout.SchoolMetadata),
-        title = layout.Title,
-        questionCount = layout.QuestionCount,
-        optionsPerQuestion = layout.OptionsPerQuestion,
-        templateNumber = layout.TemplateNumber,
-        subjectiveRegions = layout.SubjectiveRegions.Select(region => new
+        var summary = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            questionId = region.QuestionId,
-            questionNumber = region.QuestionNumber,
-            maxScore = region.MaximumScore,
-            rectangleMm = new
+            ["templateId"] = layout.TemplateId,
+            ["schemaVersion"] = layout.SchemaVersion,
+            ["paper"] = layout.SchoolDefinition?.Paper.ToString() ?? "A4Portrait",
+            ["side"] = layout.SchoolMetadata?.Side.ToString() ?? "Front",
+            ["pageIndex"] = layout.SchoolPageIndex,
+            ["widthMm"] = layout.WidthMm,
+            ["heightMm"] = layout.HeightMm,
+            ["schoolMetadata"] = ToSchoolMetadata(layout.SchoolMetadata),
+            ["title"] = layout.Title,
+            ["questionCount"] = layout.QuestionCount,
+            ["optionsPerQuestion"] = layout.OptionsPerQuestion,
+            ["templateNumber"] = layout.TemplateNumber,
+            ["subjectiveRegions"] = layout.SubjectiveRegions.Select(region => new
             {
-                x = region.Rectangle.X,
-                y = region.Rectangle.Y,
-                width = region.Rectangle.Width,
-                height = region.Rectangle.Height
-            }
-        }).ToArray(),
-        svg = layout.ToSvg()
-    };
+                questionId = region.QuestionId,
+                questionNumber = region.QuestionNumber,
+                maxScore = region.MaximumScore,
+                rectangleMm = new
+                {
+                    x = region.Rectangle.X,
+                    y = region.Rectangle.Y,
+                    width = region.Rectangle.Width,
+                    height = region.Rectangle.Height
+                }
+            }).ToArray(),
+            ["svg"] = layout.ToSvg()
+        };
+
+        if (layout.SchoolDefinition is not null)
+        {
+            summary["schoolGroups"] = layout.SchoolGroups.Select(group => new
+            {
+                groupId = group.GroupId,
+                title = group.Title,
+                questionNumbers = group.QuestionNumbers,
+                rectangleMm = new
+                {
+                    x = group.RectangleMm.X,
+                    y = group.RectangleMm.Y,
+                    width = group.RectangleMm.Width,
+                    height = group.RectangleMm.Height
+                }
+            }).ToArray();
+        }
+
+        return summary;
+    }
 
     private static object? ToSchoolMetadata(SchoolPageMetadata? metadata) => metadata is null ? null : new
     {
@@ -1048,9 +1070,16 @@ public sealed class DesktopLocalAgentOperations : ILocalAgentOperations, ILocalA
 
     private static SchoolSheetDefinition ReadSchoolDefinition(JsonElement value)
     {
-        RejectUnknownOrPathProperties(RequireObject(value), Names("examId", "layoutDocumentId", "version", "title", "paper", "mode", "columns", "bubbleShape", "labelPlacement", "bubbleWidthMm", "bubbleHeightMm", "candidateIdentity", "duplex", "repeatBackIdentity", "questions"));
+        RejectUnknownOrPathProperties(RequireObject(value), Names("examId", "layoutDocumentId", "version", "title", "paper", "mode", "columns", "bubbleShape", "labelPlacement", "bubbleWidthMm", "bubbleHeightMm", "candidateIdentity", "duplex", "repeatBackIdentity", "groups", "layoutOrder", "questions"));
         if (value.TryGetProperty("candidateIdentity", out var identity))
             RejectUnknownOrPathProperties(RequireObject(identity), Names("mode", "digits", "candidateId"));
+        if (value.TryGetProperty("groups", out var groups))
+        {
+            if (groups.ValueKind != JsonValueKind.Array)
+                throw new LocalOperationException("INVALID_TEMPLATE", "题目组定义格式无效。");
+            foreach (var group in groups.EnumerateArray())
+                RejectUnknownOrPathProperties(RequireObject(group), Names("id", "title", "questionNumbers"));
+        }
         if (!value.TryGetProperty("questions", out var questions) || questions.ValueKind != JsonValueKind.Array)
             throw new LocalOperationException("INVALID_TEMPLATE", "请提供答题纸题目结构。");
         foreach (var question in questions.EnumerateArray())

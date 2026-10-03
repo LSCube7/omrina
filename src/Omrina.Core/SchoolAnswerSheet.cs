@@ -20,6 +20,10 @@ public sealed record SchoolCandidateIdentity([property: JsonRequired] CandidateI
 public sealed record SchoolQuestionDefinition([property: JsonRequired] int Number, [property: JsonRequired] SchoolQuestionType Type,
     [property: JsonRequired] decimal MaximumScore = 1, [property: JsonRequired] string Body = "",
     [property: JsonRequired] IReadOnlyList<string>? Options = null, [property: JsonRequired] double SubjectiveHeightMm = 30);
+public sealed record SchoolQuestionGroupDefinition([property: JsonRequired] string Id, [property: JsonRequired] string Title,
+    [property: JsonRequired] IReadOnlyList<int> QuestionNumbers);
+public enum SchoolLayoutOrder { Mixed, Separated }
+public sealed record SchoolQuestionGroupGeometry(string GroupId, string Title, IReadOnlyList<int> QuestionNumbers, RectMm RectangleMm);
 public sealed record SchoolSheetDefinition
 {
     [JsonRequired] public string ExamId { get; init; } = "";
@@ -37,6 +41,8 @@ public sealed record SchoolSheetDefinition
     [JsonRequired] public bool Duplex { get; init; }
     [JsonRequired] public bool RepeatBackIdentity { get; init; } = true;
     [JsonRequired] public IReadOnlyList<SchoolQuestionDefinition> Questions { get; init; } = Array.Empty<SchoolQuestionDefinition>();
+    [JsonRequired] public IReadOnlyList<SchoolQuestionGroupDefinition> Groups { get; init; } = Array.Empty<SchoolQuestionGroupDefinition>();
+    [JsonRequired] public SchoolLayoutOrder LayoutOrder { get; init; } = SchoolLayoutOrder.Mixed;
 }
 public sealed record SchoolPageMetadata(string ExamId, string LayoutDocumentId, int Version, int PageNumber, SchoolPageSide Side, string TemplateId);
 public sealed record SchoolPrintedText(PointMm Position, string Text, double FontSizeMm);
@@ -61,6 +67,7 @@ public sealed partial class AnswerSheetLayout
     public RectMm? ExamCodeArea { get; private set; }
     public IReadOnlyList<CandidateDigitGeometry> CandidateDigits { get; private set; } = Array.Empty<CandidateDigitGeometry>();
     public IReadOnlyList<SchoolPrintedText> SchoolTexts { get; private set; } = Array.Empty<SchoolPrintedText>();
+    public IReadOnlyList<SchoolQuestionGroupGeometry> SchoolGroups { get; private set; } = Array.Empty<SchoolQuestionGroupGeometry>();
     private static readonly JsonSerializerOptions SchoolJsonOptions = new(TemplateJsonOptions) { Converters = { new JsonStringEnumConverter(allowIntegerValues: false) } };
     private sealed record SchoolDocument([property: JsonRequired] int SchemaVersion, [property: JsonRequired] string TemplateId, [property: JsonRequired] SchoolSheetDefinition Definition, [property: JsonRequired] int PageIndex);
     private string SchoolJson() => JsonSerializer.Serialize(new SchoolDocument(3, TemplateId, SchoolDefinition!, SchoolPageIndex), SchoolJsonOptions);
@@ -73,13 +80,36 @@ public sealed partial class AnswerSheetLayout
         return pages[parsed.PageIndex];
     }
     internal static IReadOnlyList<AnswerSheetLayout> CreateSchoolPages(SchoolSheetDefinition input)
+        => CreateSchoolPagesCore(input);
+
+    private static bool TryNormalizeTenthMillimeter(double value, out double normalized, out double tenths)
+    {
+        normalized = 0;
+        tenths = 0;
+        if (!double.IsFinite(value) || value <= 0) return false;
+        var scaled = value * 10;
+        if (!double.IsFinite(scaled)) return false;
+        var rounded = Math.Round(scaled, MidpointRounding.AwayFromZero);
+        if (rounded < 1 || rounded > 9007199254740991d || Math.Abs(scaled - rounded) > 1e-9) return false;
+        tenths = rounded;
+        normalized = rounded / 10;
+        return true;
+    }
+
+    private sealed record PreparedSchoolQuestion(SchoolQuestionDefinition Definition, IReadOnlyList<string> BodyLines, double AnswerHeight, double TotalHeight, bool CompactChoice);
+    private sealed record PreparedSchoolQuestionGroup(SchoolQuestionGroupDefinition Definition, IReadOnlyList<PreparedSchoolQuestion> Questions, double HeaderHeight, double TotalHeight);
+
+    private static IReadOnlyList<AnswerSheetLayout> CreateSchoolPagesCore(SchoolSheetDefinition input)
     {
         ArgumentNullException.ThrowIfNull(input);
         if (string.IsNullOrWhiteSpace(input.ExamId) || input.ExamId.Length > 80 || string.IsNullOrWhiteSpace(input.LayoutDocumentId) || input.LayoutDocumentId.Length > 80 || input.Version < 1 || string.IsNullOrWhiteSpace(input.Title) || input.Title.Length > 80
-            || !Enum.IsDefined(input.Paper) || !Enum.IsDefined(input.Mode) || !Enum.IsDefined(input.BubbleShape) || !Enum.IsDefined(input.LabelPlacement) || (input.Paper == SchoolPaper.A4Portrait ? input.Columns != 1 : input.Columns is not (2 or 3)))
+            || !Enum.IsDefined(input.Paper) || !Enum.IsDefined(input.Mode) || !Enum.IsDefined(input.LayoutOrder) || !Enum.IsDefined(input.BubbleShape) || !Enum.IsDefined(input.LabelPlacement) || (input.Paper == SchoolPaper.A4Portrait ? input.Columns != 1 : input.Columns is not (2 or 3)))
             throw new ArgumentException("考试标识、版本、标题或纸张栏数无效。");
-        if (!double.IsFinite(input.BubbleWidthMm) || input.BubbleWidthMm <= 0 || input.BubbleWidthMm > 2 || !double.IsFinite(input.BubbleHeightMm) || input.BubbleHeightMm <= 0 || input.BubbleHeightMm > 4)
-            throw new ArgumentException("圆框直径或矩形宽必须大于 0 且不超过 2 毫米；矩形高度不超过 4 毫米。");
+        var normalizedWidth = TryNormalizeTenthMillimeter(input.BubbleWidthMm, out var bubbleWidth, out var widthTenths);
+        var normalizedHeight = TryNormalizeTenthMillimeter(input.BubbleHeightMm, out var bubbleHeight, out var heightTenths);
+        if (!normalizedWidth || !normalizedHeight || heightTenths > 20
+                || (input.BubbleShape == BubbleShape.Circle && widthTenths > 20))
+            throw new ArgumentException("尺寸须按 0.1 毫米递增；圆框直径和矩形高度须在 0.1–2 毫米之间。");
         var identity = input.CandidateIdentity;
         if (identity is null || !Enum.IsDefined(identity.Mode) || identity.Digits is < 1 or > 20 || (identity.CandidateId is not null && (identity.CandidateId.Length != identity.Digits || identity.CandidateId.Any(c => c is < '0' or > '9'))))
             throw new ArgumentException("考号位数须为 1–20，预印考号须为对应位数的数字。");
@@ -89,7 +119,14 @@ public sealed partial class AnswerSheetLayout
         foreach (var q in questions)
             if (q.Number <= 0 || !Enum.IsDefined(q.Type) || q.MaximumScore is <= 0 or > 1000000 || q.Body is null || q.Body.Length > 8000 || (q.Type == SchoolQuestionType.Choice && (q.Options is null || q.Options.Count is < 2 or > 6 || q.Options.Any(o => o is null || o.Length > 1000))) || (q.Type == SchoolQuestionType.Subjective && (!double.IsFinite(q.SubjectiveHeightMm) || q.SubjectiveHeightMm is < 10 or > 230)))
                 throw new ArgumentException($"第 {q.Number} 题定义无效或答题区过大。");
-        var definition = input with { Questions = Array.AsReadOnly(questions) };
+        var groups = NormalizeSchoolGroups(input.Groups, questions);
+        var definition = input with
+        {
+            Questions = Array.AsReadOnly(questions),
+            Groups = Array.AsReadOnly(groups),
+            BubbleWidthMm = bubbleWidth,
+            BubbleHeightMm = bubbleHeight
+        };
         var canonical = JsonSerializer.Serialize(definition, SchoolJsonOptions);
         if (Encoding.UTF8.GetByteCount(canonical) > 60000) throw new ArgumentException("答题纸定义过大，请减少正文或题数。");
         var documentHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("school|3|" + canonical))).ToLowerInvariant();
@@ -102,11 +139,75 @@ public sealed partial class AnswerSheetLayout
             ValidatePrintableText(question.Body);
             foreach (var option in question.Options ?? Array.Empty<string>()) ValidatePrintableText(option);
         }
+        foreach (var group in groups) ValidatePrintableText(group.Title);
         const double left = 22, top = 38, bottom = 275, gap = 8;
         var columnWidth = (width - left * 2 - gap * (definition.Columns - 1)) / definition.Columns;
-        if (identity.Mode == CandidateIdentityMode.Marking && identity.Digits * 6 + 8 > columnWidth) throw new ArgumentException("考号位数超过当前栏宽，请减少位数或使用条码。");
-        var pages = new List<AnswerSheetLayout>(); var index = 0;
-        while (index < questions.Length)
+        var wideBubble = definition.BubbleWidthMm > 2;
+        var bubbleWidthMm = definition.BubbleWidthMm;
+        var bubbleHeightMm = definition.BubbleHeightMm;
+        var candidatePitch = wideBubble ? bubbleWidthMm + 3 : 6;
+        var candidateStart = wideBubble ? Math.Max(6, bubbleWidthMm / 2 + 2) : 6;
+        var candidateLabelSpace = definition.LabelPlacement == LabelPlacement.Outside ? 2 : 0;
+        if (identity.Mode == CandidateIdentityMode.Marking)
+        {
+            var requiredCandidateWidth = wideBubble
+                ? candidateStart + (identity.Digits - 1) * candidatePitch + bubbleWidthMm / 2 + candidateLabelSpace + 4
+                : identity.Digits * 6 + 8;
+            if (requiredCandidateWidth > columnWidth)
+                throw new ArgumentException("考号填涂框超过当前栏宽，请减少位数或矩形宽度，或使用条码。");
+        }
+        var choicePitch = wideBubble ? bubbleWidthMm + 3 : 12;
+        var contentWidth = columnWidth - 8;
+        foreach (var question in questions.Where(question => question.Type == SchoolQuestionType.Choice))
+        {
+            var choiceStart = wideBubble ? Math.Max(10, bubbleWidthMm / 2 + 2) : 10;
+            var labelSpace = definition.LabelPlacement == LabelPlacement.Outside ? 2.4 : 0;
+            var compactChoice = definition.Mode == SchoolContentMode.AnswerOnly;
+            var optionSpan = (question.Options!.Count - 1) * choicePitch + bubbleWidthMm / 2 + labelSpace;
+            var rowStart = compactChoice ? contentWidth - optionSpan : choiceStart;
+            var requiredChoiceWidth = choiceStart + optionSpan;
+            if (rowStart - bubbleWidthMm / 2 < 0 || (!compactChoice && requiredChoiceWidth > contentWidth))
+                throw new ArgumentException($"第 {question.Number} 题的填涂框或选项标签超出当前栏宽，请减小矩形宽度或减少选项数。");
+            if (compactChoice && rowStart - bubbleWidthMm / 2 < EstimateSchoolTextWidth($"{question.Number}. ({question.MaximumScore.ToString(CultureInfo.InvariantCulture)} 分)") + 2)
+                throw new ArgumentException($"第 {question.Number} 题的题号和选项填涂框无法在紧凑行内排开，请减少选项数或缩短分值格式。");
+        }
+        var exampleRight = wideBubble ? 22 + bubbleWidthMm + 3 + 5 * 2.8 : 41;
+        if (exampleRight > columnWidth - 30)
+            throw new ArgumentException("填涂示例放不进信息栏，请减小矩形宽度。");
+        var questionByNumber = questions.ToDictionary(question => question.Number);
+        var orderedGroups = groups.Select(group =>
+        {
+            var groupQuestions = group.QuestionNumbers.Select(number =>
+            {
+                var question = questionByNumber[number];
+                var lines = definition.Mode == SchoolContentMode.WithQuestions ? WrapSchoolText(question.Body, contentWidth).ToList() : new List<string>();
+                if (definition.Mode == SchoolContentMode.WithQuestions && question.Type == SchoolQuestionType.Choice)
+                    for (var option = 0; option < question.Options!.Count; option++) lines.AddRange(WrapSchoolText($"{(char)('A' + option)}. {question.Options[option]}", contentWidth));
+                var compactChoice = definition.Mode == SchoolContentMode.AnswerOnly && question.Type == SchoolQuestionType.Choice;
+                var answerHeight = question.Type == SchoolQuestionType.Subjective
+                    ? question.SubjectiveHeightMm
+                    : compactChoice ? Math.Max(2, bubbleHeightMm) : Math.Max(8, bubbleHeightMm + 4);
+                var totalHeight = compactChoice ? 6 : 7 + lines.Count * 4.5 + answerHeight + 5;
+                return new PreparedSchoolQuestion(question, Array.AsReadOnly(lines.ToArray()), answerHeight, totalHeight, compactChoice);
+            }).ToArray();
+            var titleLines = WrapSchoolText(group.Title, contentWidth).ToArray();
+            var headerHeight = 1 + titleLines.Length * 4.5;
+            return new PreparedSchoolQuestionGroup(group, Array.AsReadOnly(groupQuestions), headerHeight, headerHeight + groupQuestions.Sum(question => question.TotalHeight) - 3 + 4);
+        }).ToArray();
+        if (definition.LayoutOrder == SchoolLayoutOrder.Separated)
+            orderedGroups = orderedGroups.OrderBy(group => questionByNumber[group.Definition.QuestionNumbers[0]].Type).ToArray();
+        var firstColumnStart = top + (definition.CandidateIdentity.Mode == CandidateIdentityMode.Marking ? 82 : 46) + 5;
+        var regularColumnHeight = bottom - top;
+        var firstColumnHeight = bottom - firstColumnStart;
+        foreach (var group in orderedGroups)
+        {
+            var largestAvailableColumn = definition.Columns > 1 ? regularColumnHeight : firstColumnHeight;
+            if (group.TotalHeight > largestAvailableColumn)
+                throw new ArgumentException($"题组“{group.Definition.Title}”超过完整栏高，无法排版。");
+        }
+
+        var pages = new List<AnswerSheetLayout>(); var groupIndex = 0;
+        while (groupIndex < orderedGroups.Length)
         {
             if (pages.Count >= 64) throw new ArgumentException("答题纸不得超过 64 页。");
             var pageIndex = pages.Count;
@@ -120,42 +221,102 @@ public sealed partial class AnswerSheetLayout
                 candidateArea = new RectMm(left + 4, top + 28, columnWidth - 8, infoHeight - 30);
                 if (identity.Mode == CandidateIdentityMode.Marking)
                     for (var position = 0; position < identity.Digits; position++)
-                        digits.Add(new(position + 1, Array.AsReadOnly(Enumerable.Range(0, 10).Select(digit => NewBubble(-(position + 1), digit + 1, digit.ToString(CultureInfo.InvariantCulture), new(left + 6 + position * 6, top + 33 + digit * 4.5), definition)).ToArray())));
+                        digits.Add(new(position + 1, Array.AsReadOnly(Enumerable.Range(0, 10).Select(digit => NewBubble(-(position + 1), digit + 1, digit.ToString(CultureInfo.InvariantCulture), new(left + candidateStart + position * candidatePitch, top + 33 + digit * 4.5), definition)).ToArray())));
             }
             var texts = new List<SchoolPrintedText>(); var geometry = new List<QuestionGeometry>(); var bubbles = new List<AnswerBubble>(); var regions = new List<TemplateSubjectiveRegion>();
-            for (var column = 0; column < definition.Columns && index < questions.Length; column++)
+            var schoolGroups = new List<SchoolQuestionGroupGeometry>(); var placedAnyGroup = false;
+            for (var column = 0; column < definition.Columns && groupIndex < orderedGroups.Length; column++)
             {
                 var x = left + column * (columnWidth + gap); var y = column == 0 ? top + infoHeight + 5 : top; var row = 0;
-                while (index < questions.Length)
+                while (groupIndex < orderedGroups.Length)
                 {
-                    var q = questions[index];
-                    var lines = definition.Mode == SchoolContentMode.WithQuestions ? WrapSchoolText(q.Body, columnWidth).ToList() : new List<string>();
-                    if (definition.Mode == SchoolContentMode.WithQuestions && q.Type == SchoolQuestionType.Choice)
-                        for (var option = 0; option < q.Options!.Count; option++) lines.AddRange(WrapSchoolText($"{(char)('A' + option)}. {q.Options[option]}", columnWidth));
-                    var bodyHeight = lines.Count * 4.5; var answerHeight = q.Type == SchoolQuestionType.Subjective ? q.SubjectiveHeightMm : Math.Max(8, definition.BubbleHeightMm + 4); var total = 7 + bodyHeight + answerHeight + 5;
-                    if (total > bottom - top) throw new ArgumentException($"第 {q.Number} 题无法放入一栏，请缩短正文或降低该题答题区高度。");
-                    if (y + total > bottom) break;
-                    texts.Add(new(new(x, y + 4), $"{q.Number}. ({q.MaximumScore.ToString(CultureInfo.InvariantCulture)} 分)", 3));
-                    for (var line = 0; line < lines.Count; line++) texts.Add(new(new(x, y + 9 + line * 4.5), lines[line], 3));
-                    var answerY = y + 7 + bodyHeight;
-                    if (q.Type == SchoolQuestionType.Subjective) regions.Add(TemplateSubjectiveRegion.CreateSchool(q.Number, q.MaximumScore, new(x, answerY, columnWidth, answerHeight), width));
-                    else
+                    var group = orderedGroups[groupIndex];
+                    if (y + group.TotalHeight > bottom) break;
+                    var groupRectangle = new RectMm(x, y, columnWidth, group.TotalHeight);
+                    var groupGeometry = new SchoolQuestionGroupGeometry(group.Definition.Id, group.Definition.Title,
+                        Array.AsReadOnly(group.Definition.QuestionNumbers.ToArray()), groupRectangle);
+                    schoolGroups.Add(groupGeometry);
+                    var titleLines = WrapSchoolText(group.Definition.Title, contentWidth).ToArray();
+                    for (var line = 0; line < titleLines.Length; line++) texts.Add(new(new(x + 4, y + 3 + line * 4.5), titleLines[line], 3));
+                    var questionY = y + group.HeaderHeight;
+                    foreach (var prepared in group.Questions)
                     {
-                        var choices = Enumerable.Range(0, q.Options!.Count).Select(option => NewBubble(q.Number, option + 1, ((char)('A' + option)).ToString(), new(x + 10 + option * 12, answerY + answerHeight / 2), definition)).ToArray();
-                        geometry.Add(new(q.Number, column + 1, ++row, new(x, answerY + answerHeight / 2), Array.AsReadOnly(choices))); bubbles.AddRange(choices);
+                        var q = prepared.Definition;
+                        texts.Add(new(new(x + 4, questionY + (prepared.CompactChoice ? 4.5 : 4)), $"{q.Number}. ({q.MaximumScore.ToString(CultureInfo.InvariantCulture)} 分)", 3));
+                        for (var line = 0; line < prepared.BodyLines.Count; line++) texts.Add(new(new(x + 4, questionY + 9 + line * 4.5), prepared.BodyLines[line], 3));
+                        var bodyHeight = prepared.BodyLines.Count * 4.5;
+                        var answerY = questionY + (prepared.CompactChoice ? 2 : 7 + bodyHeight);
+                        if (q.Type == SchoolQuestionType.Subjective)
+                            regions.Add(TemplateSubjectiveRegion.CreateSchool(q.Number, q.MaximumScore, new(x, answerY, columnWidth, prepared.AnswerHeight), width));
+                        else
+                        {
+                            var baseChoiceStart = wideBubble ? Math.Max(10, bubbleWidthMm / 2 + 2) : 10;
+                            var labelSpace = definition.LabelPlacement == LabelPlacement.Outside ? 2.4 : 0;
+                            var choiceStart = prepared.CompactChoice
+                                ? contentWidth - ((q.Options!.Count - 1) * choicePitch + bubbleWidthMm / 2 + labelSpace)
+                                : baseChoiceStart;
+                            var bubbleCenterY = prepared.CompactChoice ? questionY + 3 : answerY + prepared.AnswerHeight / 2;
+                            var choices = Enumerable.Range(0, q.Options!.Count).Select(option => NewBubble(q.Number, option + 1, ((char)('A' + option)).ToString(), new(x + 4 + choiceStart + option * choicePitch, bubbleCenterY), definition)).ToArray();
+                            geometry.Add(new(q.Number, column + 1, ++row, new(x + 4, answerY + prepared.AnswerHeight / 2), Array.AsReadOnly(choices))); bubbles.AddRange(choices);
+                        }
+                        questionY += prepared.TotalHeight;
                     }
-                    index++; y += total;
+                    y += group.TotalHeight;
+                    groupIndex++;
+                    placedAnyGroup = true;
                 }
             }
-            if (geometry.Count == 0 && regions.Count == 0) throw new ArgumentException($"第 {questions[index].Number} 题无法放入当前纸张，请缩短正文或降低高度。");
+            if (!placedAnyGroup) throw new ArgumentException($"题组“{orderedGroups[groupIndex].Definition.Title}”无法放入当前纸张栏位。");
             var id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{documentHash}|page:{pageIndex}"))).ToLowerInvariant();
             var marks = new[] { new RegistrationMark("registration-top-left",new(10,10),8), new RegistrationMark("registration-top-right",new(width-18,10),8), new RegistrationMark("registration-bottom-left",new(10,279),8), new RegistrationMark("registration-bottom-right",new(width-18,279),8) };
             var layout = new AnswerSheetLayout(definition.Title, geometry.Count, geometry.Count == 0 ? 2 : geometry.Max(q => q.Bubbles.Count),id,$"AS3-{pageIndex+1}-{id[..8]}",new(width/2,21),geometry.Count,Array.AsReadOnly(marks),new("orientation",new(width/2-2,10),4,4),Array.Empty<OptionHeader>(),geometry.AsReadOnly(),bubbles.AsReadOnly(),3,regions.AsReadOnly())
-            { WidthMm=width, SchoolDefinition=definition, SchoolPageIndex=pageIndex, SchoolMetadata=new(definition.ExamId,definition.LayoutDocumentId,definition.Version,pageIndex+1,side,id), SchoolInformationArea=info, CandidateArea=candidateArea, ExamCodeArea=new(left+columnWidth-28,top+3,24,24), CandidateDigits=digits.AsReadOnly(), SchoolTexts=texts.AsReadOnly() };
+            { WidthMm=width, SchoolDefinition=definition, SchoolPageIndex=pageIndex, SchoolMetadata=new(definition.ExamId,definition.LayoutDocumentId,definition.Version,pageIndex+1,side,id), SchoolInformationArea=info, CandidateArea=candidateArea, ExamCodeArea=new(left+columnWidth-28,top+3,24,24), CandidateDigits=digits.AsReadOnly(), SchoolTexts=texts.AsReadOnly(), SchoolGroups=schoolGroups.AsReadOnly() };
             pages.Add(layout);
         }
         return pages.AsReadOnly();
     }
+
+    private static SchoolQuestionGroupDefinition[] NormalizeSchoolGroups(IReadOnlyList<SchoolQuestionGroupDefinition>? inputGroups, IReadOnlyList<SchoolQuestionDefinition> questions)
+    {
+        if (inputGroups is null) throw new ArgumentException("题组列表不能为空。");
+        if (inputGroups.Count == 0)
+            return questions.Select(question => new SchoolQuestionGroupDefinition($"question-{question.Number}", $"第 {question.Number} 题", Array.AsReadOnly(new[] { question.Number }))).ToArray();
+        if (inputGroups.Count > questions.Count || inputGroups.Any(group => group is null)) throw new ArgumentException("题组数量或定义无效。");
+
+        var questionByNumber = questions.ToDictionary(question => question.Number);
+        var groupIds = new HashSet<string>(StringComparer.Ordinal);
+        var coveredQuestions = new HashSet<int>();
+        var normalizedGroups = new SchoolQuestionGroupDefinition[inputGroups.Count];
+        for (var groupIndex = 0; groupIndex < inputGroups.Count; groupIndex++)
+        {
+            var group = inputGroups[groupIndex];
+            if (!IsValidSchoolGroupId(group.Id) || !groupIds.Add(group.Id) || string.IsNullOrWhiteSpace(group.Title) || group.Title.Length > 80
+                || group.Title.IndexOfAny(['\n', '\r', '\t']) >= 0 || group.QuestionNumbers is null || group.QuestionNumbers.Count is < 1 or > 500)
+                throw new ArgumentException("题组 ID、标题或成员无效。");
+
+            SchoolQuestionType? groupType = null;
+            var memberNumbers = group.QuestionNumbers.ToArray();
+            foreach (var questionNumber in memberNumbers)
+            {
+                if (!questionByNumber.TryGetValue(questionNumber, out var question) || !coveredQuestions.Add(questionNumber))
+                    throw new ArgumentException("题组成员必须是题目中的唯一题号，且所有题目只能属于一个题组。");
+                if (groupType is not null && groupType.Value != question.Type)
+                    throw new ArgumentException($"题组“{group.Title}”不能混合客观题和主观题。");
+                groupType = question.Type;
+            }
+            normalizedGroups[groupIndex] = group with { QuestionNumbers = Array.AsReadOnly(memberNumbers) };
+        }
+        if (coveredQuestions.Count != questions.Count) throw new ArgumentException("题组成员必须完整覆盖所有题目。");
+        return normalizedGroups;
+    }
+
+    private static bool IsValidSchoolGroupId(string? id)
+        => id is { Length: >= 1 and <= 80 }
+            && (id[0] is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9')
+            && id.Skip(1).All(character => character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-');
+
+    private static double EstimateSchoolTextWidth(string text)
+        => text.EnumerateRunes().Sum(rune => rune.Value >= 0x2e80 ? 3d : char.IsWhiteSpace((char)rune.Value) ? 1.2d : 1.7d);
     private static AnswerBubble NewBubble(int question,int option,string label,PointMm center,SchoolSheetDefinition definition)
         => new(question,option,label,center,definition.BubbleWidthMm/2) { Shape=definition.BubbleShape, HeightMm=definition.BubbleShape==BubbleShape.Circle?definition.BubbleWidthMm:definition.BubbleHeightMm, LabelPlacement=definition.LabelPlacement };
     private static IEnumerable<string> WrapSchoolText(string text,double width)
@@ -179,6 +340,7 @@ public sealed partial class AnswerSheetLayout
         static string F(double value) => value.ToString("0.####", CultureInfo.InvariantCulture);
         static string E(string value) => SecurityElement.Escape(value)!;
         var svg = new StringBuilder($"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{F(WidthMm)}mm\" height=\"{F(HeightMm)}mm\" viewBox=\"0 0 {F(WidthMm)} {F(HeightMm)}\"><rect x=\"0\" y=\"0\" width=\"{F(WidthMm)}\" height=\"{F(HeightMm)}\" fill=\"white\"/>");
+        void Line(double x1, double y1, double x2, double y2) => svg.Append($"<line x1=\"{F(x1)}\" y1=\"{F(y1)}\" x2=\"{F(x2)}\" y2=\"{F(y2)}\" stroke=\"black\" stroke-width=\"0.2\"/>");
         void Rect(RectMm r,string fill="none",double stroke=.2) => svg.Append($"<rect x=\"{F(r.X)}\" y=\"{F(r.Y)}\" width=\"{F(r.Width)}\" height=\"{F(r.Height)}\" fill=\"{fill}\" stroke=\"black\" stroke-width=\"{F(stroke)}\"/>");
         void Text(PointMm p,string text,double size,string anchor="start") => svg.Append($"<text x=\"{F(p.X)}\" y=\"{F(p.Y)}\" font-family=\"sans-serif\" font-size=\"{F(size)}\" text-anchor=\"{anchor}\">{E(text)}</text>");
         foreach(var mark in RegistrationMarks) Rect(new(mark.TopLeft.X,mark.TopLeft.Y,mark.SizeMm,mark.SizeMm),"black",0);
@@ -191,13 +353,21 @@ public sealed partial class AnswerSheetLayout
         Text(new(info.X+3,info.Y+24),"填涂示例：",2.8);
         var exampleWidth = SchoolDefinition!.BubbleWidthMm;
         var exampleHeight = SchoolDefinition.BubbleShape == BubbleShape.Circle ? exampleWidth : SchoolDefinition.BubbleHeightMm;
-        var exampleCenter = new PointMm(info.X+23,info.Y+23);
+        var wideExample = exampleWidth > 2;
+        var exampleCenter = new PointMm(info.X + (wideExample ? 22 + exampleWidth / 2 : 23), info.Y+23);
         if (SchoolDefinition.BubbleShape == BubbleShape.Circle)
             svg.Append($"<circle cx=\"{F(exampleCenter.X)}\" cy=\"{F(exampleCenter.Y)}\" r=\"{F(exampleWidth/2)}\" fill=\"black\"/>");
         else Rect(new(exampleCenter.X-exampleWidth/2,exampleCenter.Y-exampleHeight/2,exampleWidth,exampleHeight),"black",0);
-        Text(new(info.X+27,info.Y+24),"填满并涂黑",2.8);
+        Text(new(info.X + (wideExample ? 22 + exampleWidth + 3 : 27),info.Y+24),"填满并涂黑",2.8);
         AppendSchoolMachineCodes(svg);
         if(CandidateArea is {} area && SchoolDefinition!.CandidateIdentity.Mode==CandidateIdentityMode.Barcode && SchoolDefinition.CandidateIdentity.CandidateId is null) { Rect(area); Text(new(area.X+2,area.Y+5),"请粘贴考号条码",3); }
+        foreach (var group in SchoolGroups)
+        {
+            Rect(group.RectangleMm);
+            var titleLineCount = WrapSchoolText(group.Title, group.RectangleMm.Width - 8).Count();
+            var dividerY = group.RectangleMm.Y + 0.5 + titleLineCount * 4.5;
+            Line(group.RectangleMm.X + 1, dividerY, group.RectangleMm.X + group.RectangleMm.Width - 1, dividerY);
+        }
         foreach(var text in SchoolTexts) Text(text.Position,text.Text,text.FontSizeMm);
         foreach(var region in SubjectiveRegions) Rect(region.Rectangle);
         foreach(var bubble in Bubbles.Concat(CandidateDigits.SelectMany(d=>d.Bubbles)))

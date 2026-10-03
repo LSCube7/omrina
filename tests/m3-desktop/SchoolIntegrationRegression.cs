@@ -21,7 +21,9 @@ internal static class SchoolIntegrationRegression
             ExamId = "school-http-exam", LayoutDocumentId = "school-http-layout", Title = "学校 SDK 测试",
             Paper = SchoolPaper.A3Landscape, Columns = 3,
             CandidateIdentity = new(CandidateIdentityMode.Barcode, 4, "0123"),
-            Questions = [new(7, SchoolQuestionType.Choice, 2, Options: ["甲", "乙"]), new(15, SchoolQuestionType.Subjective, 5)]
+            Questions = [new(7, SchoolQuestionType.Choice, 2, Options: ["甲", "乙"]), new(15, SchoolQuestionType.Subjective, 5)],
+            Groups = [new("choice-group", "选择题组", [7]), new("written-group", "解答题组", [15])],
+            LayoutOrder = SchoolLayoutOrder.Mixed
         };
         var fixture = Path.Combine(root, "school.png");
         Render(SchoolAnswerSheet.Create(definition).Pages[0], fixture);
@@ -54,12 +56,18 @@ internal static class SchoolIntegrationRegression
                 ExamId = "exam-test", LayoutDocumentId = "layout-test", Title = "集成测试",
                 Paper = SchoolPaper.A3Landscape, Columns = 3,
                 CandidateIdentity = new(CandidateIdentityMode.Barcode, 4, "0123"),
-                Questions = [new(7, SchoolQuestionType.Choice, 2, Options: ["甲", "乙"]), new(15, SchoolQuestionType.Subjective, 5)]
+                Questions = [new(7, SchoolQuestionType.Choice, 2, Options: ["甲", "乙"]), new(15, SchoolQuestionType.Subjective, 5)],
+                Groups = [new("choice-group", "选择题组", [7]), new("written-group", "解答题组", [15])],
+                LayoutOrder = SchoolLayoutOrder.Mixed
             };
             var examStore = new SchoolExamStore(root);
-            examStore.SaveDefinition(definition);
+            var savedDefinition = examStore.SaveDefinition(definition);
+            Check(savedDefinition.Groups.Count == 2 && savedDefinition.Groups[0].Id == "choice-group"
+                && savedDefinition.Groups[1].QuestionNumbers.SequenceEqual(new[] { 15 }), "school store should preserve explicit group definitions");
             Check(examStore.ListDefinitions().Count == 1, "saved exam should reopen");
-            Check(examStore.GetDefinition("exam-test", "layout-test", 1)?.Paper == SchoolPaper.A3Landscape, "paper should persist");
+            var reopenedDefinition = examStore.GetDefinition("exam-test", "layout-test", 1);
+            Check(reopenedDefinition is not null && reopenedDefinition.Paper == SchoolPaper.A3Landscape
+                && reopenedDefinition.Groups.Count == 2, "paper and explicit groups should persist");
             Expect<InvalidOperationException>(() => examStore.SaveDefinition(definition with { Title = "覆盖历史" }));
             examStore.SaveAnswerKey(definition, new Dictionary<int, string> { [7] = "B" });
             Check(examStore.ReadAnswerKey(definition)?[7] == "B", "shared answer keys should preserve global question numbers");
@@ -80,7 +88,11 @@ internal static class SchoolIntegrationRegression
             Render(noCandidate, imagePath);
             var unidentified = await captures.ImportAsync(noCandidate, new LocalInputImageFile(imagePath));
             Check(unidentified.Manifest.CandidateId is null && unidentified.Manifest.IdentityStatus == "RequireAssociation", "unreadable candidate must stay unassociated");
-            var subjectiveOnly = SchoolAnswerSheet.Create(definition with { Questions = [new(22, SchoolQuestionType.Subjective, 5)] }).Pages[0];
+            var subjectiveOnly = SchoolAnswerSheet.Create(definition with
+            {
+                Questions = [new(22, SchoolQuestionType.Subjective, 5)],
+                Groups = [new("written-only-group", "解答题组", [22])]
+            }).Pages[0];
             Render(subjectiveOnly, imagePath);
             var onlyCapture = await captures.ImportAsync(subjectiveOnly, new LocalInputImageFile(imagePath));
             Check(captures.LoadById(onlyCapture.Manifest.CaptureId)?.Manifest.QuestionCount == 0, "subjective-only page should persist without fake choice questions");
@@ -117,12 +129,19 @@ internal static class SchoolIntegrationRegression
             var parameters = JsonSerializer.SerializeToElement(new { schoolDefinition = new
             {
                 examId = "sdk-exam", layoutDocumentId = "sdk-layout", paper = "A3Landscape", columns = 2,
-                questions = new[] { new { number = 9, type = "Subjective", maximumScore = 5, subjectiveHeightMm = 30 } }
+                questions = new[] { new { number = 9, type = "Subjective", maximumScore = 5, subjectiveHeightMm = 30 } },
+                groups = new[] { new { id = "sdk-written-group", title = "解答题组", questionNumbers = new[] { 9 } } },
+                layoutOrder = "Mixed"
             }});
             var result = await operations.RunAsync(new TaskOperationRequest("grant-a", TaskOperation.Template, parameters), null, default);
             var page = result.GetProperty("pages")[0];
             Check(page.GetProperty("schemaVersion").GetInt32() == 3 && page.GetProperty("widthMm").GetDouble() == 420, "SDK template should expose page dimensions");
             Check(page.GetProperty("side").GetString() == "Front", "SDK side should be a string");
+            var sdkGroup = page.GetProperty("schoolGroups").EnumerateArray().Single();
+            Check(sdkGroup.GetProperty("groupId").GetString() == "sdk-written-group"
+                && sdkGroup.GetProperty("questionNumbers")[0].GetInt32() == 9
+                && sdkGroup.GetProperty("rectangleMm").GetProperty("width").GetDouble() > 0,
+                "SDK template request should preserve group identity, membership, and placed bounds");
             var scanOperations = new DesktopLocalAgentOperations(captures, new FixtureScanner(root, layout), new SkiaAnswerSheetRecognitionService(), _ => { });
             using (var scanSnapshot = JsonDocument.Parse(layout.ToJson()))
                 await scanOperations.RunAsync(new("scan-grant", TaskOperation.Template,
@@ -140,7 +159,9 @@ internal static class SchoolIntegrationRegression
                 ExamId = "large-school-result", Paper = SchoolPaper.A4Portrait, Columns = 1,
                 CandidateIdentity = new(CandidateIdentityMode.Barcode, 4),
                 Questions = Enumerable.Range(1, 64).Select(number => new SchoolQuestionDefinition(number,
-                    SchoolQuestionType.Subjective, 5, SubjectiveHeightMm: 100)).ToArray()
+                    SchoolQuestionType.Subjective, 5, SubjectiveHeightMm: 100)).ToArray(),
+                Groups = Enumerable.Range(1, 64).Select(number => new SchoolQuestionGroupDefinition(
+                    $"large-subjective-{number}", $"解答题组 {number}", [number])).ToArray()
             };
             var oversizedPages = SchoolAnswerSheet.Create(oversizedDefinition).Pages;
             Check(oversizedPages.Count == 64, "oversized result fixture should stay within supported page count");
