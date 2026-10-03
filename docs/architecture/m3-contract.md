@@ -70,9 +70,9 @@ HTTP 基址 `http://127.0.0.1:17843`。JSON 属性 camelCase；枚举采用 came
 
 学校定义枚举采用 PascalCase 字符串：`A4Portrait/A3Landscape`、`AnswerOnly/WithQuestions`、`Choice/Subjective`、`Circle/Rectangle`、`Inside/Outside`、`Barcode/Marking`、`Mixed/Separated`（题组排序）。这与外层 operation/status 的 camelCase 分开。`candidateIdentity` 为 `{mode,digits,candidateId?}`；`questions` 为 `[{number,type,maximumScore?,body?,options?,subjectiveHeightMm?}]`。拒绝所有层级未知字段、路径字段、重复属性与重复题号；不接受 enum 整数。
 
-题组输入为 `groups:[{id,title,questionNumbers}]`：ID 为 1–80 位 ASCII 字母／数字／点／下划线／连字符，首位为字母或数字；标题为 1–80 字符非空文本，不能含换行或不可打印字符。显式分组须完整、唯一覆盖题目，每组仅含一种题型。`layoutOrder:Mixed` 按组顺序排版，`Separated` 稳定地将客观组排在主观组前。省略／空 groups 是便捷输入，Core 为每题生成一个明确题组，持久化快照保存归一化后的组；这不提供旧开发版快照兼容。
+题组输入为 `groups:[{id,title,questionNumbers,choiceColumns?}]`：ID 为 1–80 位 ASCII 字母／数字／点／下划线／连字符，首位为字母或数字；标题为 1–80 字符非空文本，不能含换行或不可打印字符。显式分组须完整、唯一覆盖题目，每组仅含一种题型。`choiceColumns` 默认 1，范围 1–3，仅独立答题卡中的选择题组允许大于 1，按行排列并保持成员顺序，不能缩放填涂框。`layoutOrder:Mixed` 按组顺序排版，`Separated` 稳定地将客观组排在主观组前。省略／空 groups 是便捷输入，Core 为每题生成一个明确题组，持久化快照保存归一化后的组；这不提供旧开发版快照兼容。
 
-成功返回 `{documentId,examId,version,pages}`，每页含原模板摘要与 `schemaVersion:3,paper,side,pageIndex,widthMm,heightMm,schoolMetadata,schoolGroups,svg`。`schoolMetadata` 为 `{examId,layoutDocumentId,version,pageNumber,side,templateId}`；`pageIndex` 零基，`pageNumber` 一基，`side` 为 `Front/Back`。`schoolGroups` 为当前页的 `[{groupId,title,questionNumbers,rectangleMm:{x,y,width,height}}]`，矩形采用纸面毫米且占满栏宽，一组不拆跨栏或跨页。这是版式几何摘要，尚不代表已提供整组裁图接口。分页模板分别注册在当前 grant，可直接沿用 upload/scan/recognize 操作；目录接口不会列出桌面本地考试或其他 grant 的资料。
+成功返回 `{documentId,examId,version,pages}`，每页含原模板摘要与 `schemaVersion:3,paper,side,pageIndex,widthMm,heightMm,pageCode,schoolMetadata,schoolGroups,svg`。`schoolMetadata` 为 `{examId,layoutDocumentId,version,pageNumber,side,templateId}`；`pageIndex` 零基，`pageNumber` 一基，`side` 为 `Front/Back`。`pageCode` 是纸面 Data Matrix 的 29 字符短码。`schoolGroups` 为当前页的 `[{groupId,title,questionNumbers,choiceColumns,rectangleMm:{x,y,width,height}}]`，矩形采用纸面毫米且占满栏宽，一组不拆跨栏或跨页。分页模板分别注册在当前 grant，可直接沿用 upload/scan/recognize 操作；目录接口不会列出桌面本地考试或其他 grant 的资料。
 
 学校定义限制：题目 1–500、最多 64 页、选择题选项 2–6、考号 1–20 位数字；A4 一栏、A3 两栏或三栏；圆框直径与矩形高度 `(0,2] mm`；矩形宽度为有限正值，无统一上限，但须通过栏宽、间距与信息区空间校验；新建填涂尺寸采用 0.1 mm 精度、每题主观区高度 `[10,230] mm`。题号必须唯一且为正整数。标题/考试 ID/版式 ID 最多 80 字符；每题正文最多 8000 字符；定义 UTF-8 最大 60000 字节，仍受完整 HTTP 请求 64 KiB 限制。无法放入一栏的题目会明确拒绝。
 
@@ -89,3 +89,25 @@ scan 纸张由关联页模板决定，NAPS2 请求 A4 210×297 或 A3 420×297 m
 学校模板文档的完整任务结果（包括所有页 SVG）沿用 1 MiB UTF-8 JSON 上限。服务端在注册任何页面模板之前检查该大小；超限返回 `TEMPLATE_DOCUMENT_TOO_LARGE`，当前授权不会遗留该次生成的页模板。最多 64 页是布局上限，不保证包含预览的结果能进入 1 MiB；较长文档需减少页数或正文后重新生成。
 
 学校扫描结果包含与上传一致的 `schoolMetadata/candidateId/identityStatus`，并保留 `dpi/pageSize/flatbed` 扫描信息；SDK 导出 `SchoolScanCaptureSummary` 表达完整返回类型。
+
+## 学校题组图与批阅
+
+- `GET /v1/captures/{captureId}/groups/{groupId}/image`：读取当前 grant 采集的校正题组 PNG，包含纯客观题组。
+- `GET /v1/subjective-reviews/{reviewId}/groups/{groupId}/image`：读取批阅所属采集的校正组图；同组成员共享该资源。
+- 均使用精确 Origin 与 Bearer，禁止 query 凭据或本地路径，授权撤销立即失效；其他 grant、未知组或错误页返回受控错误。PNG 上限 8 MiB，组裁切像素上限 16M，解码共享并发上限 2；独立单题资源的原限制不扩大。
+- 组几何与成员由采集保存的模板和定位映射重新推导，拒绝模板、页身份或映射篡改。逐题结果中的 `imageGroupId` 仅指向图像，不改变题目评分单位。
+- 学校批阅文档增加 `groups`，含 `groupId,title,questionIds,questionNumbers,maxScore,provisionalSubtotal,finalSubtotal,status,rectangleMm`。`status` 为 `provisional/final`；仅所有成员确认后才有最终组小计。评分提交、版本冲突与历史仍按题目记录。
+- 批阅文档与 JSON／CSV 导出保留 `candidateId/identityStatus`；无法确认采集身份时学校记录为 `RequireAssociation`，不会将小计升级为学生整卷最终成绩。
+
+## 离线学校模板流转
+
+| operation | parameters | result |
+| --- | --- | --- |
+| schoolTemplateExport | `{templateId}`，必须属于当前 grant 且为学校页 | 模板包 `{schemaVersion:1,definition,pages,hash}` |
+| schoolTemplateImport | `{bundle}` | 已登记的 `{documentId,examId,version,pages}` |
+
+模板包的 `pages` 是 `[{pageCode,metadata}]`，包含整份定义的页面身份；Core 重建定义和全部页面再核对映射及规范 SHA-256 摘要。未知／重复／缺失字段、null 成员、摘要篡改、短码冲突或同考试同版本定义冲突均拒绝；不会部分登记模板。成功导入只授予当前 grant 模板能力，不授予另一 grant 的采集或批阅资源。
+
+包不含标准答案、采集、批阅成绩或本地路径；若原模板含预印考号，该字段属于版式并保留。摘要只验证完整性，不证明来源可信或考生身份。考试页可用本地 JSON 文件导入／导出，文件上限 1 MiB；SDK 仍受完整 HTTP 任务请求 64 KiB 限额，不能发送任意 1 MiB 文件。大包使用本地文件流转，SDK 不截断或静默删字段。
+
+页面码为 `OM1` 加完整模板 SHA-256 前 16 字节的规范 Base32，共 29 字符。使用 ECC 200 正方形 Data Matrix，每格 0.5 mm、四周各一格留白；完整页身份从本地映射或当前授权模板读取。未知码要求导入对应资料，不能据短码猜测考试或学生；本轮不提供旧 QR 格式兼容。

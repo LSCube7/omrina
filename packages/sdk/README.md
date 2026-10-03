@@ -75,7 +75,7 @@ await client.revokeGrant();
 ## 任务方法
 
 - `uploadImage()` 提交 PNG/JPEG 原始字节，使用 `templateId` 与不含本地路径的 `fileName` 元数据。
-- `createTemplateTask()`、`createScanTask()`、`createRecognitionTask()`、`createScoreTask()`、`createReviewTask()`、`createExportTask()` 对应服务端固定 operation；不开放通用 URL 或任意请求头。
+- `createTemplateTask()`、`createSchoolTemplateExportTask()`、`createSchoolTemplateImportTask()`、`createScanTask()`、`createRecognitionTask()`、`createScoreTask()`、`createReviewTask()`、`createExportTask()` 对应服务端固定 operation；不开放通用 URL 或任意请求头。
 - 所有创建任务的方法都要求调用方提供 `idempotencyKey`。SDK 遇到网络错误时不会自动重发有副作用的请求。
 - `TaskSnapshot.result` 保持 `unknown`，因为它依 operation 变化；任务、错误、事件外层结构会逐字段校验。
 - `getTemplates()` 返回 `TemplateSummary[]`，包含可用于预览或保存的 `svg` 字符串；`getDevices()` 返回 `DeviceDescriptor[]`。
@@ -89,7 +89,9 @@ await client.revokeGrant();
 - `createSubjectiveReadTask()` 读取批阅文档及当前版本。
 - `createSubjectiveGradeTask()` 提交草稿、确认或重置；包含 `reviewId`、`expectedVersion`、`reviewer` 和 `edits`，整批成功或整批失败。
 - `createSubjectiveExportTask()` 导出 JSON 或 CSV。
-- `getSubjectiveQuestionImage(reviewId, questionId)` 返回 PNG 字节；只读取已保存的题目区域，不开放任意路径或裁剪参数。
+- `getSubjectiveQuestionImage(reviewId, questionId)`、`getSubjectiveReviewGroupImage(reviewId, groupId)` 与 `getSubjectiveCaptureGroupImage(captureId, groupId)` 返回 PNG 字节；题目成员共用所属题组的整组图像。接口只读取当前授权可访问的资源，不开放任意路径或裁剪参数。
+
+学校答题纸可通过 `createSchoolTemplateExportTask({parameters:{templateId}})` 导出 `SchoolTemplateBundle`，再用 `createSchoolTemplateImportTask({parameters:{bundle}})` 在另一授权中离线导入。资料包包含标准化考试定义、页面短码与完整页面身份；不包含采集图像、标准答案、评分、密钥或路径。若模板预印了考号，该字段属于版式定义并随包保留。资料包格式上限为 1 MiB，但当前任务 API 的完整 JSON 请求上限仍为 64 KiB；SDK 会在提交前拒绝过大的导入请求。服务端校验资料包哈希、短码映射并按授权隔离注册页面，不访问桌面考试目录。
 
 先保存草稿，再确认相同的分数和评语。修改已确认题目时，显式提交 `status: "draft"`；`status: "ungraded"` 重置评分。未全部确认时，最终主观题小计为 `null`。任务结果沿用 `TaskSnapshot.result` 的 `unknown` 边界，由宿主按具体操作核对。
 
@@ -188,7 +190,7 @@ const task = await client.createSchoolTemplateTask({
 
 成功任务返回 `SchoolTemplateDocument`：`{documentId,examId,version,pages}`。每页包含 `templateId/schemaVersion/paper/side/pageIndex/widthMm/heightMm/schoolMetadata/svg` 及原有模板摘要字段；`pageIndex` 从 0 开始，`schoolMetadata.pageNumber` 从 1 开始，正反面为 `Front/Back`。使用对应页的 `templateId` 上传或扫描；每页资源仍只属于生成它的授权。`TaskSnapshot.result` 保持 `unknown`，导出的类型用于调用方检查结果后使用。
 
-题组使用 `groups:[{id,title,questionNumbers}]`，每组只含一种题型，全部题号必须完整且只属于一个组。`Mixed` 保持组顺序，`Separated` 将客观组集中排在主观组前。省略／空 groups 会生成单题组；建议显式分组以取得紧凑布局。学校页结果含 `schoolGroups` 满栏几何和成员题号，本轮尚未提供整组裁切／批阅接口。
+题组使用 `groups:[{id,title,questionNumbers,choiceColumns?}]`，每组只含一种题型，全部题号必须完整且只属于一个组。`choiceColumns` 范围为 1–3，省略时 SDK 会写入 1；只有 AnswerOnly 模式下的客观选择题组可设置为 2 或 3，题目按组内顺序逐行排列。`Mixed` 保持组顺序，`Separated` 将客观组集中排在主观组前。省略／空 groups 会生成单题组；建议显式分组以取得紧凑布局。学校页结果含 `pageCode` 与 `schoolGroups` 几何、成员题号和 `choiceColumns`。
 
 定义必须包含 `examId/layoutDocumentId/questions`。未提供的字段采用 Core 默认值；A3 必须显式指定两栏或三栏。题号为唯一正整数；选择题有 2–6 个选项；题目 1–500 道，最多 64 页；圆框直径与矩形高度大于 0 且 ≤2 mm，矩形宽度为有限正值、不设统一数值上限；新建填涂尺寸使用 0.1 mm 精度，服务端还会校验实际栏宽与间距；主观题高度为 10–230 mm，仍须能放进所选栏。题目正文最多 8000 字符，定义序列化后最多 60000 UTF-8 字节，HTTP 总请求最多 64 KiB。SDK 与服务端拒绝未知字段、路径字段和重复题号；服务端也拒绝重复 JSON 属性。
 
@@ -200,6 +202,6 @@ const task = await client.createSchoolTemplateTask({
 
 离线学校真实 HTTP SDK 回归：先离线构建 SDK 和 `tests/m3-desktop`，再运行 `node tests/integration/school-sdk-e2e.mjs`。脚本启动临时 loopback 测试 host，使用合成纸验证生成、采集、考号、识别、非连续题号复核、错考试拒绝和授权隔离；不会扫描真实设备。测试 host 的批准入口仅在测试进程标准输入，生产 API 不增加自动批准。
 
-学校模板文档的完整任务结果（包括所有页 SVG）沿用 1 MiB UTF-8 JSON 上限。服务端在注册任何页面模板之前检查该大小；超限返回 `TEMPLATE_DOCUMENT_TOO_LARGE`，当前授权不会遗留该次生成的页模板。最多 64 页是布局上限，不保证包含预览的结果能进入 1 MiB；较长文档需减少页数或正文后重新生成。
+学校模板文档的完整任务结果（包括所有页 SVG）沿用 1 MiB UTF-8 JSON 上限。服务端在注册任何页面模板之前检查该大小；超限返回 `TEMPLATE_DOCUMENT_TOO_LARGE`，当前授权不会遗留该次生成或导入的页模板。最多 64 页是布局上限，不保证包含预览的结果能进入 1 MiB；较长文档需减少页数或正文后重新生成。
 
 学校扫描结果包含与上传一致的 `schoolMetadata/candidateId/identityStatus`，并保留 `dpi/pageSize/flatbed` 扫描信息；SDK 导出 `SchoolScanCaptureSummary` 表达完整返回类型。
